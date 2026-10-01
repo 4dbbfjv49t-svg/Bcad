@@ -783,7 +783,7 @@ struct Settings: Codable, Equatable {
         autoLink = (try? c.decode(Bool.self, forKey: .autoLink)) ?? true
         uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
         symmetric = (try? c.decode(Bool.self, forKey: .symmetric)) ?? false
-        off =Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
+        off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
     }
 
     // The print bed's longest side: no size or thread is made longer.

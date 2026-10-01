@@ -109,7 +109,7 @@ enum SelfTest {
         let twice = Node.round(of: .round(of: box, picks: [edge], radius: 2), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3)
         let t2 = mesh(twice)
         check("round all edges after a rounding", t2?.valid == true && manifold(t2!) && (t2?.volume ?? 8000) < (e?.volume ?? 0))
-        let skewed = Solid(name: "Skewed", color: 0, node: twice, place: Placement(move: SIMD3(-3, -5, 13), turn: SIMD3(0, 0, -60), scale: SIMD3(1.75, 1.3, 1.3)))
+        let skewed = Solid(name: "Skewed", color: Palette.colors[0], node: twice, place: Placement(move: SIMD3(-3, -5, 13), turn: SIMD3(0, 0, -60), scale: SIMD3(1.75, 1.3, 1.3)))
         check("world mesh of a scaled, rotated, rounded body", k.worldMesh(skewed)?.valid == true)
         _ = k.takeProblems()
         let tooBig = mesh(.round(of: box, picks: [edge], radius: 40))
