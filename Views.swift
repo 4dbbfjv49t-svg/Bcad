@@ -239,10 +239,32 @@ struct ShapeGroupButton: View {
     var body: some View {
         let k = lib.quick(group)
         HStack(spacing: 1) {
-            Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
-                .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
-                .help(L(k.primitive.name))
-                .accessibilityLabel(L(k.primitive.name))
+            Group {
+                switch group {
+                case .blocks:
+                    Button { lib.addShape(k) } label: { Image(systemName: k.primitive.symbol ?? "circle") }
+                        .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
+                        .help(L(k.primitive.name))
+                        .accessibilityLabel(L(k.primitive.name))
+                case .cylinders:
+                    Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
+                        .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
+                        .help(L(k.primitive.name))
+                        .accessibilityLabel(L(k.primitive.name))
+                case .cones:
+                    Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
+                        .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
+                        .contentShape(Rectangle())
+                        .help(L(k.primitive.name))
+                        .accessibilityLabel(L(k.primitive.name))
+                case .spheres:
+                    Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
+                        .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
+                        .accessibilityLabel(L(k.primitive.name))
+                case .rings:
+                    ToolButton(icon: k.primitive.symbol ?? "circle", title: L(k.primitive.name)) { lib.addShape(k) }
+                }
+            }
             Button { withAnimation(Neon.glide) { open = open == group ? nil : group } } label: {
                 Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black))
             }
