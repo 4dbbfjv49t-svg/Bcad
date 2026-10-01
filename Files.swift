@@ -83,12 +83,12 @@ enum Zip {
         var p = u32(e + 16)
         var out: [String: Data] = [:]
         for _ in 0..<u16(e + 10) {
-            guard u32(p) == 0x0201_4B50 else { throw FileError.corrupt }
+            guard u32(p) == 0x0201_4B50, p + 46 + u16(p + 28) <= b.count else { throw FileError.corrupt }
             let method = u16(p + 10), csize = u32(p + 20), usize = u32(p + 24)
             let nl = u16(p + 28), xl = u16(p + 30), cl = u16(p + 32), local = u32(p + 42)
             let name = String(decoding: b[(p + 46)..<(p + 46 + nl)], as: UTF8.self)
             p += 46 + nl + xl + cl
-            guard u32(local) == 0x0403_4B50 else { throw FileError.corrupt }
+            guard u32(local) == 0x0403_4B50, usize <= 1 << 30 else { throw FileError.corrupt }
             let start = local + 30 + u16(local + 26) + u16(local + 28)
             guard start + csize <= b.count else { throw FileError.corrupt }
             let raw = Data(b[start..<(start + csize)])
@@ -185,7 +185,48 @@ enum ThreeMF {
     static func read(_ url: URL) throws -> Document {
         let files = try Zip.read(try Data(contentsOf: url))
         guard let json = files[docPath] else { throw FileError.notBcad }
-        return try JSONDecoder().decode(Document.self, from: json)
+        guard let doc = try? JSONDecoder().decode(Document.self, from: json), doc.valid else { throw FileError.corrupt }
+        return doc
+    }
+}
+
+// MARK: - Checks on a read document (a damaged or hand-edited file must not reach the kernel or the views)
+
+extension SIMD3 where Scalar == Double {
+    var finite: Bool { x.isFinite && y.isFinite && z.isFinite }
+}
+
+extension Document {
+    var valid: Bool { bodies.allSatisfy { $0.node.valid && $0.place.valid } }
+}
+
+extension Placement {
+    var valid: Bool { move.finite && turn.finite && scale.finite }
+}
+
+extension Pick {
+    var valid: Bool { a.finite && b.finite }
+}
+
+extension Node {
+    var valid: Bool {
+        switch self {
+        case .primitive(let p):
+            let sided = p.kind == .prism || p.kind == .pyramid
+            return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy(\.isFinite) && (!sided || (3...24).contains(p.sides))
+        case .fastener(let f):
+            return (0..<Int(bk_thread_count())).contains(f.size) && f.length.isFinite
+        case .group(let op, let parts):
+            return (0...2).contains(op) && !parts.isEmpty && parts.allSatisfy { $0.node.valid && $0.place.valid }
+        case .split(let n, let plane, _):
+            return n.valid && plane.point.finite && plane.normal.finite
+        case .round(let n, let picks, let radius), .cove(let n, let picks, let radius):
+            return n.valid && radius.isFinite && picks.allSatisfy(\.valid)
+        case .bevel(let n, let picks, let legs, let corner):
+            return n.valid && legs.x.isFinite && legs.y.isFinite && corner.isFinite && picks.allSatisfy(\.valid)
+        case .hollow(let n, let open, let walls, let thickness):
+            return n.valid && thickness.isFinite && open.allSatisfy(\.valid) && walls.allSatisfy { $0.face.valid && $0.thickness.isFinite }
+        }
     }
 }
 

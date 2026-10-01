@@ -160,6 +160,52 @@ enum SelfTest {
         let step = dir.appendingPathComponent("test.step")
         let wrote = k.exportStep(doc.bodies, to: step.path)
         check("step", wrote && ((try? String(contentsOf: step, encoding: .utf8))?.hasPrefix("ISO-10303-21") ?? false))
+
+        // Sizes the kernel must refuse at once (they crashed or hung it), and results with nothing left in them.
+        let t1 = Date()
+        let refused = [Primitive(kind: .box, size: [.nan, 20, 20]), Primitive(kind: .oval, size: [20, 12, 90, 0]), Primitive(kind: .torus, size: [10, 30]),
+                       Primitive(kind: .cone, size: [0, 0, 20])].allSatisfy { mesh(.primitive($0)) == nil }
+        check("bad sizes refused", refused && Date().timeIntervalSince(t1) < 5)
+        _ = k.takeProblems()
+        let apart = Part(node: box, place: Placement(move: SIMD3(100, 0, 0)))
+        check("nothing left reported", mesh(.group(op: Int32(BK_SUBTRACT), parts: [base, base])) == nil && mesh(.group(op: Int32(BK_INTERSECT), parts: [base, apart])) == nil
+              && mesh(.split(of: box, plane: Plane(point: SIMD3(0, 0, 50), normal: SIMD3(0, 0, 1)), side: 0)) == nil && k.takeProblems().contains("empty"))
+        let broken = Part(node: .primitive(Primitive(kind: .box, size: [0, 20, 20])), place: Placement())
+        check("subtract with a broken part fails", mesh(.group(op: Int32(BK_SUBTRACT), parts: [broken, shifted])) == nil)
+        _ = k.takeProblems()
+
+        // Damaged files are refused, never crash.
+        var bad = [UInt8]((try? Data(contentsOf: u3)) ?? Data())
+        let eocd = bad.count - 22, cd = Int(bad[eocd + 16]) | Int(bad[eocd + 17]) << 8 | Int(bad[eocd + 18]) << 16 | Int(bad[eocd + 19]) << 24
+        bad[cd + 28] = 0xFF
+        bad[cd + 29] = 0xFF
+        let damaged = dir.appendingPathComponent("damaged.3mf")
+        try? Data(bad).write(to: damaged)
+        check("damaged 3mf refused", (try? ThreeMF.read(damaged)) == nil)
+        var odd = Document()
+        odd.bodies = [Solid(name: "Odd", color: 0, node: .primitive(Primitive(kind: .box, size: [20])))]
+        let oddURL = dir.appendingPathComponent("odd.3mf")
+        try? ThreeMF.write(oddURL, meshes: [], doc: odd)
+        check("3mf with wrong sizes refused", (try? ThreeMF.read(oddURL)) == nil)
+
+        // Opening and editing (last: the workbench builds on the kernel's thread from here on).
+        let lib = Workbench.shared
+        lib.open(u3)
+        check("open loads the file unchanged", lib.doc == doc && !lib.dirty)
+        lib.begin()
+        lib.undoLastIfUnchanged()
+        check("a click changes nothing", !lib.dirty)
+        if let id = lib.doc.bodies.first?.id { lib.setPlace(id) { $0.move.x += 5 } }
+        check("a move is a change", lib.dirty)
+        lib.undo()
+        check("undo back to the saved file", !lib.dirty)
+        if let id = lib.doc.bodies.first?.id {
+            lib.selection = [id]
+            lib.enter(.hollow)
+            lib.angleEdit = AngleEdit(body: id, picks: [], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(0, 0, 1)))
+        }
+        lib.open(u3)
+        check("open leaves the tools behind", lib.mode == .select && lib.angleEdit == nil && lib.editBody == nil && lib.selection.isEmpty)
         print(ok ? "ALL OK" : "FAILURES")
         return ok
     }

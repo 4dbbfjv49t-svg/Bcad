@@ -1238,27 +1238,6 @@
   "zh-Hans": "直径 B",
   "ja": "直径B"
  },
- "Discard changes?": {
-  "uk": "Відкинути зміни?",
-  "cs": "Zahodit změny?",
-  "de": "Änderungen verwerfen?",
-  "es": "¿Descartar cambios?",
-  "fr": "Abandonner les modifications ?",
-  "it": "Scartare le modifiche?",
-  "hu": "Elveti a módosításokat?",
-  "nl": "Wijzigingen weggooien?",
-  "nb": "Forkaste endringene?",
-  "pl": "Odrzucić zmiany?",
-  "ro": "Renunți la modificări?",
-  "fi": "Hylätäänkö muutokset?",
-  "sv": "Förkasta ändringar?",
-  "kk": "Өзгерістерден бас тартасыз ба?",
-  "ka": "გაუქმდეს ცვლილებები?",
-  "ar": "تجاهل التغييرات؟",
-  "hi": "बदलाव छोड़ दें?",
-  "zh-Hans": "要放弃更改吗？",
-  "ja": "変更を破棄しますか？"
- },
  "Don't Save": {
   "uk": "Не зберігати",
   "cs": "Neukládat",
@@ -2813,26 +2792,26 @@
   "zh-Hans": "新建、旋转和调整大小后的形状会落在打印平台上",
   "ja": "新規作成、回転、サイズ変更したシェイプはプリントベッドに置かれます"
  },
- "No": {
-  "uk": "Ні",
-  "cs": "Ne",
-  "de": "Nein",
-  "es": "No",
-  "fr": "Non",
-  "it": "No",
-  "hu": "Nem",
-  "nl": "Nee",
-  "nb": "Nei",
-  "pl": "Nie",
-  "ro": "Nu",
-  "fi": "Ei",
-  "sv": "Nej",
-  "kk": "Жоқ",
-  "ka": "არა",
-  "ar": "لا",
-  "hi": "नहीं",
-  "zh-Hans": "否",
-  "ja": "いいえ"
+ "Nothing is left of this shape": {
+  "uk": "Від цієї фігури нічого не лишилося",
+  "cs": "Z tohoto tvaru nic nezbylo",
+  "de": "Von dieser Form bleibt nichts übrig",
+  "es": "No queda nada de esta forma",
+  "fr": "Il ne reste rien de cette forme",
+  "it": "Di questa forma non resta nulla",
+  "hu": "Ebből az alakzatból semmi sem maradt",
+  "nl": "Van deze vorm blijft niets over",
+  "nb": "Det er ingenting igjen av denne formen",
+  "pl": "Z tego kształtu nic nie zostało",
+  "ro": "Din această formă nu a mai rămas nimic",
+  "fi": "Tästä muodosta ei jäänyt mitään",
+  "sv": "Inget finns kvar av den här formen",
+  "kk": "Бұл пішіннен ештеңе қалмады",
+  "ka": "ამ ფიგურისგან არაფერი დარჩა",
+  "ar": "لم يتبقَّ شيء من هذا الشكل",
+  "hi": "इस आकृति में से कुछ नहीं बचा",
+  "zh-Hans": "这个形状什么也没剩下",
+  "ja": "このシェイプには何も残りません"
  },
  "Nothing to export": {
   "uk": "Нічого експортувати",
@@ -3463,48 +3442,6 @@
   "hi": "प्रिंट बेड",
   "zh-Hans": "打印平台",
   "ja": "プリントベッド"
- },
- "Prism": {
-  "uk": "Призма",
-  "cs": "Hranol",
-  "de": "Prisma",
-  "es": "Prisma",
-  "fr": "Prisme",
-  "it": "Prisma",
-  "hu": "Hasáb",
-  "nl": "Prisma",
-  "nb": "Prisme",
-  "pl": "Graniastosłup",
-  "ro": "Prismă",
-  "fi": "Prisma",
-  "sv": "Prisma",
-  "kk": "Призма",
-  "ka": "პრიზმა",
-  "ar": "منشور",
-  "hi": "प्रिज़्म",
-  "zh-Hans": "棱柱",
-  "ja": "角柱"
- },
- "Pyramid": {
-  "uk": "Піраміда",
-  "cs": "Jehlan",
-  "de": "Pyramide",
-  "es": "Pirámide",
-  "fr": "Pyramide",
-  "it": "Piramide",
-  "hu": "Gúla",
-  "nl": "Piramide",
-  "nb": "Pyramide",
-  "pl": "Ostrosłup",
-  "ro": "Piramidă",
-  "fi": "Pyramidi",
-  "sv": "Pyramid",
-  "kk": "Пирамида",
-  "ka": "პირამიდა",
-  "ar": "هرم",
-  "hi": "पिरामिड",
-  "zh-Hans": "棱锥",
-  "ja": "角錐"
  },
  "Quit Bcad": {
   "uk": "Вийти з Bcad",
@@ -4997,6 +4934,27 @@
   "zh-Hans": "此面",
   "ja": "この面"
  },
+ "This file is damaged and can't be opened": {
+  "uk": "Цей файл пошкоджено, його не вдається відкрити",
+  "cs": "Tento soubor je poškozený a nelze ho otevřít",
+  "de": "Diese Datei ist beschädigt und kann nicht geöffnet werden",
+  "es": "Este archivo está dañado y no se puede abrir",
+  "fr": "Ce fichier est endommagé et ne peut pas être ouvert",
+  "it": "Questo file è danneggiato e non può essere aperto",
+  "hu": "Ez a fájl sérült, nem nyitható meg",
+  "nl": "Dit bestand is beschadigd en kan niet worden geopend",
+  "nb": "Denne filen er skadet og kan ikke åpnes",
+  "pl": "Ten plik jest uszkodzony i nie można go otworzyć",
+  "ro": "Acest fișier este deteriorat și nu poate fi deschis",
+  "fi": "Tiedosto on vioittunut, eikä sitä voi avata",
+  "sv": "Filen är skadad och kan inte öppnas",
+  "kk": "Бұл файл бүлінген, оны ашу мүмкін емес",
+  "ka": "ეს ფაილი დაზიანებულია და ვერ გაიხსნება",
+  "ar": "هذا الملف تالف ولا يمكن فتحه",
+  "hi": "यह फ़ाइल खराब है और खोली नहीं जा सकती",
+  "zh-Hans": "此文件已损坏，无法打开",
+  "ja": "このファイルは破損しているため開けません"
+ },
  "This shape isn't a closed solid": {
   "uk": "Ця фігура не є замкненим тілом",
   "cs": "Tento tvar není uzavřené těleso",
@@ -5501,27 +5459,6 @@
   "zh-Hans": "楔形",
   "ja": "くさび形"
  },
- "What you changed here will be lost.": {
-  "uk": "Зміни, внесені тут, буде втрачено.",
-  "cs": "Změny provedené zde budou ztraceny.",
-  "de": "Die Änderungen hier gehen verloren.",
-  "es": "Se perderán los cambios hechos aquí.",
-  "fr": "Vos modifications ici seront perdues.",
-  "it": "Le modifiche fatte qui andranno perse.",
-  "hu": "Az itt végzett módosítások elvesznek.",
-  "nl": "Wat je hier hebt gewijzigd, gaat verloren.",
-  "nb": "Det du har endret her, går tapt.",
-  "pl": "Wprowadzone tu zmiany zostaną utracone.",
-  "ro": "Modificările făcute aici se vor pierde.",
-  "fi": "Täällä tekemäsi muutokset menetetään.",
-  "sv": "Ändringarna du gjort här går förlorade.",
-  "kk": "Мұнда енгізген өзгерістеріңіз жоғалады.",
-  "ka": "აქ შეტანილი ცვლილებები დაიკარგება.",
-  "ar": "ستفقد التغييرات التي أجريتها هنا.",
-  "hi": "यहाँ किए गए बदलाव खो जाएँगे।",
-  "zh-Hans": "你在此处所做的更改将会丢失。",
-  "ja": "ここで行った変更は失われます。"
- },
  "Width": {
   "uk": "Ширина",
   "cs": "Šířka",
@@ -5563,27 +5500,6 @@
   "hi": "कोनों पर काम करें",
   "zh-Hans": "编辑边角",
   "ja": "角を編集"
- },
- "Yes": {
-  "uk": "Так",
-  "cs": "Ano",
-  "de": "Ja",
-  "es": "Sí",
-  "fr": "Oui",
-  "it": "Sì",
-  "hu": "Igen",
-  "nl": "Ja",
-  "nb": "Ja",
-  "pl": "Tak",
-  "ro": "Da",
-  "fi": "Kyllä",
-  "sv": "Ja",
-  "kk": "Иә",
-  "ka": "დიახ",
-  "ar": "نعم",
-  "hi": "हाँ",
-  "zh-Hans": "是",
-  "ja": "はい"
  },
  "Your changes are lost if you don't save them.": {
   "uk": "Якщо не зберегти, зміни буде втрачено.",
@@ -6292,94 +6208,6 @@
   },
   "ja": {
    "other": "{n}個のシェイプ"
-  }
- },
- "{n} shapes selected": {
-  "en": {
-   "one": "{n} shape selected",
-   "other": "{n} shapes selected"
-  },
-  "uk": {
-   "one": "Вибрано {n} фігуру",
-   "few": "Вибрано {n} фігури",
-   "many": "Вибрано {n} фігур"
-  },
-  "cs": {
-   "one": "{n} vybraný tvar",
-   "few": "{n} vybrané tvary",
-   "other": "{n} vybraných tvarů"
-  },
-  "de": {
-   "one": "{n} Form ausgewählt",
-   "other": "{n} Formen ausgewählt"
-  },
-  "es": {
-   "one": "{n} forma seleccionada",
-   "other": "{n} formas seleccionadas"
-  },
-  "fr": {
-   "one": "{n} forme sélectionnée",
-   "other": "{n} formes sélectionnées"
-  },
-  "it": {
-   "one": "{n} forma selezionata",
-   "other": "{n} forme selezionate"
-  },
-  "hu": {
-   "one": "{n} alakzat kijelölve",
-   "other": "{n} alakzat kijelölve"
-  },
-  "nl": {
-   "one": "{n} vorm geselecteerd",
-   "other": "{n} vormen geselecteerd"
-  },
-  "nb": {
-   "one": "{n} form valgt",
-   "other": "{n} former valgt"
-  },
-  "pl": {
-   "one": "{n} zaznaczony kształt",
-   "few": "{n} zaznaczone kształty",
-   "many": "{n} zaznaczonych kształtów"
-  },
-  "ro": {
-   "one": "{n} formă selectată",
-   "few": "{n} forme selectate",
-   "other": "{n} de forme selectate"
-  },
-  "fi": {
-   "one": "{n} muoto valittu",
-   "other": "{n} muotoa valittu"
-  },
-  "sv": {
-   "one": "{n} form markerad",
-   "other": "{n} former markerade"
-  },
-  "kk": {
-   "one": "{n} пішін таңдалды",
-   "other": "{n} пішін таңдалды"
-  },
-  "ka": {
-   "one": "მონიშნულია {n} ფიგურა",
-   "other": "მონიშნულია {n} ფიგურა"
-  },
-  "ar": {
-   "zero": "لا أشكال محددة",
-   "one": "شكل واحد محدد",
-   "two": "شكلان محددان",
-   "few": "{n} أشكال محددة",
-   "many": "{n} شكلًا محددًا",
-   "other": "{n} شكل محدد"
-  },
-  "hi": {
-   "one": "{n} आकृति चयनित",
-   "other": "{n} आकृतियाँ चयनित"
-  },
-  "zh-Hans": {
-   "other": "已选择 {n} 个形状"
-  },
-  "ja": {
-   "other": "{n}個のシェイプを選択中"
   }
  }
 }

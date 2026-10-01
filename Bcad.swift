@@ -66,8 +66,25 @@ struct Primitive: Codable, Equatable, Sendable {
     // Sizes given in degrees rather than millimetres (they never follow a resize).
     var degrees: Set<Int> { kind == .oval ? [2] : [] }
 
+    // What size i may be, given the others: walls fit inside, a tube inside its torus, one cone end stays wider than zero.
     func range(_ i: Int) -> ClosedRange<Double> {
-        degrees.contains(i) ? 5...175 : (mayBeZero.contains(i) ? 0 : 0.1)...10000
+        if degrees.contains(i) { return 5...175 }
+        var low = mayBeZero.contains(i) ? 0 : 0.1, high = 10000.0
+        switch (kind, i) {
+        case (.cone, 0), (.cone, 1): if size[1 - i] == 0 { low = 0.1 }
+        case (.torus, 0): low = max(low, size[1] * 1.06)
+        case (.torus, 1): high = size[0] / 1.06
+        case (.ring, 0): low = max(low, size[1] + 0.1)
+        case (.ring, 1): high = size[0] - 0.1
+        case (.bowl, 0): low = max(low, size[1] * 2 / 0.95)
+        case (.bowl, 1): high = size[0] / 2 * 0.95
+        case (.glass, 0): low = max(low, size[2] * 2 / 0.95)
+        case (.glass, 1): low = max(low, size[3] / 0.95)
+        case (.glass, 2): high = size[0] / 2 * 0.95
+        case (.glass, 3): high = size[1] * 0.95
+        default: break
+        }
+        return low...max(low, high)
     }
 
     // Sizes that may be zero (a pointed cone, a ring without a hole).
@@ -391,31 +408,45 @@ final class Kernel: @unchecked Sendable {
         let k = key(node)
         if let s = cache[k] { return s }
         guard let p = build(node) else { return nil }
+        // Nothing solid left (all of it cut away, shapes that don't overlap, a split beside the shape) is a failure too.
+        if bk_piece_count(p) == 0 {
+            bk_free(p)
+            problems.append("empty")
+            return nil
+        }
         if cache.count > 400 { cache.removeAll() }
         let ref = ShapeRef(p)
         cache[k] = ref
         return ref
     }
 
+    // A kernel result; when there is none, the kernel's reason is recorded.
+    private func made(_ p: OpaquePointer?) -> OpaquePointer? {
+        if p == nil { problems.append(String(cString: bk_last_error())) }
+        return p
+    }
+
     private func build(_ node: Node) -> OpaquePointer? {
         switch node {
         case .primitive(let p):
-            return p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) }
+            return made(p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) })
         case .fastener(let f):
-            return f.nut ? bk_nut(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance) : bk_bolt(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance)
+            return made(f.nut ? bk_nut(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance) : bk_bolt(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance))
         case .group(let op, let parts):
+            // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
             for part in parts {
-                guard let s = shape(part.node) else { continue }
                 let m = part.place.kernel
-                guard let placed = s.with({ sp in m.withUnsafeBufferPointer { bk_transform(sp, $0.baseAddress) } }) else { continue }
+                guard let s = shape(part.node), let placed = made(s.with({ sp in m.withUnsafeBufferPointer { bk_transform(sp, $0.baseAddress) } })) else {
+                    if let result { bk_free(result) }
+                    return nil
+                }
                 if let r = result {
-                    let next = bk_boolean(op, r, placed)
+                    let next = made(bk_boolean(op, r, placed))
                     bk_free(r)
                     bk_free(placed)
-                    if next == nil { problems.append(String(cString: bk_last_error())) }
+                    guard let next else { return nil }
                     result = next
-                    if result == nil { return nil }
                 } else {
                     result = placed
                 }
@@ -425,7 +456,7 @@ final class Kernel: @unchecked Sendable {
         case .split(let of, let plane, let side):
             guard let s = shape(of) else { return nil }
             let p = [plane.point.x, plane.point.y, plane.point.z], n = [plane.normal.x, plane.normal.y, plane.normal.z]
-            return s.with { bk_split($0, p, n, side) }
+            return made(s.with { bk_split($0, p, n, side) })
         case .round(let of, let picks, let radius):
             guard let s = shape(of) else { return nil }
             let (kinds, data) = Self.flat(picks)
@@ -510,6 +541,7 @@ final class Kernel: @unchecked Sendable {
 
     func exportStep(_ bodies: [Solid], to path: String) -> Bool {
         let shapes = bodies.compactMap { placed($0) }
+        guard shapes.count == bodies.count else { return false }
         return withExtendedLifetime(shapes) {
             let ptrs: [OpaquePointer?] = shapes.map { $0.with { $0 } }
             return ptrs.withUnsafeBufferPointer { bk_export_step($0.baseAddress, Int32(ptrs.count), path) } != 0
@@ -589,26 +621,12 @@ struct Store: Codable {
 }
 
 enum Paths {
-    static let dir = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/Bcad", isDirectory: true)
+    static let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Bcad", isDirectory: true)
     static let state = dir.appendingPathComponent("state.json")
 }
 
 enum Popup: Equatable {
     case thread
-}
-
-struct Confirmation: Equatable {
-    let title: String
-    let message: String
-    let action: String
-    let perform: () -> Void
-    static func == (a: Confirmation, b: Confirmation) -> Bool { a.title == b.title }
-}
-
-enum PopupStage {
-    case card, discard, confirm(Confirmation)
-    var isCard: Bool { if case .card = self { true } else { false } }
-    var isDiscard: Bool { if case .discard = self { true } else { false } }
 }
 
 enum Mode: Equatable { case select, round, split, hollow, angles }
@@ -824,7 +842,9 @@ final class Workbench: DesignHost {
     var settings = Settings()
     var doc = Document()
     var fileURL: URL?
-    var dirty = false
+    // The document as last opened or saved; it has changes while it differs from that.
+    private var saved = Document()
+    var dirty: Bool { doc != saved }
     var selection: [UUID] = []
     var meshes: [UUID: Mesh] = [:]
     var sceneVersion = 0
@@ -846,12 +866,9 @@ final class Workbench: DesignHost {
     var showSettings = false
     var drawerOpen = true
     var popup: Popup?
-    var popupStage: PopupStage = .card
-    var popupDirty = false
     var busy: String?
     var capturing: Action?
     var captureFail: Action?
-    var dragTag: String?
     var angleEdit: AngleEdit?
     var angleOpening = false
     // Which way the inspector last switched screens (+1 to the right), so the screens slide the right way.
@@ -967,24 +984,7 @@ final class Workbench: DesignHost {
     // MARK: popups & capture
 
     func show(_ p: Popup?) {
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) {
-            popup = p
-            popupStage = .card
-            popupDirty = false
-        }
-    }
-
-    func dismissPopup() {
-        switch popupStage {
-        case .card:
-            if popupDirty { withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .discard } } else { show(nil) }
-        case .discard: break
-        case .confirm: withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .card }
-        }
-    }
-
-    func resolveDiscard(_ discard: Bool) {
-        if discard { show(nil) } else { withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .card } }
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { popup = p }
     }
 
     func beginCapture(_ a: Action) { withAnimation(Neon.spring) { capturing = a; captureFail = nil } }
@@ -1054,7 +1054,6 @@ final class Workbench: DesignHost {
         undoStack.append(doc)
         if undoStack.count > 200 { undoStack.removeFirst() }
         redoStack.removeAll()
-        dirty = true
     }
 
     func commit(_ change: (inout Document) -> Void) {
@@ -1083,7 +1082,6 @@ final class Workbench: DesignHost {
     func mutate(_ id: UUID, _ change: (inout Solid) -> Void) {
         guard let i = doc.bodies.firstIndex(where: { $0.id == id }) else { return }
         change(&doc.bodies[i])
-        dirty = true
     }
 
     private func nextColor() -> Int { doc.bodies.count % Palette.colors.count }
@@ -1099,11 +1097,6 @@ final class Workbench: DesignHost {
         commit { $0.bodies.append(body) }
         selection = [body.id]
         dropSoon([body.id])
-    }
-
-    func addPrimitive(_ kind: PrimKind, sides: Int = 0) {
-        let p = Primitive.make(kind, sides: sides)
-        add(.primitive(p), name: L(p.name))
     }
 
     func addShape(_ k: ShapeKind) {
@@ -1655,6 +1648,8 @@ final class Workbench: DesignHost {
             flash(L("These edges can't be rounded inward"))
         } else if problems.contains("bevel") {
             flash(L("This bevel doesn't fit these edges — try smaller sizes"))
+        } else if problems.contains("empty") {
+            flash(L("Nothing is left of this shape"))
         } else if problems.contains("pieces") {
             flash(L("These shapes don't touch, so the merge stays in separate pieces"))
         } else if problems.contains("hollow") {
@@ -1676,7 +1671,7 @@ final class Workbench: DesignHost {
         let mods = e.modifierFlags.intersection([.command, .control, .option])
         if !mods.isEmpty { return false }
         if popup != nil {
-            if e.keyCode == 53 { dismissPopup(); return true }
+            if e.keyCode == 53 { show(nil); return true }
             return false
         }
         let shift = e.modifierFlags.contains(.shift)
@@ -1744,7 +1739,7 @@ final class Workbench: DesignHost {
     var title: String { fileURL?.deletingPathExtension().lastPathComponent ?? L("Untitled") }
 
     func confirmDiscard() -> Bool {
-        guard dirty, !doc.bodies.isEmpty else { return true }
+        guard dirty else { return true }
         let a = NSAlert()
         a.messageText = L("Save changes to “{name}”?", ["name": title])
         a.informativeText = L("Your changes are lost if you don't save them.")
@@ -1760,14 +1755,32 @@ final class Workbench: DesignHost {
 
     func newDocument() {
         guard confirmDiscard() else { return }
+        resetEditing()
         doc = Document()
+        saved = doc
         fileURL = nil
-        dirty = false
+        rebuildScene()
+    }
+
+    // Leaves every tool, editor and pending step of the current document behind, before another one comes in.
+    private func resetEditing() {
+        flight?.cancel()
+        angleEdit = nil
+        angleOpening = false
+        cameraBeforeAngles = nil
+        mode = .select
+        editBody = nil
+        edgePicks = []
+        hollowOpen = []
+        hollowWalls = []
+        focusWall = nil
+        hover = Hover()
+        selection = []
+        dropQueue = []
+        popup = nil
+        capturing = nil
         undoStack = []
         redoStack = []
-        selection = []
-        cancelMode()
-        rebuildScene()
     }
 
     func openDocument() {
@@ -1780,16 +1793,17 @@ final class Workbench: DesignHost {
 
     func open(_ url: URL) {
         do {
-            doc = try ThreeMF.read(url)
+            let d = try ThreeMF.read(url)
+            resetEditing()
+            doc = d
+            saved = d
             fileURL = url
-            dirty = false
-            undoStack = []
-            redoStack = []
-            selection = []
             requestFit = true
             rebuildScene()
-        } catch {
+        } catch FileError.notBcad {
             flash(L("This 3MF wasn't made by Bcad and can't be edited"))
+        } catch {
+            flash(L("This file is damaged and can't be opened"))
         }
     }
 
@@ -1814,7 +1828,7 @@ final class Workbench: DesignHost {
         withAnimation(Neon.spring) { busy = nil }
         if ok {
             fileURL = url
-            dirty = false
+            saved = doc
             flash(L("Saved {name}", ["name": url.lastPathComponent]))
         } else {
             flash(L("Couldn't save the file"))
@@ -1833,6 +1847,7 @@ final class Workbench: DesignHost {
         let ok: Bool = Kernel.shared.queue.sync {
             if step { return Kernel.shared.exportStep(bodies, to: url.path) }
             let meshes = bodies.compactMap { Kernel.shared.worldMesh($0) }
+            guard meshes.count == bodies.count else { return false }
             return (try? STL.write(url, meshes: meshes)) != nil
         }
         withAnimation(Neon.spring) { busy = nil }
@@ -1909,7 +1924,6 @@ struct BcadApp: App {
             }
             CommandMenu(L("Shape")) {
                 Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u")
-                Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("g")
                 Button(L("Subtract")) { lib.combine(Int32(BK_SUBTRACT)) }.keyboardShortcut(.delete, modifiers: .command)
                 Button(L("Intersect")) { lib.combine(Int32(BK_INTERSECT)) }.keyboardShortcut("i")
                 Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift])

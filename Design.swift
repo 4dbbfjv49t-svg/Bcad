@@ -1843,14 +1843,6 @@ struct PopupHost: View {
     @State private var roomH: CGFloat = 800
     @State private var contentH: CGFloat = 0
 
-    private var stageKey: Int {
-        switch lib.popupStage {
-        case .card: 0
-        case .discard: 1
-        case .confirm: 2
-        }
-    }
-
     var body: some View {
         let look = Skin.shared
         ZStack {
@@ -1858,46 +1850,24 @@ struct PopupHost: View {
                 Color.black.opacity(look.dark ? 0.4 : 0.18)
                     .background(.ultraThinMaterial.opacity(0.5))
                     .ignoresSafeArea()
-                    .onTapGesture { lib.dismissPopup() }
+                    .onTapGesture { lib.show(nil) }
                     .transition(.opacity)
                 ZStack(alignment: .topTrailing) {
-                    VStack(spacing: 0) {
-                        FitHeight(limit: lib.popupStage.isCard ? max(160, roomH - 100) : 0) {
-                            ScrollView {
-                                card(p)
-                                    .id(String(describing: p))
-                                    .frame(maxWidth: .infinity)
-                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentH = $0 }
-                            }
-                            .contentMargins(.horizontal, 26, for: .scrollContent)
-                            .scrollIndicators(.never)
-                            .scrollBounceBehavior(.basedOnSize)
-                            .scrollClipDisabled(contentH <= roomH - 100)
+                    FitHeight(limit: max(160, roomH - 100)) {
+                        ScrollView {
+                            card(p)
+                                .id(String(describing: p))
+                                .frame(maxWidth: .infinity)
+                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentH = $0 }
                         }
-                        .opacity(lib.popupStage.isCard ? 1 : 0)
-                        .allowsHitTesting(lib.popupStage.isCard)
-                        .accessibilityHidden(!lib.popupStage.isCard)
-                        .mask(alignment: .top) {
-                            Rectangle().padding(.horizontal, -80).padding(.top, -80).padding(.bottom, lib.popupStage.isCard ? -80 : 0)
-                        }
-                        Group {
-                            switch lib.popupStage {
-                            case .card:
-                                EmptyView()
-                            case .discard:
-                                DiscardPane().transition(.scale(scale: 0.9).combined(with: .haze))
-                            case .confirm(let c):
-                                ConfirmPane(confirmation: c).transition(.scale(scale: 0.9).combined(with: .haze))
-                            }
-                        }
-                        .padding(.horizontal, 26)
+                        .contentMargins(.horizontal, 26, for: .scrollContent)
+                        .scrollIndicators(.never)
+                        .scrollBounceBehavior(.basedOnSize)
+                        .scrollClipDisabled(contentH <= roomH - 100)
                     }
                     .padding(.vertical, 26)
-                    if !lib.popupStage.isDiscard {
-                        CloseX { lib.dismissPopup() }
-                            .padding(12)
-                            .transition(.scale.combined(with: .haze))
-                    }
+                    CloseX { lib.show(nil) }
+                        .padding(12)
                 }
                 .frame(width: width(p))
                 .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.void.opacity(0.65)))
@@ -1908,7 +1878,6 @@ struct PopupHost: View {
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomH = $0 }
-        .animation(Neon.calm ? Neon.quick : .spring(response: 0.42, dampingFraction: 0.82), value: stageKey)
     }
 
     private func width(_ p: Popup) -> CGFloat {
@@ -1922,48 +1891,6 @@ struct PopupHost: View {
         switch p {
         case .thread:
             ThreadCard()
-        }
-    }
-}
-
-struct DiscardPane: View {
-    @Environment(Workbench.self) private var lib
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.ui(size: 26, weight: .semibold))
-                .foregroundStyle(Neon.amber)
-                .halo(Neon.amber, 14)
-            CardTitle(text: L("Discard changes?"))
-            Text(L("What you changed here will be lost."))
-                .font(.ui(size: 13, design: .rounded))
-                .foregroundStyle(Ink.text.opacity(0.55))
-            HStack(spacing: 10) {
-                Button(L("Yes")) { lib.resolveDiscard(true) }.buttonStyle(PillStyle(tint: Neon.green))
-                Button(L("No")) { lib.resolveDiscard(false) }.buttonStyle(PillStyle(tint: Neon.red))
-            }
-        }
-    }
-}
-
-struct ConfirmPane: View {
-    @Environment(Workbench.self) private var lib
-    let confirmation: Confirmation
-    var body: some View {
-        VStack(spacing: 16) {
-            CardTitle(text: confirmation.title)
-            Text(confirmation.message)
-                .font(.ui(size: 13, design: .rounded))
-                .foregroundStyle(Ink.text.opacity(0.55))
-                .multilineTextAlignment(.center)
-            HStack(spacing: 10) {
-                Button(L("No")) { lib.dismissPopup() }.buttonStyle(PillStyle(tint: Ink.text))
-                Button(confirmation.action) {
-                    confirmation.perform()
-                    lib.show(nil)
-                }
-                .buttonStyle(PillStyle(tint: Neon.red))
-            }
         }
     }
 }

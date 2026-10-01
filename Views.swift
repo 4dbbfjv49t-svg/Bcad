@@ -1130,7 +1130,7 @@ struct PrimitiveSizes: View {
                             guard case .primitive(var p) = n else { return n }
                             if lib.settings.uniform, !p.degrees.contains(i), p.size[i] > 0 {
                                 let k = v / p.size[i]
-                                p.size = p.size.enumerated().map { j, x in p.degrees.contains(j) ? x : max(0.01, (x * k * 100).rounded() / 100) }
+                                p.size = p.size.enumerated().map { j, x in p.degrees.contains(j) || x == 0 ? x : max(0.01, (x * k * 100).rounded() / 100) }
                             }
                             p.size[i] = v
                             return .primitive(p)
@@ -1387,7 +1387,7 @@ struct SettingsPane: View {
 
     private var fixed: [(String, String)] {
         [(L("New · Open · Save"), "⌘N  ⌘O  ⌘S"), (L("Export STL · STEP"), "⇧⌘E  ⌥⌘E"), (L("Undo · Redo"), "⌘Z  ⇧⌘Z"),
-         (L("Duplicate · Delete"), "⌘D  ⌫"), (L("Select all"), "⌘A"), (L("Merge"), "⌘U  ⌘G"), (L("Subtract · Intersect"), "⌘⌫  ⌘I"),
+         (L("Duplicate · Delete"), "⌘D  ⌫"), (L("Select all"), "⌘A"), (L("Merge"), "⌘U"), (L("Subtract · Intersect"), "⌘⌫  ⌘I"),
          (L("Ungroup"), "⇧⌘G"), (L("Add thread"), "⌘B"), (L("Nudge"), "← → ↑ ↓  PgUp PgDn"), (L("Nudge ×10"), "⇧ + ←→↑↓"),
          (L("Views: iso, front, back, left, right, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("Round all edges"), "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
          (L("Apply · Cancel"), "Enter  Esc"), (L("Add to selection"), "⇧/⌘ click"), (L("Orbit"), L("drag empty space")),

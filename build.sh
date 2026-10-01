@@ -13,28 +13,21 @@ if [[ "$TARGET" != *.app ]]; then
   echo "✗ Target must end with .app"
   exit 1
 fi
-HOLD="$(dirname "$TARGET")/.bcad-library-hold"
-if [[ -e "$HOLD" && -d "$TARGET/Contents/Library" ]]; then
-  echo "✗ $HOLD exists from an interrupted build and the app also has a library. Resolve by hand."
+SDKV="$(xcrun --sdk macosx --show-sdk-version)"
+if (( ${SDKV%%.*} < 26 )); then
+  echo "✗ Needs the macOS 26 SDK or newer (Xcode 26 or its Command Line Tools); found $SDKV"
   exit 1
 fi
 
 ./occt.sh
 OCCT="$PWD/Vendor/occt"
-SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bcad.XXXXXX")"
-restore() {
-  if [[ -d "$HOLD" && ! -e "$TARGET/Contents/Library" ]]; then
-    mkdir -p "$TARGET/Contents"
-    mv "$HOLD" "$TARGET/Contents/Library"
-  fi
-  rm -rf "$WORK"
-}
-trap restore EXIT
+trap 'rm -rf "$WORK"' EXIT
 
 echo "▸ Compiling the geometry kernel"
-clang++ -O2 -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -w -I "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$WORK/BcadKernel.o"
+clang++ -O2 -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -isystem "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$WORK/BcadKernel.o"
 
 LIBS=()
 for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
@@ -115,12 +108,13 @@ for f in "$WORK"/lproj/*.lproj/InfoPlist.strings; do plutil -lint "$f" >/dev/nul
 
 echo "▸ Updating $TARGET"
 if pgrep -xq Bcad; then
-  pkill -TERM -x Bcad || true
-  for i in {1..60}; do pgrep -xq Bcad || break; sleep 0.2; done
-  pkill -KILL -x Bcad 2>/dev/null || true
-fi
-if [[ -d "$TARGET/Contents/Library" ]]; then
-  mv "$TARGET/Contents/Library" "$HOLD"
+  # A normal quit, so Bcad asks about unsaved changes; choosing Cancel there stops the build.
+  osascript -e 'tell application id "local.bohdan.bcad" to quit' >/dev/null 2>&1 || true
+  for i in {1..20}; do pgrep -xq Bcad || break; sleep 0.5; done
+  if pgrep -xq Bcad; then
+    echo "✗ Bcad is still open. Quit it and build again."
+    exit 1
+  fi
 fi
 rm -rf "$TARGET"
 mkdir -p "$TARGET/Contents/MacOS" "$TARGET/Contents/Resources"
@@ -129,8 +123,6 @@ cp "$WORK/Info.plist" "$TARGET/Contents/Info.plist"
 cp "$WORK/AppIcon.icns" "$TARGET/Contents/Resources/AppIcon.icns"
 cp i18n.json "$TARGET/Contents/Resources/i18n.json"
 cp -R "$WORK"/lproj/*.lproj "$TARGET/Contents/Resources/"
-codesign --force -s - "$TARGET" 2>/dev/null
-restore
-trap - EXIT
+codesign --force -s - "$TARGET"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" 2>/dev/null || true
 echo "✓ $TARGET"

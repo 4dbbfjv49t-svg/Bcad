@@ -113,6 +113,17 @@ template <typename F> static BKShape *guarded(const char *what, F f) {
 
 const char *bk_last_error(void) { return lastError.c_str(); }
 
+// Input OpenCascade can't take is refused up front: it crashes on some degenerate sizes and never returns on NaN or infinity.
+static void need(bool ok, const char *what) {
+  if (!ok) throw Standard_Failure(what);
+}
+
+static bool finite(const double *v, int n) {
+  for (int i = 0; i < n; i++)
+    if (!std::isfinite(v[i])) return false;
+  return true;
+}
+
 // MARK: - helpers
 
 static TopoDS_Shape centred(const TopoDS_Shape &s) {
@@ -202,6 +213,14 @@ static TopoDS_Shape common(const TopoDS_Shape &a, const TopoDS_Shape &b) {
 
 BKShape *bk_primitive(int kind, const double *p) {
   return guarded("shape", [&]() -> TopoDS_Shape {
+    // How many numbers each kind takes, and which must be above zero (a cone end and a ring's hole may be 0).
+    static const int counts[] = {3, 2, 3, 1, 3, 2, 3, 3, 1, 2, 3, 4, 4};
+    static const std::vector<int> above[] = {{0, 1, 2}, {0, 1}, {2}, {0}, {1, 2}, {0, 1}, {0, 1, 2}, {1, 2}, {0}, {0, 1}, {0, 2}, {0, 1, 2, 3}, {0, 1, 3}};
+    need(kind >= BK_BOX && kind <= BK_OVAL, "unknown shape");
+    need(finite(p, counts[kind]), "sizes must be numbers");
+    for (int i = 0; i < counts[kind]; i++) need(p[i] >= 0, "sizes can't be below zero");
+    for (int i : above[kind]) need(p[i] >= 0.001, "sizes must be above zero");
+    need(kind != BK_CONE || std::max(p[0], p[1]) >= 0.001, "a cone needs one end wider than zero");
     switch (kind) {
     case BK_BOX:
       return centred(BRepPrimAPI_MakeBox(p[0], p[1], p[2]).Shape());
@@ -218,7 +237,7 @@ BKShape *bk_primitive(int kind, const double *p) {
       return centred(prism(std::max(3, (int)lround(p[0])), p[1] / 2, 0, p[2]));
     case BK_TORUS: {
       double tube = p[1] / 2, ring = p[0] / 2 - tube;
-      if (ring <= tube * 0.05) ring = tube * 1.05;
+      need(ring > tube * 0.05, "the tube is too thick for this torus");
       return BRepPrimAPI_MakeTorus(ring, tube).Shape();
     }
     case BK_WEDGE:
@@ -375,6 +394,7 @@ static TopoDS_Shape hexBlank(double s, double h, bool bottom, bool top) {
 
 BKShape *bk_bolt(int size, double length, int threadOnly, double clearance) {
   return guarded("bolt", [&]() -> TopoDS_Shape {
+    need(std::isfinite(length) && std::isfinite(clearance), "sizes must be numbers");
     const ThreadSize &t = sizes[std::max(0, std::min(sizeCount - 1, size))];
     double len = std::max(length, t.p * 2), d = t.d - std::max(0.0, clearance);
     if (threadOnly) return centred(threadRod(d, t.p, len, true));
@@ -388,6 +408,7 @@ BKShape *bk_bolt(int size, double length, int threadOnly, double clearance) {
 
 BKShape *bk_nut(int size, double length, int threadOnly, double clearance) {
   return guarded("nut", [&]() -> TopoDS_Shape {
+    need(std::isfinite(length) && std::isfinite(clearance), "sizes must be numbers");
     const ThreadSize &t = sizes[std::max(0, std::min(sizeCount - 1, size))];
     double len = std::max(length, t.p * 2), d = t.d + std::max(0.0, clearance);
     TopoDS_Shape body = threadOnly ? BRepPrimAPI_MakeCylinder(d / 2 + 1.6, len).Shape() : hexBlank(t.s, len, true, true);
@@ -404,7 +425,9 @@ BKShape *bk_nut(int size, double length, int threadOnly, double clearance) {
 BKShape *bk_transform(const BKShape *s, const double *m) {
   if (!s) return nullptr;
   return guarded("transform", [&]() -> TopoDS_Shape {
+    need(finite(m, 12), "placement must be numbers");
     gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
+    need(fabs(c0.Dot(c1.Crossed(c2))) > 1e-12, "placement flattens the shape");
     double l0 = c0.Magnitude(), l1 = c1.Magnitude(), l2 = c2.Magnitude();
     bool uniform = fabs(l0 - l1) < 1e-9 * l0 + 1e-12 && fabs(l0 - l2) < 1e-9 * l0 + 1e-12 && fabs(c0.Dot(c1)) < 1e-9 &&
                    fabs(c0.Dot(c2)) < 1e-9 && fabs(c1.Dot(c2)) < 1e-9;
@@ -434,6 +457,7 @@ BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b) {
 BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) {
   if (!s) return nullptr;
   return guarded("split", [&]() -> TopoDS_Shape {
+    need(finite(p, 3) && finite(n, 3), "plane must be numbers");
     gp_Pnt o(p[0], p[1], p[2]);
     gp_Dir dir(n[0], n[1], n[2]);
     TopoDS_Face plane = BRepBuilderAPI_MakeFace(gp_Pln(o, dir)).Face();
@@ -622,6 +646,7 @@ BKShape *bk_fillet(const BKShape *s, const int *kinds, const double *picks, int 
   if (missing) *missing = 0;
   if (!s) return nullptr;
   try {
+    need(std::isfinite(radius) && finite(picks, count * 6), "rounding must be numbers");
     TopTools_IndexedMapOfShape edges;
     resolvePicks(s->shape, kinds, picks, count, edges, &miss);
     if (missing) *missing = miss;
@@ -784,6 +809,7 @@ BKShape *bk_chamfer(const BKShape *s, const int *kinds, const double *picks, int
   if (missing) *missing = 0;
   if (!s) return nullptr;
   return guarded("bevel", [&]() -> TopoDS_Shape {
+    need(std::isfinite(legA) && std::isfinite(legB) && std::isfinite(cornerRadius) && finite(picks, count * 6), "bevel must be numbers");
     TopTools_IndexedMapOfShape edges;
     int miss = 0;
     resolvePicks(s->shape, kinds, picks, count, edges, &miss);
@@ -866,6 +892,7 @@ BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int co
   if (missing) *missing = 0;
   if (!s) return nullptr;
   try {
+    need(std::isfinite(radius) && finite(picks, count * 6), "rounding must be numbers");
     TopTools_IndexedMapOfShape edges;
     int miss = 0;
     resolvePicks(s->shape, kinds, picks, count, edges, &miss);
@@ -901,6 +928,7 @@ BKSection *bk_section(const BKShape *s, int kind, const double *pick, double rad
     const TopoDS_Shape &shape = s->shape;
     const double none[6] = {0, 0, 0, 0, 0, 0};
     const double *q = pick ? pick : none;
+    need(std::isfinite(radius) && finite(q, 6), "pick must be numbers");
     TopTools_IndexedMapOfShape edges;
     int miss = 0;
     resolvePicks(shape, &kind, q, 1, edges, &miss);
@@ -957,7 +985,7 @@ BKSection *bk_section(const BKShape *s, int kind, const double *pick, double rad
         double area = 0;
         for (size_t i = 0, n = loop.size(); i < n; i++) area += loop[i].X() * loop[(i + 1) % n].Y() - loop[(i + 1) % n].X() * loop[i].Y();
         if ((area > 0) != wx.Current().IsSame(outer)) std::reverse(loop.begin(), loop.end());
-        for (const gp_Pnt2d &q : loop) points.insert(points.end(), {q.X(), q.Y()});
+        for (const gp_Pnt2d &pt : loop) points.insert(points.end(), {pt.X(), pt.Y()});
         starts.push_back((int)(points.size() / 2));
       }
     }
@@ -1004,6 +1032,8 @@ BKShape *bk_hollow(const BKShape *s, const double *open, int openCount, const do
   if (missing) *missing = 0;
   if (!s) return nullptr;
   return guarded("hollow", [&]() -> TopoDS_Shape {
+    need(std::isfinite(thickness) && finite(open, openCount * 6) && finite(walls, wallCount * 6) && finite(wallThickness, wallCount),
+         "walls must be numbers");
     const TopoDS_Shape &shape = s->shape;
     TopTools_IndexedMapOfShape faces;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
@@ -1068,6 +1098,7 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
   BKMesh *m = new BKMesh();
   try {
     const TopoDS_Shape &shape = s->shape;
+    deflection = std::isfinite(deflection) ? std::max(deflection, 0.001) : 0.05;
     BRepMesh_IncrementalMesh(shape, deflection, false, 0.35, true);
     TopTools_IndexedMapOfShape faces, edges, vertices;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);

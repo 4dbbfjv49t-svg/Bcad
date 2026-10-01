@@ -4,6 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 VENDOR="$PWD/Vendor"
+mkdir -p "$VENDOR"
 CMAKE_VERSION="4.4.3"
 OCCT_TAG="V7_9_3"
 OUT="$VENDOR/occt"
@@ -32,7 +33,7 @@ if [[ ! -f "$SRC/CMakeLists.txt" ]]; then
   tar -xzf "$VENDOR/occt-$OCCT_TAG.tar.gz" -C "$SRC" --strip-components 1
 fi
 
-SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
 BUILD="$VENDOR/occt-build"
 echo "▸ Building OpenCascade $OCCT_TAG (static; first time only)"
 "$CMAKE" -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRARY_TYPE=Static \

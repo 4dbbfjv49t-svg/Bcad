@@ -192,7 +192,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     nonisolated func draw(in view: MTKView) {
         MainActor.assumeIsolated {
             withObservationTracking { render(view) } onChange: { [weak view] in
-                DispatchQueue.main.async { view?.needsDisplay = true }
+                DispatchQueue.main.async { MainActor.assumeIsolated { (view as? CadView)?.redraw() } }
             }
         }
     }
@@ -253,9 +253,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     private func render(_ view: MTKView) {
+        // Read before anything can bail out, so a frame without a drawable still waits for the next change.
+        _ = lib.sceneVersion
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let cmd = queue.makeCommandBuffer(), let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
-        _ = lib.sceneVersion
         if lib.requestFit, fit() { lib.requestFit = false }
         var f = frame(view.bounds.size)
         enc.setVertexBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
@@ -655,6 +656,7 @@ final class CadView: MTKView {
     private var tracking: NSTrackingArea?
     private var startBox: Box?
     private var others: [Box] = []
+    private var frameAsked = false
     var guides: [(SIMD3<Double>, SIMD3<Double>)] = []
 
     init() {
@@ -669,18 +671,37 @@ final class CadView: MTKView {
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         layer?.isOpaque = false
         isPaused = true
-        enableSetNeedsDisplay = true
+        enableSetNeedsDisplay = false
+    }
+
+    // Draws once on the next turn of the main loop, however often it's asked. Frames are drawn here rather than left to
+    // MetalKit's own scheduling, which stops for good when the app is launched by opening a file.
+    func redraw() {
+        guard !frameAsked else { return }
+        frameAsked = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                frameAsked = false
+                draw()
+            }
+        }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         layer?.isOpaque = false
-        needsDisplay = true
+        redraw()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        needsDisplay = true
+        redraw()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        redraw()
     }
 
     required init(coder: NSCoder) { fatalError() }
@@ -941,7 +962,7 @@ final class CadView: MTKView {
         if hypot(p.x - downAt.x, p.y - downAt.y) > 3 { moved = true }
         last = p
         let free = e.modifierFlags.contains(.command)
-        defer { needsDisplay = true }
+        defer { redraw() }
         switch drag {
         case .none: break
         case .orbit: orbit(dx, dy)
@@ -1051,7 +1072,7 @@ final class CadView: MTKView {
         dragAxis = nil
         splitHandle = nil
         guides = []
-        needsDisplay = true
+        redraw()
     }
 
     override func rightMouseDown(with e: NSEvent) { last = convert(e.locationInWindow, from: nil) }
@@ -1059,14 +1080,14 @@ final class CadView: MTKView {
         let p = convert(e.locationInWindow, from: nil)
         orbit(p.x - last.x, p.y - last.y)
         last = p
-        needsDisplay = true
+        redraw()
     }
     override func otherMouseDown(with e: NSEvent) { last = convert(e.locationInWindow, from: nil) }
     override func otherMouseDragged(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         pan(p.x - last.x, p.y - last.y)
         last = p
-        needsDisplay = true
+        redraw()
     }
 
     override func scrollWheel(with e: NSEvent) {
@@ -1076,17 +1097,17 @@ final class CadView: MTKView {
             let d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY * 0.01 : e.scrollingDeltaY * 0.1
             zoom(Float(d), at: convert(e.locationInWindow, from: nil))
         }
-        needsDisplay = true
+        redraw()
     }
 
     override func magnify(with e: NSEvent) {
         zoom(Float(e.magnification) * 1.5, at: convert(e.locationInWindow, from: nil))
-        needsDisplay = true
+        redraw()
     }
 
     override func rotate(with e: NSEvent) {
         lib.camera.yaw -= Float(e.rotation) * .pi / 180
-        needsDisplay = true
+        redraw()
     }
 
     private func orbit(_ dx: CGFloat, _ dy: CGFloat) {
