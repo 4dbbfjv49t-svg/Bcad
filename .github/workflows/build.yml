@@ -57,13 +57,6 @@ jobs:
           ./test/selftest.sh 2>&1 | tee "$RUNNER_TEMP/results/selftest.log"
           echo "self-test took $(( $(date +%s) - start )) s"
 
-      - name: Click probe
-        run: |
-          # TEMPORARY: which part of the quick shape button loses a click; stops the job here.
-          defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
-          APP_STRINGS="$PWD/i18n.json" "$TMPDIR/bcad-selftest/BcadTest" --clickprobe 2>&1 | tee "$RUNNER_TEMP/results/probe.log"
-          exit 1
-
       - name: Build app
         run: |
           start=$(date +%s)
@@ -245,13 +238,15 @@ jobs:
           sleep 2
           rm -rf "$HOME/Library/Application Support/Bcad"
           defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
-          open -a "$APP" --env BCAD_HITLOG="$R/hits.txt"
+          open -a "$APP"
           shot ui-00-cold 10
           $U trusted
           $U tree | head -80
           $U press Untitled; sleep 2
-          echo "— Cube, middle"; $U hold Cube 0.5 0.5 60; sleep 2; $U count Cube
-          echo "— Cube, top band"; $U hold Cube 0.5 0.12 60; shot ui-01-cube-move; $U count Cube
+          for k in Cube Cylinder Cone Sphere Torus; do
+            echo "— $k, right in the middle"; $U hold $k 0.5 0.5 60; sleep 2; $U count $k; $U key 0 cmd; sleep 1; $U key 51; sleep 1
+          done
+          $U hold Cube 0.5 0.5 60; shot ui-01-cube-move; $U count Cube
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
           $U slide Red 0.9; $U slide Green 0.1; shot ui-03-mixed
@@ -270,8 +265,8 @@ jobs:
           $U press "Hexagonal torus"; shot ui-11-tori 4
           $U key 0 cmd; sleep 1
           $U press Resize; shot ui-12-many
+          echo "— Cancel, right in the middle"; $U press "Round edges"; sleep 1; $U count "Round edges"; $U press Cancel; sleep 1; $U count "Round edges"
           $U tree | grep -iE "torus|bolt|cube|width|height|depth|symmetric|thread" | head -60
-          echo "── what each click hit"; cat "$R/hits.txt" | head -400
           $U key 12 cmd; shot ui-13-quit 2
           pkill -x Bcad || true
           sleep 3

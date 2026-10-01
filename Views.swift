@@ -204,7 +204,7 @@ struct ToolButton: View {
     var key: String?
     var tint: Color?
     var lit = false
-    var size: CGFloat = 34
+    let size: CGFloat
     let action: () -> Void
 
     var body: some View {
@@ -239,14 +239,11 @@ struct ShapeGroupButton: View {
     var body: some View {
         let k = lib.quick(group)
         HStack(spacing: 1) {
-            // Not 34: at that size a hovered button ignores clicks along its middle line.
+            // Not 28 or 34 points: at those sizes a hovered button ignores clicks along its middle line.
             Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
                 .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 36))
                 .help(L(k.primitive.name))
                 .accessibilityLabel(L(k.primitive.name))
-                #if SELFTEST
-                .probed("root-\(group.rawValue)")
-                #endif
             Button { withAnimation(Neon.glide) { open = open == group ? nil : group } } label: {
                 Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black))
             }
@@ -463,7 +460,8 @@ struct ModeBar: View {
                 case .hollow: hollow
                 default: split
                 }
-                ToolButton(icon: "xmark", title: L("Cancel"), key: "Esc", tint: Neon.red, size: 28) { lib.cancelMode() }
+                // Not 28 or 34 points: at those sizes a hovered button ignores clicks along its middle line.
+                ToolButton(icon: "xmark", title: L("Cancel"), key: "Esc", tint: Neon.red, size: 30) { lib.cancelMode() }
             }
         }
         .font(.ui(size: 12.5, weight: .semibold, design: .rounded))
