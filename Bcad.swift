@@ -16,6 +16,7 @@ enum Entry {
             let ok = MainActor.assumeIsolated { SelfTest.run(URL(fileURLWithPath: args[i + 1])) }
             exit(ok ? 0 : 1)
         }
+        if args.contains("--clickprobe") { MainActor.assumeIsolated { ClickProbe.run() } }
         #endif
         BcadApp.main()
     }

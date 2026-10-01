@@ -243,6 +243,9 @@ struct ShapeGroupButton: View {
                 .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
                 .help(L(k.primitive.name))
                 .accessibilityLabel(L(k.primitive.name))
+                #if SELFTEST
+                .probed("root-\(group.rawValue)")
+                #endif
             Button { withAnimation(Neon.glide) { open = open == group ? nil : group } } label: {
                 Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black))
             }

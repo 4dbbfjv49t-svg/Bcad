@@ -57,6 +57,13 @@ jobs:
           ./test/selftest.sh 2>&1 | tee "$RUNNER_TEMP/results/selftest.log"
           echo "self-test took $(( $(date +%s) - start )) s"
 
+      - name: Click probe
+        run: |
+          # TEMPORARY: which part of the quick shape button loses a click; stops the job here.
+          defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
+          APP_STRINGS="$PWD/i18n.json" "$TMPDIR/bcad-selftest/BcadTest" --clickprobe 2>&1 | tee "$RUNNER_TEMP/results/probe.log"
+          exit 1
+
       - name: Build app
         run: |
           start=$(date +%s)
