@@ -145,9 +145,7 @@ jobs:
           }
           func all(_ e: AXUIElement, _ depth: Int = 0) -> [(AXUIElement, Int)] { depth > 60 ? [] : [(e, depth)] + kids(e).flatMap { all($0, depth + 1) } }
           func find(_ label: String, _ n: Int) -> CGRect? {
-              let els = all(root)
-              let exact = els.filter { texts($0.0).contains(label) }, loose = els.filter { texts($0.0).contains { $0.contains(label) } }
-              let hits = (exact.isEmpty ? loose : exact).compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 }
+              let hits = all(root).filter { texts($0.0).contains(label) }.compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 }
               return hits.count >= n ? hits[n - 1] : nil
           }
           func window() -> CGRect {
@@ -226,6 +224,7 @@ jobs:
           shot ui-00-cold 10
           $U trusted
           $U tree | head -80
+          $U press Untitled; sleep 2
           $U press Cube; shot ui-01-cube-move
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
