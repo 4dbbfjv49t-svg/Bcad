@@ -237,6 +237,128 @@ jobs:
             Bcad.swift Design.swift Viewport.swift Views.swift Files.swift "$W/OpenProbe.swift" "$W/k.o" "${LIBS[@]}" -lc++ -o "$W/probe"
           APP_STRINGS="$PWD/i18n.json" perl -e 'alarm 900; exec @ARGV' "$W/probe" --selftest "$TMPDIR/bcad-selftest/test.3mf" 2>&1 | tee "$RUNNER_TEMP/results/probe.log"
 
+      - name: Viewport probe
+        continue-on-error: true
+        run: |
+          # Hosts the real interface in a window, counts the 3D view's frames around opening a file, and tries a mouse
+          # drag on the 3D view to see whether that brings the model back. Screenshots go to results/shots/probe-*.
+          W="$RUNNER_TEMP/probe"
+          cat > "$W/ViewProbe.swift" <<'SWIFT'
+          #if SELFTEST
+          import AppKit
+          import MetalKit
+          import SwiftUI
+
+          @MainActor
+          final class Spy: NSObject, MTKViewDelegate {
+              let inner: Renderer
+              var frames = 0, early = 0
+              init(_ r: Renderer) { inner = r }
+              nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+              nonisolated func draw(in view: MTKView) {
+                  MainActor.assumeIsolated {
+                      frames += 1
+                      if view.currentRenderPassDescriptor == nil { early += 1 }
+                  }
+                  inner.draw(in: view)
+              }
+          }
+
+          @MainActor
+          enum SelfTest {
+              static func run(_ url: URL) -> Bool {
+                  setvbuf(stdout, nil, _IONBF, 0)
+                  let app = NSApplication.shared
+                  app.setActivationPolicy(.regular)
+                  let lib = Workbench.shared
+                  let shots = ProcessInfo.processInfo.environment["SHOTS"] ?? "/tmp"
+                  var window: NSWindow?
+                  var spy: Spy?
+
+                  func pump(_ s: Double) { RunLoop.main.run(until: Date().addingTimeInterval(s)) }
+                  func settle() {
+                      let end = Date().addingTimeInterval(240)
+                      repeat { pump(0.1) } while (lib.building || lib.doc.bodies.contains { lib.meshes[$0.id] == nil }) && Date() < end
+                      pump(2)
+                  }
+                  func find(_ v: NSView) -> CadView? { (v as? CadView) ?? v.subviews.lazy.compactMap(find).first }
+                  func show() {
+                      let w = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1320, height: 820), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+                      w.contentView = NSHostingView(rootView: RootView().environment(lib).frame(minWidth: 1000, minHeight: 600).skinEnvironment())
+                      w.makeKeyAndOrderFront(nil)
+                      app.activate(ignoringOtherApps: true)
+                      window = w
+                      pump(0.5)
+                      if let cad = find(w.contentView!) {
+                          let s = Spy(cad.renderer)
+                          cad.delegate = s
+                          spy = s
+                          cad.needsDisplay = true
+                      } else {
+                          print("✗ no 3D view found")
+                      }
+                      pump(2)
+                  }
+                  func shot(_ name: String) {
+                      let p = Process()
+                      p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                      p.arguments = ["-x", "\(shots)/probe-\(name).png"]
+                      try? p.run()
+                      p.waitUntilExit()
+                  }
+                  func state(_ title: String) {
+                      let drawable = lib.doc.bodies.filter { !$0.hidden && !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) }.count
+                      print("== \(title): frames \(spy?.frames ?? -1) (\(spy?.early ?? -1) without a drawable) · bodies \(lib.doc.bodies.count), with meshes \(drawable) · building \(lib.building) · requestFit \(lib.requestFit) · camera \(lib.camera.target) d \(lib.camera.distance)")
+                      shot(title.replacingOccurrences(of: " ", with: "-"))
+                  }
+                  func drag() {
+                      guard let w = window, let cad = find(w.contentView!) else { return }
+                      let c = cad.convert(NSPoint(x: cad.bounds.midX, y: cad.bounds.midY), to: nil)
+                      func ev(_ t: NSEvent.EventType, _ dx: CGFloat) -> NSEvent {
+                          NSEvent.mouseEvent(with: t, location: NSPoint(x: c.x + dx, y: c.y), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                      }
+                      cad.mouseDown(with: ev(.leftMouseDown, 0))
+                      for k in 1...6 { cad.mouseDragged(with: ev(.leftMouseDragged, CGFloat(k) * 4)); pump(0.05) }
+                      cad.mouseUp(with: ev(.leftMouseUp, 24))
+                      pump(1.5)
+                  }
+
+                  lib.rebuildScene()
+                  show()
+                  state("1 empty window")
+                  let before = spy?.frames ?? 0
+                  lib.open(url)
+                  settle()
+                  state("2 file opened in the running window")
+                  print("   frames drawn after open: \((spy?.frames ?? 0) - before)")
+                  drag()
+                  state("3 after a mouse drag on the 3D view")
+
+                  window?.orderOut(nil)
+                  window = nil
+                  spy = nil
+                  lib.dirty = false
+                  lib.newDocument()
+                  pump(1)
+                  lib.open(url)
+                  show()
+                  settle()
+                  state("4 file opened before the window existed")
+                  drag()
+                  state("5 after a mouse drag")
+                  return true
+              }
+          }
+          #endif
+          SWIFT
+          SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
+          OCCT="$PWD/Vendor/occt"
+          LIBS=(); for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
+          swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 -D SELFTEST -import-objc-header BcadKernel.h \
+            Bcad.swift Design.swift Viewport.swift Views.swift Files.swift "$W/ViewProbe.swift" "$W/k.o" "${LIBS[@]}" -lc++ -o "$W/viewprobe"
+          SHOTS="$RUNNER_TEMP/results/shots" APP_STRINGS="$PWD/i18n.json" perl -e 'alarm 900; exec @ARGV' "$W/viewprobe" --selftest "$TMPDIR/bcad-selftest/test.3mf" 2>&1 | tee "$RUNNER_TEMP/results/viewprobe.log"
+
       - name: Thumbnails
         if: always()
         continue-on-error: true
