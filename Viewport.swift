@@ -682,8 +682,8 @@ final class CadView: MTKView {
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                frameAsked = false
-                draw()
+                self.frameAsked = false
+                self.draw()
             }
         }
     }
