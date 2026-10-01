@@ -45,6 +45,7 @@ jobs:
 
       - name: Build OpenCascade
         run: |
+          mkdir -p Vendor  # occt.sh expects Vendor/ to exist
           start=$(date +%s)
           ./occt.sh
           echo "occt.sh took $(( $(date +%s) - start )) s"
@@ -124,6 +125,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          shopt -s nullglob
           for f in "$RUNNER_TEMP"/results/shots/*.png; do
             sips -Z 900 -s format jpeg -s formatOptions 45 "$f" --out "${f%.png}.jpg" >/dev/null
             echo "=== THUMB $(basename "${f%.png}") ==="
