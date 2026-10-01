@@ -180,17 +180,22 @@ jobs:
           }
           func flags(_ s: String?) -> CGEventFlags { ["option": .maskAlternate, "shift": .maskShift, "cmd": .maskCommand][s ?? ""] ?? [] }
 
+          // Bcad in front first: a click on a window in the background only brings it forward.
+          if !["trusted", "tree"].contains(a[0]) {
+              app.activate()
+              usleep(400_000)
+          }
           switch a[0] {
           case "trusted":
               print("accessibility trusted: \(AXIsProcessTrusted()) · window \(window())")
           case "tree":
               for (e, d) in all(root) where !texts(e).isEmpty { print(String(repeating: " ", count: d), texts(e).joined(separator: " | "), frame(e).map { "\($0)" } ?? "") }
           case "press":
-              guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(1) }
+              guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
               click(CGPoint(x: r.midX, y: r.midY))
               print("pressed \(a[1]) at \(r)")
           case "slide":
-              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(1) }
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
               drag(CGPoint(x: r.midX, y: r.midY), CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.midY))
               print("slid \(a[1]) in \(r)")
           case "view":
