@@ -1,0 +1,1935 @@
+import SwiftUI
+import AppKit
+import simd
+import UniformTypeIdentifiers
+
+@main
+enum Entry {
+    static func main() {
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
+            MainActor.assumeIsolated { Art.render(IconArt(), size: CGSize(width: 1024, height: 1024), scale: 1, to: args[i + 1]) }
+            return
+        }
+        #if SELFTEST
+        if let i = args.firstIndex(of: "--selftest"), i + 1 < args.count {
+            let ok = MainActor.assumeIsolated { SelfTest.run(URL(fileURLWithPath: args[i + 1])) }
+            exit(ok ? 0 : 1)
+        }
+        #endif
+        BcadApp.main()
+    }
+}
+
+// MARK: - Model
+
+enum PrimKind: Int, Codable, CaseIterable, Sendable {
+    case box, cylinder, cone, sphere, prism, torus, wedge, pyramid, hemisphere, bowl, ring, glass, oval
+}
+
+struct Primitive: Codable, Equatable, Sendable {
+    var kind: PrimKind
+    var sides = 0
+    var size: [Double]
+
+    static func make(_ kind: PrimKind, sides: Int = 0) -> Primitive {
+        switch kind {
+        case .box, .wedge: Primitive(kind: kind, size: [20, 20, 20])
+        case .cylinder: Primitive(kind: kind, size: [20, 20])
+        case .cone: Primitive(kind: kind, size: [20, 0, 20])
+        case .sphere, .hemisphere: Primitive(kind: kind, size: [20])
+        case .prism, .pyramid: Primitive(kind: kind, sides: sides, size: [20, 20])
+        case .torus: Primitive(kind: kind, size: [30, 8])
+        case .bowl: Primitive(kind: kind, size: [40, 2])
+        case .ring: Primitive(kind: kind, size: [30, 20, 5])
+        case .glass: Primitive(kind: kind, size: [30, 40, 2, 3])
+        case .oval: Primitive(kind: kind, size: [20, 14, 90, 20])
+        }
+    }
+
+    var params: [Double] { kind == .prism || kind == .pyramid ? [Double(sides)] + size : size }
+
+    var fields: [String] {
+        switch kind {
+        case .box, .wedge: ["Width", "Depth", "Height"]
+        case .cylinder, .prism, .pyramid: ["Diameter", "Height"]
+        case .cone: ["Bottom diameter", "Top diameter", "Height"]
+        case .sphere, .hemisphere: ["Diameter"]
+        case .torus: ["Outer diameter", "Tube diameter"]
+        case .bowl: ["Diameter", "Wall thickness"]
+        case .ring: ["Outer diameter", "Inner diameter", "Height"]
+        case .glass: ["Diameter", "Height", "Wall thickness", "Bottom thickness"]
+        case .oval: ["Diameter A", "Diameter B", "Angle between diameters", "Height"]
+        }
+    }
+
+    // Sizes given in degrees rather than millimetres (they never follow a resize).
+    var degrees: Set<Int> { kind == .oval ? [2] : [] }
+
+    func range(_ i: Int) -> ClosedRange<Double> {
+        degrees.contains(i) ? 5...175 : (mayBeZero.contains(i) ? 0 : 0.1)...10000
+    }
+
+    // Sizes that may be zero (a pointed cone, a ring without a hole).
+    var mayBeZero: Set<Int> {
+        switch kind {
+        case .cone: [0, 1]
+        case .ring: [1]
+        default: []
+        }
+    }
+
+    var name: String {
+        let n = ["3": "Triangle", "4": "Square", "5": "Pentagon", "6": "Hexagon", "8": "Octagon"][String(sides)] ?? "\(sides)-sided"
+        switch kind {
+        case .box: return "Cube"
+        case .cylinder: return "Cylinder"
+        case .cone: return "Cone"
+        case .sphere: return "Sphere"
+        case .torus: return "Torus"
+        case .wedge: return "Wedge"
+        case .prism: return n + " prism"
+        case .pyramid: return n + " pyramid"
+        case .hemisphere: return "Half-sphere"
+        case .bowl: return "Bowl"
+        case .ring: return "Ring"
+        case .glass: return "Glass"
+        case .oval: return "Oval cylinder"
+        }
+    }
+
+    // Applies a scale to the sizes, keeping round shapes round (the axis changed most wins) and walls as they are.
+    mutating func scale(by s: SIMD3<Double>) {
+        func most(_ v: [Double]) -> Double { v.max { abs($0 - 1) < abs($1 - 1) } ?? 1 }
+        let k = most([s.x, s.y])
+        var next = size
+        switch kind {
+        case .box, .wedge: next = [size[0] * s.x, size[1] * s.y, size[2] * s.z]
+        case .cylinder, .prism, .pyramid: next = [size[0] * k, size[1] * s.z]
+        case .cone: next = [size[0] * k, size[1] * k, size[2] * s.z]
+        case .sphere, .hemisphere: next = [size[0] * most([s.x, s.y, s.z])]
+        case .torus: next = [size[0] * k, size[1] * k]
+        case .bowl: next = [size[0] * most([s.x, s.y, s.z]), size[1]]
+        case .ring: next = [size[0] * k, size[1] * k, size[2] * s.z]
+        case .glass: next = [size[0] * k, size[1] * s.z, size[2], size[3]]
+        case .oval: next = [size[0] * s.x, size[1] * s.y, size[2], size[3] * s.z]
+        }
+        size = next.enumerated().map { i, v in degrees.contains(i) ? v : max(mayBeZero.contains(i) ? 0 : 0.1, (v * 100).rounded() / 100) }
+    }
+}
+
+struct Fastener: Codable, Equatable, Sendable {
+    var nut: Bool
+    var size: Int
+    var length: Double
+    var threadOnly: Bool
+
+    @MainActor var name: String {
+        let m = String(cString: bk_thread_name(Int32(size)))
+        if nut { return threadOnly ? L("{m} threaded sleeve", ["m": m]) : L("{m} nut", ["m": m]) }
+        return threadOnly ? L("{m} threaded rod", ["m": m]) : L("{m} bolt", ["m": m])
+    }
+}
+
+struct Placement: Codable, Equatable, Sendable {
+    var move = SIMD3<Double>(0, 0, 0)
+    var turn = SIMD3<Double>(0, 0, 0)
+    var scale = SIMD3<Double>(1, 1, 1)
+
+    var rotation: simd_double3x3 {
+        let r = turn * .pi / 180
+        let (cx, sx, cy, sy, cz, sz) = (cos(r.x), sin(r.x), cos(r.y), sin(r.y), cos(r.z), sin(r.z))
+        let rx = simd_double3x3(rows: [SIMD3(1, 0, 0), SIMD3(0, cx, -sx), SIMD3(0, sx, cx)])
+        let ry = simd_double3x3(rows: [SIMD3(cy, 0, sy), SIMD3(0, 1, 0), SIMD3(-sy, 0, cy)])
+        let rz = simd_double3x3(rows: [SIMD3(cz, -sz, 0), SIMD3(sz, cz, 0), SIMD3(0, 0, 1)])
+        return rz * ry * rx
+    }
+
+    var matrix: simd_double4x4 {
+        let l = rotation * simd_double3x3(diagonal: scale)
+        return simd_double4x4(columns: (SIMD4(l.columns.0, 0), SIMD4(l.columns.1, 0), SIMD4(l.columns.2, 0), SIMD4(move, 1)))
+    }
+
+    // Row-major 3x4 for the kernel.
+    var kernel: [Double] {
+        let m = matrix
+        return (0..<3).flatMap { r in (0..<4).map { c in m[c][r] } }
+    }
+
+    static func from(_ m: simd_double4x4) -> Placement {
+        var p = Placement()
+        p.move = SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        var c0 = SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z)
+        var c1 = SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z)
+        var c2 = SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z)
+        p.scale = SIMD3(length(c0), length(c1), length(c2))
+        c0 /= max(1e-12, p.scale.x); c1 /= max(1e-12, p.scale.y); c2 /= max(1e-12, p.scale.z)
+        p.turn = euler(simd_double3x3(columns: (c0, c1, c2)))
+        return p
+    }
+
+    static func euler(_ r: simd_double3x3) -> SIMD3<Double> {
+        // r = Rz·Ry·Rx; r[col][row]
+        let r20 = r[0][2]
+        let y = asin(max(-1, min(1, -r20)))
+        let x: Double, z: Double
+        if abs(r20) < 0.99999 {
+            x = atan2(r[1][2], r[2][2])
+            z = atan2(r[0][1], r[0][0])
+        } else {
+            x = atan2(-r[2][1], r[1][1])
+            z = 0
+        }
+        return SIMD3(x, y, z) * 180 / .pi
+    }
+}
+
+extension SIMD4 {
+    var xyz: SIMD3<Scalar> { SIMD3(x, y, z) }
+}
+
+struct Plane: Codable, Equatable, Sendable {
+    var point: SIMD3<Double>
+    var normal: SIMD3<Double>
+}
+
+struct Pick: Codable, Equatable, Sendable {
+    var kind: Int32
+    var a: SIMD3<Double>
+    var b: SIMD3<Double>
+}
+
+struct Part: Codable, Equatable, Sendable {
+    var node: Node
+    var place: Placement
+    var name: String?
+    var color: Int?
+}
+
+// A face of a hollowed shape with its own wall thickness.
+struct Wall: Codable, Equatable, Sendable {
+    var face: Pick
+    var thickness: Double
+}
+
+indirect enum Node: Codable, Equatable, Sendable {
+    case primitive(Primitive)
+    case fastener(Fastener)
+    case group(op: Int32, parts: [Part])
+    case split(of: Node, plane: Plane, side: Int32)
+    case round(of: Node, picks: [Pick], radius: Double)
+    case hollow(of: Node, open: [Pick], walls: [Wall], thickness: Double)
+    // A bevel: legs along each edge's face A and face B; corner > 0 rounds where the bevel meets the faces.
+    case bevel(of: Node, picks: [Pick], legs: SIMD2<Double>, corner: Double)
+    // Inward rounding: a concave quarter-round cut along the edges.
+    case cove(of: Node, picks: [Pick], radius: Double)
+
+    var inner: Node? {
+        switch self {
+        case .split(let n, _, _), .round(let n, _, _), .hollow(let n, _, _, _), .bevel(let n, _, _, _), .cove(let n, _, _): n
+        default: nil
+        }
+    }
+
+    // The same wrapper (split, rounding, hollow) around a different inner node.
+    func wrapping(_ n: Node) -> Node {
+        switch self {
+        case .split(_, let p, let s): .split(of: n, plane: p, side: s)
+        case .round(_, let p, let r): .round(of: n, picks: p, radius: r)
+        case .hollow(_, let o, let w, let t): .hollow(of: n, open: o, walls: w, thickness: t)
+        case .bevel(_, let p, let l, let c): .bevel(of: n, picks: p, legs: l, corner: c)
+        case .cove(_, let p, let r): .cove(of: n, picks: p, radius: r)
+        default: n
+        }
+    }
+
+    func replacingBase(_ f: (Node) -> Node) -> Node {
+        if let n = inner { return wrapping(n.replacingBase(f)) }
+        return f(self)
+    }
+
+    var base: Node { inner?.base ?? self }
+}
+
+struct Solid: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var name: String
+    var color: Int
+    var hidden = false
+    var node: Node
+    var place = Placement()
+}
+
+struct Document: Codable, Equatable, Sendable {
+    var bodies: [Solid] = []
+}
+
+enum Palette {
+    static let colors: [SIMD3<Float>] = [
+        SIMD3(0.20, 0.78, 0.95), SIMD3(0.96, 0.35, 0.55), SIMD3(1.00, 0.72, 0.20), SIMD3(0.45, 0.90, 0.55),
+        SIMD3(0.70, 0.55, 1.00), SIMD3(0.92, 0.92, 0.95), SIMD3(1.00, 0.50, 0.30), SIMD3(0.55, 0.60, 0.70)
+    ]
+    static func color(_ i: Int) -> Color { let c = colors[(i % colors.count + colors.count) % colors.count]; return Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z)) }
+}
+
+// MARK: - Kernel bridge
+
+final class ShapeRef: @unchecked Sendable {
+    private let ptr: OpaquePointer
+    init(_ p: OpaquePointer) { ptr = p }
+    deinit { bk_free(ptr) }
+    // The pointer is valid only inside the closure: ARC may free a shape right after its last use, not at the end of scope.
+    func with<T>(_ body: (OpaquePointer) -> T) -> T { withExtendedLifetime(self) { body(ptr) } }
+}
+
+struct Mesh {
+    var vertices: [SIMD4<Float>] = []   // xyz + face id
+    var normals: [SIMD4<Float>] = []
+    var indices: [UInt32] = []
+    var faceInfo: [(normal: SIMD3<Double>, centroid: SIMD3<Double>)] = []
+    var edges: [[SIMD3<Float>]] = []
+    var corners: [SIMD3<Float>] = []
+    var low = SIMD3<Double>(0, 0, 0)
+    var high = SIMD3<Double>(0, 0, 0)
+    var volume = 0.0
+    var valid = true
+    var stamp = Int.random(in: 1...Int.max)
+
+    init() {}
+
+    init(_ m: UnsafeMutablePointer<BKMesh>) {
+        let b = m.pointee
+        let vc = Int(b.vertexCount), tc = Int(b.triangleCount)
+        var faceOf = [UInt32](repeating: 0, count: vc)
+        for t in 0..<tc {
+            let f = b.triangleFace[t]
+            for k in 0..<3 { faceOf[Int(b.indices[t * 3 + k])] = f }
+        }
+        vertices.reserveCapacity(vc)
+        normals.reserveCapacity(vc)
+        for i in 0..<vc {
+            vertices.append(SIMD4(b.positions[i * 3], b.positions[i * 3 + 1], b.positions[i * 3 + 2], Float(faceOf[i])))
+            normals.append(SIMD4(b.normals[i * 3], b.normals[i * 3 + 1], b.normals[i * 3 + 2], 0))
+        }
+        indices = Array(UnsafeBufferPointer(start: b.indices, count: tc * 3))
+        for f in 0..<Int(b.faceCount) {
+            let p = b.faceInfo + f * 6
+            faceInfo.append((SIMD3(p[0], p[1], p[2]), SIMD3(p[3], p[4], p[5])))
+        }
+        for e in 0..<Int(b.edgeCount) {
+            let s = Int(b.edgeStart[e]), t = Int(b.edgeStart[e + 1])
+            edges.append((s..<t).map { SIMD3(b.edgePoints[$0 * 3], b.edgePoints[$0 * 3 + 1], b.edgePoints[$0 * 3 + 2]) })
+        }
+        corners = (0..<Int(b.cornerCount)).map { SIMD3(b.corners[$0 * 3], b.corners[$0 * 3 + 1], b.corners[$0 * 3 + 2]) }
+        low = SIMD3(b.bbox.0, b.bbox.1, b.bbox.2)
+        high = SIMD3(b.bbox.3, b.bbox.4, b.bbox.5)
+        volume = b.volume
+        valid = b.valid != 0
+    }
+
+    var size: SIMD3<Double> { high - low }
+}
+
+// One serial worker thread with a large stack: OpenCascade booleans and fillets recurse deeply (GCD threads get 512 KB).
+final class Worker: @unchecked Sendable {
+    private let lock = NSCondition()
+    private var jobs: [() -> Void] = []
+
+    init() {
+        let t = Thread { [unowned self] in
+            while true {
+                lock.lock()
+                while jobs.isEmpty { lock.wait() }
+                let job = jobs.removeFirst()
+                lock.unlock()
+                job()
+            }
+        }
+        t.stackSize = 64 << 20
+        t.qualityOfService = .userInitiated
+        t.start()
+    }
+
+    func async(_ job: @escaping () -> Void) {
+        lock.lock()
+        jobs.append(job)
+        lock.signal()
+        lock.unlock()
+    }
+
+    func sync<T>(_ job: () -> T) -> T {
+        withoutActuallyEscaping(job) { job in
+            var out: T?
+            let done = DispatchSemaphore(value: 0)
+            async {
+                out = job()
+                done.signal()
+            }
+            done.wait()
+            return out!
+        }
+    }
+}
+
+final class Kernel: @unchecked Sendable {
+    static let shared = Kernel()
+    let queue = Worker()
+    private var cache: [String: ShapeRef] = [:]
+    private(set) var problems: [String] = []
+    var clearance = 0.2
+
+    private func key(_ node: Node) -> String {
+        let e = JSONEncoder()
+        e.outputFormatting = .sortedKeys
+        let data = (try? e.encode(node)) ?? Data()
+        return String(format: "%.3f|", clearance) + data.base64EncodedString()
+    }
+
+    func takeProblems() -> [String] { defer { problems = [] }; return problems }
+
+    func shape(_ node: Node) -> ShapeRef? {
+        let k = key(node)
+        if let s = cache[k] { return s }
+        guard let p = build(node) else { return nil }
+        if cache.count > 400 { cache.removeAll() }
+        let ref = ShapeRef(p)
+        cache[k] = ref
+        return ref
+    }
+
+    private func build(_ node: Node) -> OpaquePointer? {
+        switch node {
+        case .primitive(let p):
+            return p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) }
+        case .fastener(let f):
+            return f.nut ? bk_nut(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance) : bk_bolt(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance)
+        case .group(let op, let parts):
+            var result: OpaquePointer?
+            for part in parts {
+                guard let s = shape(part.node) else { continue }
+                let m = part.place.kernel
+                guard let placed = s.with({ sp in m.withUnsafeBufferPointer { bk_transform(sp, $0.baseAddress) } }) else { continue }
+                if let r = result {
+                    let next = bk_boolean(op, r, placed)
+                    bk_free(r)
+                    bk_free(placed)
+                    if next == nil { problems.append(String(cString: bk_last_error())) }
+                    result = next
+                    if result == nil { return nil }
+                } else {
+                    result = placed
+                }
+            }
+            if op == BK_UNION, parts.count > 1, let r = result, bk_piece_count(r) > 1 { problems.append("pieces") }
+            return result
+        case .split(let of, let plane, let side):
+            guard let s = shape(of) else { return nil }
+            let p = [plane.point.x, plane.point.y, plane.point.z], n = [plane.normal.x, plane.normal.y, plane.normal.z]
+            return s.with { bk_split($0, p, n, side) }
+        case .round(let of, let picks, let radius):
+            guard let s = shape(of) else { return nil }
+            let (kinds, data) = Self.flat(picks)
+            var maxR = 0.0
+            var missing: Int32 = 0
+            let out = s.with { bk_fillet($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
+            if missing > 0 { problems.append("missing") }
+            if let out { return out }
+            problems.append(maxR > 0 ? "max:\(maxR)" : "round")
+            return s.with { bk_copy($0) }
+        case .bevel(let of, let picks, let legs, let corner):
+            guard let s = shape(of) else { return nil }
+            let (kinds, data) = Self.flat(picks)
+            var missing: Int32 = 0
+            let out = s.with { bk_chamfer($0, kinds, data, Int32(picks.count), legs.x, legs.y, corner, &missing) }
+            if missing > 0 { problems.append("missing") }
+            if let out { return out }
+            problems.append("bevel")
+            return s.with { bk_copy($0) }
+        case .cove(let of, let picks, let radius):
+            guard let s = shape(of) else { return nil }
+            let (kinds, data) = Self.flat(picks)
+            var maxR = 0.0
+            var missing: Int32 = 0
+            let out = s.with { bk_cove($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
+            if missing > 0 { problems.append("missing") }
+            if let out { return out }
+            problems.append(maxR > 0 ? "max:\(maxR)" : "cove")
+            return s.with { bk_copy($0) }
+        case .hollow(let of, let open, let walls, let thickness):
+            guard let s = shape(of) else { return nil }
+            let faces = open.flatMap { [$0.a.x, $0.a.y, $0.a.z, $0.b.x, $0.b.y, $0.b.z] }
+            let own = walls.flatMap { [$0.face.a.x, $0.face.a.y, $0.face.a.z, $0.face.b.x, $0.face.b.y, $0.face.b.z] }
+            let values = walls.map(\.thickness)
+            var missing: Int32 = 0
+            let out = s.with { bk_hollow($0, faces, Int32(open.count), own, values, Int32(walls.count), thickness, &missing) }
+            if missing > 0 { problems.append("missing") }
+            if let out { return out }
+            problems.append("hollow")
+            return s.with { bk_copy($0) }
+        }
+    }
+
+    private static func flat(_ picks: [Pick]) -> ([Int32], [Double]) {
+        (picks.map(\.kind), picks.flatMap { [$0.a.x, $0.a.y, $0.a.z, $0.b.x, $0.b.y, $0.b.z] })
+    }
+
+    // The shape cut across a picked edge, for the 2D angle editor.
+    func section(_ node: Node, _ pick: Pick) -> Section? {
+        guard let s = shape(node) else { return nil }
+        let data = [pick.a.x, pick.a.y, pick.a.z, pick.b.x, pick.b.y, pick.b.z]
+        guard let c = s.with({ bk_section($0, pick.kind, data, 20) }) else { return nil }
+        defer { bk_section_free(c) }
+        let sec = c.pointee
+        var loops: [[SIMD2<Double>]] = []
+        for l in 0..<Int(sec.loopCount) {
+            let from = Int(sec.loopStart[l]), to = Int(sec.loopStart[l + 1])
+            loops.append((from..<to).map { SIMD2(sec.points[2 * $0], sec.points[2 * $0 + 1]) })
+        }
+        let point = SIMD3(sec.point.0, sec.point.1, sec.point.2), direction = SIMD3(sec.direction.0, sec.direction.1, sec.direction.2)
+        return Section(loops: loops, angle: sec.angle, point: point, direction: direction)
+    }
+
+    func mesh(_ node: Node, deflection: Double = 0.05) -> Mesh? {
+        guard let s = shape(node), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
+        defer { bk_mesh_free(m) }
+        return Mesh(m)
+    }
+
+    // World-space shape of a body (for export).
+    func placed(_ b: Solid) -> ShapeRef? {
+        guard let s = shape(b.node) else { return nil }
+        return s.with { sp in b.place.kernel.withUnsafeBufferPointer { bk_transform(sp, $0.baseAddress) } }.map(ShapeRef.init)
+    }
+
+    // A body's fine mesh in world coordinates, for files.
+    func worldMesh(_ b: Solid, deflection: Double = 0.01) -> Mesh? {
+        guard let s = placed(b), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
+        defer { bk_mesh_free(m) }
+        return Mesh(m)
+    }
+
+    func exportStep(_ bodies: [Solid], to path: String) -> Bool {
+        let shapes = bodies.compactMap { placed($0) }
+        return withExtendedLifetime(shapes) {
+            let ptrs: [OpaquePointer?] = shapes.map { $0.with { $0 } }
+            return ptrs.withUnsafeBufferPointer { bk_export_step($0.baseAddress, Int32(ptrs.count), path) } != 0
+        }
+    }
+}
+
+// MARK: - Settings
+
+enum Action: String, CaseIterable, Codable {
+    case move, rotate, scale, round, split, hollow, drop, frame, hide, showAll
+
+    var name: String {
+        switch self {
+        case .move: "Move"
+        case .rotate: "Rotate"
+        case .scale: "Scale"
+        case .round: "Round edges"
+        case .split: "Split"
+        case .hollow: "Hollow"
+        case .drop: "Drop onto the bed"
+        case .frame: "Zoom to fit"
+        case .hide: "Hide selection"
+        case .showAll: "Show all"
+        }
+    }
+    @MainActor var label: String { L(name) }
+}
+
+struct Settings: Codable, Equatable {
+    static let defaultKeys: [String: String] = [
+        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
+    ]
+    var keys = Settings.defaultKeys
+    var snap = 1.0
+    var turnStep = 15.0
+    var dropToBed = true
+    var bed = SIMD3<Double>(256, 256, 256)
+    var clearance = 0.2
+    var autoLink = true
+    var uniform = false
+    // Shortcuts switched off: they don't fire and their keys are free for others.
+    var off: Set<String> = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var k = Settings.defaultKeys
+        if let saved = try? c.decode([String: String].self, forKey: .keys) { k.merge(saved) { _, s in s } }
+        keys = k
+        snap = min(100, max(0.01, (try? c.decode(Double.self, forKey: .snap)) ?? 1))
+        turnStep = min(90, max(0.1, (try? c.decode(Double.self, forKey: .turnStep)) ?? 15))
+        dropToBed = (try? c.decode(Bool.self, forKey: .dropToBed)) ?? true
+        bed = (try? c.decode(SIMD3<Double>.self, forKey: .bed)) ?? SIMD3(256, 256, 256)
+        clearance = min(2, max(0, (try? c.decode(Double.self, forKey: .clearance)) ?? 0.2))
+        autoLink = (try? c.decode(Bool.self, forKey: .autoLink)) ?? true
+        uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
+        off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
+    }
+
+    func key(_ a: Action) -> String { keys[a.rawValue] ?? Settings.defaultKeys[a.rawValue] ?? "" }
+    func isOn(_ a: Action) -> Bool { !off.contains(a.rawValue) }
+    // The switched-on action a key belongs to, other than `except`.
+    func owner(of name: String, except: Action? = nil) -> Action? {
+        Action.allCases.first { $0 != except && isOn($0) && key($0) == name }
+    }
+}
+
+struct Store: Codable {
+    var style: Style?
+    var language: String?
+    var brightness: Double?
+    var settings: Settings?
+    var look: SkinSettings?
+    var shapes: [String: String]?
+}
+
+enum Paths {
+    static let dir = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/Bcad", isDirectory: true)
+    static let state = dir.appendingPathComponent("state.json")
+}
+
+enum Popup: Equatable {
+    case thread
+}
+
+struct Confirmation: Equatable {
+    let title: String
+    let message: String
+    let action: String
+    let perform: () -> Void
+    static func == (a: Confirmation, b: Confirmation) -> Bool { a.title == b.title }
+}
+
+enum PopupStage {
+    case card, discard, confirm(Confirmation)
+    var isCard: Bool { if case .card = self { true } else { false } }
+    var isDiscard: Bool { if case .discard = self { true } else { false } }
+}
+
+enum Mode: Equatable { case select, round, split, hollow, angles }
+
+// The inspector's screens: its segments and the gizmo they bring.
+enum Screen: Int, CaseIterable {
+    case move, resize, rotate, angles
+
+    var title: String {
+        switch self {
+        case .move: "Move"
+        case .resize: "Resize"
+        case .rotate: "Rotate"
+        case .angles: "Angles"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .move: "arrow.up.and.down.and.arrow.left.and.right"
+        case .resize: "arrow.up.left.and.arrow.down.right"
+        case .rotate: "arrow.triangle.2.circlepath"
+        case .angles: "angle"
+        }
+    }
+}
+
+// The shape cut across an edge, seen end-on: the edge at the origin, face A leaving along −x, face B at 180° + angle,
+// material between them (the top-right corner of a block for a right angle).
+struct Section: Equatable {
+    var loops: [[SIMD2<Double>]]
+    var angle: Double
+    var point: SIMD3<Double>
+    var direction: SIMD3<Double>
+
+    var phi: Double { angle * .pi / 180 }
+    var dirA: SIMD2<Double> { SIMD2(-1, 0) }
+    var dirB: SIMD2<Double> { SIMD2(-cos(phi), -sin(phi)) }
+
+    // How far each face runs straight from the edge (until the outline turns more than 30°).
+    var runs: SIMD2<Double> {
+        guard let loop = loops.min(by: { closest($0).1 < closest($1).1 }), loop.count > 2 else { return SIMD2(10, 10) }
+        let (i, _) = closest(loop)
+        func run(_ step: Int) -> (SIMD2<Double>, Double) {
+            var length = 0.0, turned = 0.0, k = i
+            var heading: SIMD2<Double>?
+            for _ in 0..<loop.count {
+                let n = (k + step + loop.count) % loop.count
+                let d = loop[n] - loop[k]
+                let l = simd_length(d)
+                if l > 1e-9 {
+                    let h = d / l
+                    if let heading { turned += acos(max(-1, min(1, simd_dot(heading, h)))) }
+                    if turned > .pi / 6 { break }
+                    heading = h
+                    length += l
+                }
+                k = n
+            }
+            return (heading.map { _ in simd_normalize(loop[(i + step + loop.count) % loop.count] - loop[i]) } ?? .zero, length)
+        }
+        let (d1, l1) = run(1), (_, l2) = run(-1)
+        return simd_dot(d1, dirA) > simd_dot(d1, dirB) ? SIMD2(l1, l2) : SIMD2(l2, l1)
+    }
+
+    private func closest(_ loop: [SIMD2<Double>]) -> (Int, Double) {
+        var best = (0, Double.infinity)
+        for (i, p) in loop.enumerated() where simd_length(p) < best.1 { best = (i, simd_length(p)) }
+        return best
+    }
+}
+
+// Working on the corner along picked edges in the 2D section view: rounding it (outward or inward) or bevelling it.
+struct AngleEdit: Equatable {
+    enum Treatment: Equatable { case rounded, angled }
+    enum Rounding: Equatable { case outbound, inbound }
+
+    var body: UUID
+    var picks: [Pick]
+    var section: Section
+    var runs: SIMD2<Double>
+    var treatment = Treatment.rounded
+    var rounding = Rounding.outbound
+    var radius: Double
+    var legs: SIMD2<Double>
+    var roundedCorners = false
+
+    init(body: UUID, picks: [Pick], section: Section) {
+        self.body = body
+        self.picks = picks
+        self.section = section
+        runs = section.runs
+        let room = max(0.2, min(runs.x, runs.y))
+        radius = (min(2, room * 0.4) * 10).rounded() / 10
+        legs = SIMD2(repeating: (min(2, room * 0.4) * 10).rounded() / 10)
+    }
+
+    var phi: Double { section.phi }
+    // The cut's slanted side.
+    var hypotenuse: Double { sqrt(legs.x * legs.x + legs.y * legs.y - 2 * legs.x * legs.y * cos(phi)) }
+    // Angle between the bevel and face A, degrees.
+    var angleA: Double { atan2(legs.y * sin(phi), legs.x - legs.y * cos(phi)) * 180 / .pi }
+    // How deep the bevel reaches into the corner, measured square to it.
+    var depth: Double { legs.x * legs.y * sin(phi) / max(1e-9, hypotenuse) }
+    // Bevel angles the corner allows (the two angles at the bevel add up to 180° − corner angle).
+    var angleRange: ClosedRange<Double> { 1...max(1, 179 - section.angle) }
+    var radiusRange: ClosedRange<Double> {
+        let room = min(runs.x, runs.y)
+        let top = rounding == .outbound ? room * tan(phi / 2) : room
+        return 0.1...max(0.1, (top * 100).rounded(.down) / 100)
+    }
+    var cornerRadius: Double { roundedCorners ? min(legs.x, legs.y) * 0.3 : 0 }
+
+    mutating func setAngle(_ degrees: Double) { setShape(angle: degrees, depth: depth) }
+    mutating func setDepth(_ d: Double) { setShape(angle: angleA, depth: d) }
+    mutating func setHypotenuse(_ h: Double) { legs *= h / max(1e-9, hypotenuse); tidy() }
+    mutating func setLeg(_ i: Int, _ v: Double) { legs[i] = v; tidy() }
+
+    private mutating func setShape(angle: Double, depth d: Double) {
+        let a = min(angleRange.upperBound, max(angleRange.lowerBound, angle)) * .pi / 180
+        let b = .pi - phi - a
+        legs = SIMD2(d / max(1e-9, sin(a)), d / max(1e-9, sin(b)))
+        tidy()
+    }
+
+    // Legs keep full precision, so a chosen angle stays exact; the fields show two decimals.
+    private mutating func tidy() {
+        legs = SIMD2(max(0.01, legs.x), max(0.01, legs.y))
+    }
+
+    // The treatment around a node, for the picked edges or for the whole shape.
+    func wrapping(_ node: Node, whole: Bool) -> Node {
+        let p = whole ? [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] : picks
+        switch (treatment, rounding) {
+        case (.rounded, .outbound): return .round(of: node, picks: p, radius: radius)
+        case (.rounded, .inbound): return .cove(of: node, picks: p, radius: radius)
+        case (.angled, _): return .bevel(of: node, picks: p, legs: legs, corner: cornerRadius)
+        }
+    }
+}
+
+// Shapes of the bottom bar, grouped by kind; each group's first member is the program's own default.
+enum ShapeKind: String, CaseIterable {
+    case cube, wedge, cylinder, hexagon, glass, cone, pyramid, sphere, halfSphere, bowl, torus, ring
+
+    var primitive: Primitive {
+        switch self {
+        case .cube: .make(.box)
+        case .wedge: .make(.wedge)
+        case .cylinder: .make(.cylinder)
+        case .hexagon: .make(.prism, sides: 6)
+        case .glass: .make(.glass)
+        case .cone: .make(.cone)
+        case .pyramid: .make(.pyramid, sides: 4)
+        case .sphere: .make(.sphere)
+        case .halfSphere: .make(.hemisphere)
+        case .bowl: .make(.bowl)
+        case .torus: .make(.torus)
+        case .ring: .make(.ring)
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .cube: "cube"
+        case .wedge: "righttriangle"
+        case .cylinder: "cylinder"
+        case .hexagon: "hexagon"
+        case .glass: "wineglass"
+        case .cone: "cone"
+        case .pyramid: "pyramid"
+        case .sphere: "circle.fill"
+        case .halfSphere: "circle.tophalf.filled"
+        case .bowl: "circle.bottomhalf.filled"
+        case .torus: "circle.circle"
+        case .ring: "smallcircle.circle"
+        }
+    }
+}
+
+enum ShapeGroup: String, CaseIterable {
+    case blocks, cylinders, cones, spheres, rings
+
+    var members: [ShapeKind] {
+        switch self {
+        case .blocks: [.cube, .wedge]
+        case .cylinders: [.cylinder, .hexagon, .glass]
+        case .cones: [.cone, .pyramid]
+        case .spheres: [.sphere, .halfSphere, .bowl]
+        case .rings: [.torus, .ring]
+        }
+    }
+}
+enum Gizmo: Equatable { case move, rotate, scale }
+
+struct Hover: Equatable {
+    var body: UUID?
+    var face: Int = -1
+    var edge: Int = -1
+    var corner: Int = -1
+    var point = SIMD3<Double>(0, 0, 0)
+}
+
+// MARK: - Workbench (app state)
+
+@Observable @MainActor
+final class Workbench: DesignHost {
+    static let shared = Workbench()
+
+    var style: Style = .classic
+    var brightness = 0.8
+    var palette: Style { style }
+    var settings = Settings()
+    var doc = Document()
+    var fileURL: URL?
+    var dirty = false
+    var selection: [UUID] = []
+    var meshes: [UUID: Mesh] = [:]
+    var sceneVersion = 0
+    var building = false
+    var mode: Mode = .select
+    var gizmo: Gizmo = .move
+    var hover = Hover()
+    var editBody: UUID?
+    var edgePicks: [Pick] = []
+    var roundRadius = 2.0
+    var hollowOpen: [Pick] = []
+    var hollowWalls: [Wall] = []
+    var hollowThickness = 2.0
+    var focusWall: Int?
+    var thread = Fastener(nut: false, size: 4, length: 30, threadOnly: false)
+    var splitAxis = 2
+    var splitOffset = 0.0
+    var splitTilt = SIMD2<Double>(0, 0)
+    var showSettings = false
+    var drawerOpen = true
+    var popup: Popup?
+    var popupStage: PopupStage = .card
+    var popupDirty = false
+    var busy: String?
+    var capturing: Action?
+    var captureFail: Action?
+    var dragTag: String?
+    var angleEdit: AngleEdit?
+    var angleOpening = false
+    // Which way the inspector last switched screens (+1 to the right), so the screens slide the right way.
+    var screenStep = 1
+    // Each shape group's quick shape when it isn't the program's default (chosen by holding it in the group's row).
+    var shapes: [String: String] = [:]
+
+    @ObservationIgnored private var undoStack: [Document] = []
+    @ObservationIgnored private var redoStack: [Document] = []
+    @ObservationIgnored private var built: [UUID: Node] = [:]
+    @ObservationIgnored private var builtClearance = -1.0
+    @ObservationIgnored private var pendingBuild = false
+    @ObservationIgnored private var previewBusy = false
+    @ObservationIgnored private var previewAgain = false
+    @ObservationIgnored private var flashTask: Task<Void, Never>?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    @ObservationIgnored var camera = Camera()
+    @ObservationIgnored var requestFit = false
+    // Where the inspector and its row of names sit in the window (for two-finger swipes between its screens).
+    @ObservationIgnored var inspectorFrame = CGRect.zero
+    @ObservationIgnored var namesFrame = CGRect.zero
+    @ObservationIgnored private var swipe = 0.0
+    @ObservationIgnored private var swiped = false
+    @ObservationIgnored private var cameraBeforeAngles: Camera?
+    @ObservationIgnored private var flight: Task<Void, Never>?
+
+    var accent: Color { Skin.shared.accent }
+    var accent2: Color { Skin.shared.accent2 }
+    var accent3: Color { Skin.shared.accent3 }
+
+    init() {
+        Skin.shared.host = self
+        load()
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            guard let self else { return e }
+            return self.key(e) ? nil : e
+        }
+        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] e in
+            guard let self else { return e }
+            return self.swipeInspector(e) ? nil : e
+        }
+    }
+
+    // MARK: persistence
+
+    private func load() {
+        let s = (try? Data(contentsOf: Paths.state)).flatMap { try? JSONDecoder().decode(Store.self, from: $0) }
+        style = s?.style ?? .classic
+        brightness = min(1, max(0, s?.brightness ?? 0.8))
+        settings = s?.settings ?? Settings()
+        L10n.shared.id = L10n.valid(s?.language)
+        Skin.shared.apply(s?.look ?? SkinSettings())
+        shapes = (s?.shapes ?? [:]).filter { g, k in ShapeGroup(rawValue: g).map { $0.members.dropFirst().contains { $0.rawValue == k } } ?? false }
+    }
+
+    func save() {
+        let s = Store(style: style, language: L10n.shared.id, brightness: brightness, settings: settings, look: Skin.shared.values, shapes: shapes)
+        try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(s) { try? data.write(to: Paths.state, options: .atomic) }
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
+    }
+
+    func setStyle(_ s: Style) {
+        withAnimation(Neon.glide) { style = s }
+        scheduleSave()
+    }
+
+    func setLanguage(_ id: String) {
+        withAnimation(.smooth(duration: 0.55)) { L10n.shared.id = L10n.valid(id) }
+        MenuText.apply()
+        scheduleSave()
+    }
+
+    func setBrightness(_ v: Double) {
+        let b = (min(1, max(0, v)) * 100).rounded() / 100
+        guard b != brightness else { return }
+        brightness = b
+        scheduleSave()
+    }
+
+    func setLook(_ change: (inout SkinSettings) -> Void) {
+        var v = Skin.shared.values
+        change(&v)
+        guard v != Skin.shared.values else { return }
+        let appearance = v.dark != Skin.shared.values.dark || v.simplified != Skin.shared.values.simplified
+        if appearance { withAnimation(Neon.glide) { Skin.shared.apply(v) } } else { Skin.shared.apply(v) }
+        sceneVersion += 1
+        scheduleSave()
+    }
+
+    func updateSettings(_ change: (inout Settings) -> Void) {
+        var s = settings
+        change(&s)
+        guard s != settings else { return }
+        let rebuild = s.clearance != settings.clearance
+        settings = s
+        scheduleSave()
+        if rebuild { rebuildScene() }
+    }
+
+    func restoreDefaults() {
+        updateSettings { $0 = Settings() }
+    }
+
+    // MARK: popups & capture
+
+    func show(_ p: Popup?) {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) {
+            popup = p
+            popupStage = .card
+            popupDirty = false
+        }
+    }
+
+    func dismissPopup() {
+        switch popupStage {
+        case .card:
+            if popupDirty { withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .discard } } else { show(nil) }
+        case .discard: break
+        case .confirm: withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .card }
+        }
+    }
+
+    func resolveDiscard(_ discard: Bool) {
+        if discard { show(nil) } else { withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { popupStage = .card } }
+    }
+
+    func beginCapture(_ a: Action) { withAnimation(Neon.spring) { capturing = a; captureFail = nil } }
+
+    func endCapture() {
+        guard capturing != nil else { return }
+        withAnimation(Neon.spring) { capturing = nil }
+    }
+
+    // Switching a shortcut back on keeps its key only while nobody else took it; otherwise the field empties and listens.
+    func toggleShortcut(_ a: Action) {
+        if settings.isOn(a) {
+            if capturing == a { endCapture() }
+            updateSettings { $0.off.insert(a.rawValue) }
+            return
+        }
+        let k = settings.key(a)
+        let free = !k.isEmpty && !Keys.reserved.contains(k) && settings.owner(of: k, except: a) == nil
+        updateSettings {
+            $0.off.remove(a.rawValue)
+            if !free { $0.keys[a.rawValue] = "" }
+        }
+        if !free { beginCapture(a) }
+    }
+
+    private func capture(_ name: String) {
+        guard let a = capturing else { return }
+        withAnimation(Neon.spring) { capturing = nil }
+        guard !name.isEmpty else { return }
+        if Keys.reserved.contains(name) || settings.owner(of: name, except: a) != nil {
+            withAnimation(Neon.spring) { captureFail = a }
+            Task {
+                try? await Task.sleep(for: .seconds(1.2))
+                if captureFail == a { withAnimation(Neon.spring) { captureFail = nil } }
+            }
+            return
+        }
+        updateSettings { $0.keys[a.rawValue] = name }
+    }
+
+    func flash(_ text: String) {
+        flashTask?.cancel()
+        withAnimation(Neon.spring) { busy = text }
+        flashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(Neon.spring) { self?.busy = nil }
+        }
+    }
+
+    func toggleSettings() {
+        endCapture()
+        withAnimation(Neon.glide) {
+            showSettings.toggle()
+            drawerOpen = true
+        }
+    }
+
+    // MARK: document edits
+
+    func body(_ id: UUID?) -> Solid? { doc.bodies.first { $0.id == id } }
+    var primary: Solid? { body(selection.last) }
+    var selected: [Solid] { doc.bodies.filter { selection.contains($0.id) } }
+
+    // Records an undo step before a change (drags call begin once, then edit freely).
+    func begin() {
+        undoStack.append(doc)
+        if undoStack.count > 200 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        dirty = true
+    }
+
+    func commit(_ change: (inout Document) -> Void) {
+        begin()
+        change(&doc)
+        rebuildScene()
+    }
+
+    func undo() {
+        guard let d = undoStack.popLast() else { return }
+        redoStack.append(doc)
+        doc = d
+        selection = selection.filter { id in d.bodies.contains { $0.id == id } }
+        cancelMode()
+        rebuildScene()
+    }
+
+    func redo() {
+        guard let d = redoStack.popLast() else { return }
+        undoStack.append(doc)
+        doc = d
+        selection = selection.filter { id in d.bodies.contains { $0.id == id } }
+        rebuildScene()
+    }
+
+    func mutate(_ id: UUID, _ change: (inout Solid) -> Void) {
+        guard let i = doc.bodies.firstIndex(where: { $0.id == id }) else { return }
+        change(&doc.bodies[i])
+        dirty = true
+    }
+
+    private func nextColor() -> Int { doc.bodies.count % Palette.colors.count }
+
+    private func spawnPoint() -> SIMD3<Double> {
+        let t = camera.target
+        let s = settings.snap
+        return SIMD3((Double(t.x) / s).rounded() * s, (Double(t.y) / s).rounded() * s, 0)
+    }
+
+    func add(_ node: Node, name: String) {
+        let body = Solid(name: name, color: nextColor(), node: node, place: Placement(move: spawnPoint()))
+        commit { $0.bodies.append(body) }
+        selection = [body.id]
+        dropSoon([body.id])
+    }
+
+    func addPrimitive(_ kind: PrimKind, sides: Int = 0) {
+        let p = Primitive.make(kind, sides: sides)
+        add(.primitive(p), name: L(p.name))
+    }
+
+    func addShape(_ k: ShapeKind) {
+        let p = k.primitive
+        add(.primitive(p), name: L(p.name))
+    }
+
+    // MARK: shape groups
+
+    func quick(_ g: ShapeGroup) -> ShapeKind { shapes[g.rawValue].flatMap(ShapeKind.init) ?? g.members[0] }
+
+    func setQuick(_ g: ShapeGroup, _ k: ShapeKind) {
+        withAnimation(Neon.spring) { shapes[g.rawValue] = k == g.members[0] ? nil : k.rawValue }
+        scheduleSave()
+    }
+
+    func rename(_ id: UUID, _ name: String) {
+        let t = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, body(id)?.name != t else { return }
+        begin()
+        mutate(id) { $0.name = t }
+    }
+
+    func addFastener(_ f: Fastener) {
+        add(.fastener(f), name: f.name)
+    }
+
+    @ObservationIgnored private var dropQueue: Set<UUID> = []
+    private func dropSoon(_ ids: [UUID]) { if settings.dropToBed { dropQueue.formUnion(ids) } }
+
+    // World bounding box of a body: exact from the shape's box when unrotated, from the mesh otherwise.
+    func worldBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
+        guard let m = meshes[b.id], !m.vertices.isEmpty else { return nil }
+        if b.place.turn == SIMD3(0, 0, 0) {
+            let a = m.low * b.place.scale + b.place.move, c = m.high * b.place.scale + b.place.move
+            return (simd_min(a, c), simd_max(a, c))
+        }
+        let mat = b.place.matrix
+        var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+        let step = max(1, m.vertices.count / 4000)
+        for i in stride(from: 0, to: m.vertices.count, by: step) {
+            let v = m.vertices[i]
+            let w = mat * SIMD4<Double>(Double(v.x), Double(v.y), Double(v.z), 1)
+            lo = simd_min(lo, SIMD3(w.x, w.y, w.z))
+            hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
+        }
+        return (lo, hi)
+    }
+
+    private func applyDrops() {
+        guard !dropQueue.isEmpty else { return }
+        for id in dropQueue {
+            guard let b = body(id), let (lo, _) = worldBounds(b) else { continue }
+            mutate(id) { $0.place.move.z -= lo.z }
+        }
+        dropQueue.removeAll()
+    }
+
+    func deleteSelection() {
+        guard !selection.isEmpty else { return }
+        let ids = Set(selection)
+        commit { $0.bodies.removeAll { ids.contains($0.id) } }
+        selection = []
+    }
+
+    func duplicate() {
+        let copies = selected.map { b -> Solid in
+            var c = b
+            c.id = UUID()
+            c.name = b.name
+            c.place.move.x += max(10, settings.snap * 10)
+            return c
+        }
+        guard !copies.isEmpty else { return }
+        commit { $0.bodies.append(contentsOf: copies) }
+        selection = copies.map(\.id)
+    }
+
+    func selectAll() { selection = doc.bodies.filter { !$0.hidden }.map(\.id) }
+
+    func hideSelection() {
+        let ids = Set(selection)
+        guard !ids.isEmpty else { return }
+        commit { d in for i in d.bodies.indices where ids.contains(d.bodies[i].id) { d.bodies[i].hidden = true } }
+        selection = []
+    }
+
+    func showAll() {
+        guard doc.bodies.contains(where: \.hidden) else { return }
+        commit { d in for i in d.bodies.indices { d.bodies[i].hidden = false } }
+    }
+
+    func combine(_ op: Int32) {
+        let parts = selection.compactMap { body($0) }
+        guard parts.count >= 2 else { flash(L("Select two or more shapes")); return }
+        let first = parts[0]
+        let name = op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect")
+        let group = Solid(name: name, color: first.color, node: .group(op: op, parts: parts.map { Part(node: $0.node, place: $0.place, name: $0.name, color: $0.color) }))
+        let ids = Set(selection)
+        commit { d in
+            let at = d.bodies.firstIndex { ids.contains($0.id) } ?? d.bodies.count
+            d.bodies.removeAll { ids.contains($0.id) }
+            d.bodies.insert(group, at: min(at, d.bodies.count))
+        }
+        selection = [group.id]
+    }
+
+    func ungroup() {
+        guard let b = primary, case .group(_, let parts) = b.node else { flash(L("Select a merged shape")); return }
+        let bodies = parts.enumerated().map { i, p in
+            Solid(name: p.name ?? L("Part {n}", ["n": i + 1]), color: p.color ?? (b.color + i) % Palette.colors.count, node: p.node,
+                  place: Placement.from(b.place.matrix * p.place.matrix))
+        }
+        commit { d in
+            let at = d.bodies.firstIndex { $0.id == b.id } ?? d.bodies.count
+            d.bodies.removeAll { $0.id == b.id }
+            d.bodies.insert(contentsOf: bodies, at: min(at, d.bodies.count))
+        }
+        selection = bodies.map(\.id)
+    }
+
+    // MARK: split
+
+    var splitPlane: Plane? {
+        let bodies = selected
+        guard !bodies.isEmpty else { return nil }
+        var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+        for b in bodies {
+            if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
+        }
+        guard lo.x.isFinite else { return nil }
+        var n = SIMD3<Double>(0, 0, 0)
+        n[splitAxis] = 1
+        let tx = splitTilt.x * .pi / 180, ty = splitTilt.y * .pi / 180
+        let a = (splitAxis + 1) % 3, c = (splitAxis + 2) % 3
+        var t = n
+        t[a] += tan(tx)
+        t[c] += tan(ty)
+        var p = (lo + hi) / 2
+        p[splitAxis] += splitOffset
+        return Plane(point: p, normal: normalize(t))
+    }
+
+    func split() {
+        guard let plane = splitPlane else { return }
+        var made: [UUID] = []
+        commit { d in
+            for (i, b) in d.bodies.enumerated().reversed() where selection.contains(b.id) {
+                let inv = b.place.matrix.inverse
+                let lp = inv * SIMD4(plane.point, 1)
+                let ln = simd_transpose(b.place.matrix) * SIMD4(plane.normal, 0)
+                let local = Plane(point: SIMD3(lp.x, lp.y, lp.z), normal: normalize(SIMD3(ln.x, ln.y, ln.z)))
+                var one = b, two = b
+                one.id = UUID(); two.id = UUID()
+                one.node = .split(of: b.node, plane: local, side: 0)
+                two.node = .split(of: b.node, plane: local, side: 1)
+                one.name = b.name + " ▲"
+                two.name = b.name + " ▼"
+                two.color = (b.color + 1) % Palette.colors.count
+                d.bodies.replaceSubrange(i...i, with: [one, two])
+                made += [one.id, two.id]
+            }
+        }
+        selection = made
+        withAnimation(Neon.spring) { mode = .select }
+    }
+
+    // MARK: rounding
+
+    func commitRound() {
+        guard let id = editBody, !edgePicks.isEmpty, roundRadius >= 0.01 else { return }
+        let picks = edgePicks, r = roundRadius
+        commit { d in
+            if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = .round(of: d.bodies[i].node, picks: picks, radius: r) }
+        }
+        edgePicks = []
+    }
+
+    // Live rounding while dragging: builds the rounded shape in the background, newest radius wins.
+    func previewRound() {
+        guard let id = editBody, let b = body(id), !edgePicks.isEmpty else { return }
+        if previewBusy { previewAgain = true; return }
+        previewBusy = true
+        let node = Node.round(of: b.node, picks: edgePicks, radius: roundRadius)
+        let clearance = settings.clearance
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            let mesh = Kernel.shared.mesh(node)
+            let problems = Kernel.shared.takeProblems()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.previewBusy = false
+                    guard self.mode == .round, self.editBody == id else { return }
+                    if let mesh {
+                        self.meshes[id] = mesh
+                        self.built[id] = node
+                    }
+                    self.report(problems)
+                    if self.previewAgain { self.previewAgain = false; self.previewRound() }
+                }
+            }
+        }
+    }
+
+    // Puts back the body's own mesh after a preview that wasn't applied.
+    func clearPreview() {
+        guard let id = editBody, let b = body(id), built[id] != b.node else { return }
+        built[id] = nil
+        rebuildScene()
+    }
+
+    // After a drag: rotated or scaled parts settle back onto the bed.
+    func finishTransform() {
+        if settings.dropToBed && gizmo != .move { dropSoon(selection) }
+        applyDrops()
+        sceneVersion += 1
+    }
+
+    // Scaling a plain primitive or a fastener changes its sizes instead of stretching it (threads never distort).
+    func finishScale() {
+        for id in selection {
+            guard let b = body(id), b.place.scale != SIMD3(1, 1, 1) else { continue }
+            let s = b.place.scale
+            switch b.node {
+            case .primitive(var p):
+                p.scale(by: s)
+                mutate(id) { $0.node = .primitive(p); $0.place.scale = SIMD3(1, 1, 1) }
+            case .fastener(var f):
+                f.length = max(1, (f.length * s.z * 100).rounded() / 100)
+                mutate(id) { $0.node = .fastener(f); $0.place.scale = SIMD3(1, 1, 1) }
+            default:
+                break
+            }
+        }
+        dropSoon(selection)
+        rebuildScene()
+    }
+
+    // A click without dragging leaves no undo step behind.
+    func undoLastIfUnchanged() {
+        if undoStack.last == doc { undoStack.removeLast() }
+    }
+
+    // MARK: hollow
+
+    // A click on a face: opens it, or closes it again; ⌥ gives it its own wall instead.
+    func pickHollowFace(_ face: Pick, ownWall: Bool) {
+        if ownWall {
+            hollowOpen.removeAll { $0 == face }
+            if let i = hollowWalls.firstIndex(where: { $0.face == face }) {
+                focusWall = i
+            } else {
+                hollowWalls.append(Wall(face: face, thickness: hollowThickness))
+                focusWall = hollowWalls.count - 1
+            }
+        } else {
+            hollowWalls.removeAll { $0.face == face }
+            focusWall = nil
+            if let i = hollowOpen.firstIndex(of: face) { hollowOpen.remove(at: i) } else { hollowOpen.append(face) }
+        }
+    }
+
+    func removeWall(_ i: Int) {
+        guard hollowWalls.indices.contains(i) else { return }
+        hollowWalls.remove(at: i)
+        focusWall = nil
+    }
+
+    func commitHollow() {
+        guard let id = editBody, body(id) != nil else { flash(L("Select a shape to hollow")); return }
+        let open = hollowOpen, walls = hollowWalls, t = hollowThickness
+        commit { d in
+            if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = .hollow(of: d.bodies[i].node, open: open, walls: walls, thickness: t) }
+        }
+        withAnimation(Neon.spring) {
+            hollowOpen = []
+            hollowWalls = []
+            focusWall = nil
+            mode = .select
+        }
+    }
+
+    // MARK: bed
+
+    // Puts the selection (or every visible shape) down on the bed.
+    func dropToBed() {
+        let ids = selection.isEmpty ? doc.bodies.filter { !$0.hidden }.map(\.id) : selection
+        let moves = ids.compactMap { id -> (UUID, Double)? in
+            guard let b = body(id), let (lo, _) = worldBounds(b), abs(lo.z) > 0.000_1 else { return nil }
+            return (id, lo.z)
+        }
+        guard !moves.isEmpty else { return }
+        begin()
+        for (id, z) in moves { mutate(id) { $0.place.move.z -= z } }
+        sceneVersion += 1
+    }
+
+    // Wrapper nodes (roundings, splits, hollows) of a body, outermost first.
+    func stack(_ b: Solid) -> [Node] {
+        var out: [Node] = []
+        var n: Node? = b.node
+        while let c = n {
+            out.append(c)
+            n = c.inner
+        }
+        return out
+    }
+
+    private func rewrite(_ node: Node, level: Int, _ f: (Node) -> Node?) -> Node {
+        if level == 0 { return f(node) ?? node.inner ?? node }
+        guard let n = node.inner else { return node }
+        return node.wrapping(rewrite(n, level: level - 1, f))
+    }
+
+    func removeLayer(_ id: UUID, level: Int) {
+        commit { d in
+            if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = rewrite(d.bodies[i].node, level: level) { _ in nil } }
+        }
+    }
+
+    // Edits one wrapper layer (a rounding, split or hollow) of a body.
+    func editLayer(_ id: UUID, level: Int, _ f: (Node) -> Node) {
+        begin()
+        mutate(id) { b in b.node = rewrite(b.node, level: level) { f($0) } }
+        rebuildScene()
+    }
+
+    func setBase(_ id: UUID, record: Bool = true, _ f: (Node) -> Node) {
+        if record { begin() }
+        mutate(id) { $0.node = $0.node.replacingBase(f) }
+        rebuildScene()
+    }
+
+    func setPlace(_ id: UUID, record: Bool = true, _ f: (inout Placement) -> Void) {
+        if record { begin() }
+        mutate(id) { f(&$0.place) }
+        sceneVersion += 1
+    }
+
+    // MARK: inspector screens
+
+    var screen: Screen {
+        if mode == .angles { return .angles }
+        switch gizmo {
+        case .move: return .move
+        case .scale: return .resize
+        case .rotate: return .rotate
+        }
+    }
+
+    func choose(_ s: Screen) {
+        guard s != screen || mode != .select && s != .angles else { return }
+        if mode == .round { clearPreview() }
+        screenStep = s.rawValue >= screen.rawValue ? 1 : -1
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+            switch s {
+            case .move: gizmo = .move
+            case .resize: gizmo = .scale
+            case .rotate: gizmo = .rotate
+            case .angles: break
+            }
+            mode = s == .angles ? .angles : .select
+            edgePicks = []
+            editBody = s == .angles ? selection.last : nil
+        }
+    }
+
+    // A two-finger sideways swipe over the inspector moves to the neighbouring screen, one per swipe.
+    private func swipeInspector(_ e: NSEvent) -> Bool {
+        guard e.hasPreciseScrollingDeltas, e.momentumPhase == [], !selection.isEmpty, angleEdit == nil,
+              let height = e.window?.contentView?.bounds.height else { return false }
+        let p = CGPoint(x: e.locationInWindow.x, y: height - e.locationInWindow.y)
+        if e.phase == .began { swipe = 0; swiped = false }
+        guard inspectorFrame.contains(p), !namesFrame.contains(p), abs(e.scrollingDeltaX) > abs(e.scrollingDeltaY) else { return false }
+        swipe += e.scrollingDeltaX
+        if !swiped, abs(swipe) > 50 {
+            swiped = true
+            let step = (swipe < 0 ? 1 : -1) * (Skin.shared.rtl ? -1 : 1)
+            if let next = Screen(rawValue: screen.rawValue + step) { choose(next) }
+        }
+        return true
+    }
+
+    // MARK: angles
+
+    // Opens the 2D angle editor for the picked edges: the camera flies to the edge and turns to look along it,
+    // then the cut through the shape takes the whole view.
+    func workWithAngles() {
+        guard let id = editBody, let b = body(id), let first = edgePicks.first, !angleOpening else { return }
+        angleOpening = true
+        let node = b.node, picks = edgePicks, clearance = settings.clearance
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            let section = Kernel.shared.section(node, first)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let section, self.mode == .angles, let b = self.body(id) else {
+                        self.angleOpening = false
+                        if section == nil { self.flash(L("This edge can't be shown in a cut")) }
+                        return
+                    }
+                    let m = b.place.matrix
+                    let at = m * SIMD4(section.point, 1)
+                    let along = simd_normalize((m * SIMD4(section.direction, 0)).xyz)
+                    self.cameraBeforeAngles = self.camera
+                    self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
+                        withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) {
+                            self.angleEdit = AngleEdit(body: id, picks: picks, section: section)
+                        }
+                        self.angleOpening = false
+                    }
+                }
+            }
+        }
+    }
+
+    func closeAngles() {
+        guard angleEdit != nil else { return }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.88)) { angleEdit = nil }
+        if let c = cameraBeforeAngles { fly(to: c.target, yaw: c.yaw, pitch: c.pitch, distance: c.distance) }
+        cameraBeforeAngles = nil
+    }
+
+    // Applies the editor's rounding or bevel to the picked edges, to the whole shape, or to every selected shape.
+    func applyAngles(whole: Bool = false, everyShape: Bool = false) {
+        guard let e = angleEdit else { return }
+        let ids = everyShape ? selection : [e.body]
+        commit { d in
+            for id in ids {
+                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = e.wrapping(d.bodies[i].node, whole: whole || everyShape) }
+            }
+        }
+        edgePicks = []
+        closeAngles()
+    }
+
+    func updateAngles(_ change: (inout AngleEdit) -> Void) {
+        guard var e = angleEdit else { return }
+        change(&e)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.84)) { angleEdit = e }
+    }
+
+    // Glides the camera to a new view over half a second (eased), redrawing each frame.
+    private func fly(to target: SIMD3<Float>, looking dir: SIMD3<Float>, distance: Float, done: @escaping () -> Void) {
+        let v = simd_length(dir) > 0 ? -simd_normalize(dir) : SIMD3<Float>(0, -1, 0)
+        let facing = simd_dot(v, camera.eye - camera.target) < 0 ? -v : v
+        let pitch = asin(max(-0.999, min(0.999, facing.z)))
+        let yaw = atan2(facing.x, -facing.y)
+        fly(to: target, yaw: yaw, pitch: max(-1.55, min(1.55, pitch)), distance: distance, done: done)
+    }
+
+    private func fly(to target: SIMD3<Float>, yaw: Float, pitch: Float, distance: Float, done: (() -> Void)? = nil) {
+        flight?.cancel()
+        let from = camera
+        var turn = yaw - from.yaw
+        while turn > .pi { turn -= 2 * .pi }
+        while turn < -.pi { turn += 2 * .pi }
+        let steps = Neon.calm ? 8 : 30
+        flight = Task { [weak self] in
+            for i in 1...steps {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard let self, !Task.isCancelled else { return }
+                let t = Float(i) / Float(steps), k = t * t * (3 - 2 * t)
+                self.camera.target = from.target + (target - from.target) * k
+                self.camera.yaw = from.yaw + turn * k
+                self.camera.pitch = from.pitch + (pitch - from.pitch) * k
+                self.camera.distance = exp(log(from.distance) + (log(distance) - log(from.distance)) * k)
+                self.sceneVersion += 1
+            }
+            done?()
+        }
+    }
+
+    // MARK: modes
+
+    func enter(_ m: Mode) {
+        if m == .split && selection.isEmpty { flash(L("Select a shape to split")); return }
+        if mode == .round { clearPreview() }
+        withAnimation(Neon.spring) {
+            mode = mode == m ? .select : m
+            edgePicks = []
+            hollowOpen = []
+            hollowWalls = []
+            focusWall = nil
+            editBody = mode == .hollow ? selection.last : nil
+            splitOffset = 0
+            splitTilt = .zero
+        }
+    }
+
+    func cancelMode() {
+        if angleEdit != nil { closeAngles(); return }
+        if mode == .round { clearPreview() }
+        withAnimation(Neon.spring) {
+            if mode != .select { mode = .select } else { selection = [] }
+            edgePicks = []
+            hollowOpen = []
+            hollowWalls = []
+            focusWall = nil
+        }
+    }
+
+    // MARK: rebuild
+
+    func rebuildScene() {
+        if building { pendingBuild = true; return }
+        let bodies = doc.bodies
+        let clearance = settings.clearance
+        var todo: [(UUID, Node)] = []
+        let rebuildAll = clearance != builtClearance
+        for b in bodies where rebuildAll || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node)) }
+        let alive = Set(bodies.map(\.id))
+        meshes = meshes.filter { alive.contains($0.key) }
+        built = built.filter { alive.contains($0.key) }
+        sceneVersion += 1
+        guard !todo.isEmpty else { applyDrops(); return }
+        building = true
+        builtClearance = clearance
+        let slow = todo.count > 1 || todo.contains { if case .fastener = $0.1.base { true } else { false } }
+        if slow { busy = L("Building…") }
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            var out: [(UUID, Node, Mesh?)] = []
+            for (id, node) in todo { out.append((id, node, Kernel.shared.mesh(node))) }
+            let problems = Kernel.shared.takeProblems()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    for (id, node, mesh) in out {
+                        self.built[id] = node
+                        if let mesh { self.meshes[id] = mesh } else { self.meshes[id] = Mesh() }
+                    }
+                    self.building = false
+                    if slow { withAnimation(Neon.spring) { self.busy = nil } }
+                    self.sceneVersion += 1
+                    self.applyDrops()
+                    self.report(problems)
+                    if self.pendingBuild { self.pendingBuild = false; self.rebuildScene() }
+                }
+            }
+        }
+    }
+
+    private func report(_ problems: [String]) {
+        if let m = problems.first(where: { $0.hasPrefix("max:") }) {
+            flash(L("Rounding too large — the most this edge takes is {r} mm", ["r": String(format: "%.2f", Double(m.dropFirst(4)) ?? 0)]))
+        } else if problems.contains("round") {
+            flash(L("These edges can't be rounded"))
+        } else if problems.contains("cove") {
+            flash(L("These edges can't be rounded inward"))
+        } else if problems.contains("bevel") {
+            flash(L("This bevel doesn't fit these edges — try smaller sizes"))
+        } else if problems.contains("pieces") {
+            flash(L("These shapes don't touch, so the merge stays in separate pieces"))
+        } else if problems.contains("hollow") {
+            flash(L("These walls don't fit this shape — try thinner walls"))
+        } else if problems.contains("missing") {
+            flash(L("Some picked edges or faces no longer exist and were skipped"))
+        } else if !problems.isEmpty {
+            flash(L("The shape operation failed"))
+        }
+    }
+
+    // MARK: keys
+
+    private func key(_ e: NSEvent) -> Bool {
+        if NSApp.modalWindow != nil { return false }
+        let name = Keys.codes[e.keyCode] ?? ""
+        if capturing != nil { capture(e.keyCode == 53 ? "" : name); return true }
+        if let r = NSApp.keyWindow?.firstResponder, r is NSText || r is NSTextView { return false }
+        let mods = e.modifierFlags.intersection([.command, .control, .option])
+        if !mods.isEmpty { return false }
+        if popup != nil {
+            if e.keyCode == 53 { dismissPopup(); return true }
+            return false
+        }
+        let shift = e.modifierFlags.contains(.shift)
+        switch name {
+        case "Enter":
+            if angleEdit != nil { applyAngles(); return true }
+            if mode == .split { split(); return true }
+            if mode == .round { commitRound(); return true }
+            if mode == .hollow { commitHollow(); return true }
+            return false
+        case "Backspace":
+            deleteSelection(); return true
+        case "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown":
+            nudge(name, big: shift); return true
+        case "KeyX" where mode == .split, "KeyZ" where mode == .split:
+            withAnimation(Neon.spring) { splitAxis = name == "KeyX" ? 0 : 2 }; return true
+        case "KeyA" where mode == .round || mode == .angles && angleEdit == nil:
+            if let b = editBody ?? selection.last { editBody = b; edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] }
+            return true
+        default: break
+        }
+        if e.keyCode == 53 { cancelMode(); return true }
+        if name.hasPrefix("Digit"), let n = Int(name.dropFirst(5)), n <= 6 { camera.preset(n); sceneVersion += 1; return true }
+        if mode == .split, name == settings.key(.split) { return false }
+        if mode == .split, name == "KeyY" { withAnimation(Neon.spring) { splitAxis = 1 }; return true }
+        guard !name.isEmpty, let a = settings.owner(of: name) else { return false }
+        perform(a)
+        return true
+    }
+
+    func perform(_ a: Action) {
+        switch a {
+        case .move: choose(.move)
+        case .rotate: choose(.rotate)
+        case .scale: choose(.resize)
+        case .round: enter(.round)
+        case .split: enter(.split)
+        case .hollow: enter(.hollow)
+        case .drop: dropToBed()
+        case .frame: requestFit = true; sceneVersion += 1
+        case .hide: hideSelection()
+        case .showAll: showAll()
+        }
+    }
+
+    private func nudge(_ key: String, big: Bool) {
+        guard !selection.isEmpty else { return }
+        let step = settings.snap * (big ? 10 : 1)
+        var d = SIMD3<Double>(0, 0, 0)
+        switch key {
+        case "ArrowLeft": d.x = -step
+        case "ArrowRight": d.x = step
+        case "ArrowUp": d.y = step
+        case "ArrowDown": d.y = -step
+        case "PageUp": d.z = step
+        default: d.z = -step
+        }
+        begin()
+        for id in selection { mutate(id) { $0.place.move += d } }
+        sceneVersion += 1
+    }
+
+    // MARK: files
+
+    var title: String { fileURL?.deletingPathExtension().lastPathComponent ?? L("Untitled") }
+
+    func confirmDiscard() -> Bool {
+        guard dirty, !doc.bodies.isEmpty else { return true }
+        let a = NSAlert()
+        a.messageText = L("Save changes to “{name}”?", ["name": title])
+        a.informativeText = L("Your changes are lost if you don't save them.")
+        a.addButton(withTitle: L("Save"))
+        a.addButton(withTitle: L("Cancel"))
+        a.addButton(withTitle: L("Don't Save"))
+        switch a.runModal() {
+        case .alertFirstButtonReturn: return saveDocument()
+        case .alertThirdButtonReturn: return true
+        default: return false
+        }
+    }
+
+    func newDocument() {
+        guard confirmDiscard() else { return }
+        doc = Document()
+        fileURL = nil
+        dirty = false
+        undoStack = []
+        redoStack = []
+        selection = []
+        cancelMode()
+        rebuildScene()
+    }
+
+    func openDocument() {
+        guard confirmDiscard() else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        open(url)
+    }
+
+    func open(_ url: URL) {
+        do {
+            doc = try ThreeMF.read(url)
+            fileURL = url
+            dirty = false
+            undoStack = []
+            redoStack = []
+            selection = []
+            requestFit = true
+            rebuildScene()
+        } catch {
+            flash(L("This 3MF wasn't made by Bcad and can't be edited"))
+        }
+    }
+
+    @discardableResult
+    func saveDocument(as: Bool = false) -> Bool {
+        var url = fileURL
+        if url == nil || `as` {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
+            panel.nameFieldStringValue = title + ".3mf"
+            guard panel.runModal() == .OK, let u = panel.url else { return false }
+            url = u
+        }
+        guard let url else { return false }
+        let bodies = doc.bodies.filter { !$0.hidden }
+        let doc = self.doc
+        busy = L("Saving…")
+        let ok: Bool = Kernel.shared.queue.sync {
+            let meshes = bodies.compactMap { b in Kernel.shared.worldMesh(b).map { (b.name, $0) } }
+            return (try? ThreeMF.write(url, meshes: meshes, doc: doc)) != nil
+        }
+        withAnimation(Neon.spring) { busy = nil }
+        if ok {
+            fileURL = url
+            dirty = false
+            flash(L("Saved {name}", ["name": url.lastPathComponent]))
+        } else {
+            flash(L("Couldn't save the file"))
+        }
+        return ok
+    }
+
+    func export(step: Bool) {
+        let bodies = (selection.isEmpty ? doc.bodies : selected).filter { !$0.hidden }
+        guard !bodies.isEmpty else { flash(L("Nothing to export")); return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: step ? "step" : "stl") ?? .data]
+        panel.nameFieldStringValue = title + (step ? ".step" : ".stl")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        busy = L("Exporting…")
+        let ok: Bool = Kernel.shared.queue.sync {
+            if step { return Kernel.shared.exportStep(bodies, to: url.path) }
+            let meshes = bodies.compactMap { Kernel.shared.worldMesh($0) }
+            return (try? STL.write(url, meshes: meshes)) != nil
+        }
+        withAnimation(Neon.spring) { busy = nil }
+        flash(ok ? L("Exported {name}", ["name": url.lastPathComponent]) : L("Export failed"))
+    }
+}
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ n: Notification) {
+        MainActor.assumeIsolated {
+            MenuText.install()
+            Workbench.shared.rebuildScene()
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            Workbench.shared.save()
+            return Workbench.shared.confirmDiscard() ? .terminateNow : .terminateCancel
+        }
+    }
+
+    func application(_ app: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            guard let u = urls.first, Workbench.shared.confirmDiscard() else { return }
+            Workbench.shared.open(u)
+        }
+    }
+}
+
+struct BcadApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @State private var lib = Workbench.shared
+
+    var body: some Scene {
+        Window("Bcad", id: "main") {
+            RootView()
+                .environment(lib)
+                .frame(minWidth: 1000, minHeight: 600)
+                .skinEnvironment()
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1320, height: 820)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button(L("New")) { lib.newDocument() }.keyboardShortcut("n")
+                Button(L("Open…")) { lib.openDocument() }.keyboardShortcut("o")
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button(L("Save")) { lib.saveDocument() }.keyboardShortcut("s")
+                Button(L("Save As…")) { lib.saveDocument(as: true) }.keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button(L("Export STL…")) { lib.export(step: false) }.keyboardShortcut("e", modifiers: [.command, .shift])
+                Button(L("Export STEP…")) { lib.export(step: true) }.keyboardShortcut("e", modifiers: [.command, .option])
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button(L("Settings…")) { lib.toggleSettings() }.keyboardShortcut(",")
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button(L("Undo")) { Edits.send(#selector(UndoManager.undo)) ? () : lib.undo() }.keyboardShortcut("z")
+                Button(L("Redo")) { Edits.send(#selector(UndoManager.redo)) ? () : lib.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+            CommandGroup(replacing: .pasteboard) {
+                Button(L("Cut")) { _ = Edits.send(#selector(NSText.cut(_:))) }.keyboardShortcut("x")
+                Button(L("Copy")) { _ = Edits.send(#selector(NSText.copy(_:))) }.keyboardShortcut("c")
+                Button(L("Paste")) { _ = Edits.send(#selector(NSText.paste(_:))) }.keyboardShortcut("v")
+                Button(L("Select All")) { Edits.send(#selector(NSText.selectAll(_:))) ? () : lib.selectAll() }.keyboardShortcut("a")
+                Button(L("Duplicate")) { lib.duplicate() }.keyboardShortcut("d")
+                Button(L("Delete")) { lib.deleteSelection() }
+            }
+            CommandMenu(L("Shape")) {
+                Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u")
+                Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("g")
+                Button(L("Subtract")) { lib.combine(Int32(BK_SUBTRACT)) }.keyboardShortcut(.delete, modifiers: .command)
+                Button(L("Intersect")) { lib.combine(Int32(BK_INTERSECT)) }.keyboardShortcut("i")
+                Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift])
+                Divider()
+                Button(L("Split")) { lib.enter(.split) }
+                Button(L("Round edges")) { lib.enter(.round) }
+                Divider()
+                Button(L("Hollow")) { lib.enter(.hollow) }
+                Button(L("Drop onto the bed")) { lib.dropToBed() }
+                Divider()
+                Button(L("Add Thread…")) { lib.show(.thread) }.keyboardShortcut("b")
+            }
+        }
+    }
+}
+
+enum Edits {
+    // Sends an editing command to a focused text field; false when no text field has focus.
+    @MainActor static func send(_ action: Selector) -> Bool {
+        guard let r = NSApp.keyWindow?.firstResponder, r is NSText else { return false }
+        return NSApp.sendAction(action, to: nil, from: nil)
+    }
+}
