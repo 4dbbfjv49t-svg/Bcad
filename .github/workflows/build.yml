@@ -243,9 +243,12 @@ jobs:
           $U trusted
           $U tree | head -80
           $U press Untitled; sleep 2
-          echo "— cylinder, middle"; $U press Cylinder; sleep 2; $U count Cylinder; $U key 51; sleep 1
-          echo "— torus, middle"; $U press Torus; sleep 2; $U count Torus; $U key 51; sleep 1
-          echo "— cube, middle"; $U press Cube; shot ui-01-cube-move; $U count Cube
+          echo "— a cylinder from the top band, selected"; $U hold Cylinder 0.5 0.12 60; sleep 2; $U count Cylinder
+          echo "— the cube's middle: does the selection go (the click went to the 3D view)?"; $U hold Cube 0.5 0.5 60; sleep 2; $U count Cylinder; $U count Cube
+          for f in 0.3 0.4 0.6 0.7; do echo "— cube at $f"; $U hold Cube 0.5 $f 60; sleep 2; $U count Cube; done
+          echo "— the cube's middle, a pressed click without moving there first"; $U axpress Cylinder; sleep 2; $U count Cylinder
+          $U key 0 cmd; sleep 1; $U key 51; sleep 1
+          $U hold Cube 0.5 0.12 60; shot ui-01-cube-move; $U count Cube
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
           $U slide Red 0.9; $U slide Green 0.1; shot ui-03-mixed
