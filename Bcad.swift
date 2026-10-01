@@ -1079,6 +1079,27 @@ final class Workbench: DesignHost {
             guard let self else { return e }
             return self.swipeInspector(e) ? nil : e
         }
+        // TEMPORARY probe: which view takes a click, and what's hit around it.
+        if let path = ProcessInfo.processInfo.environment["BCAD_HITLOG"] {
+            NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { e in
+                func chain(_ p: NSPoint) -> String {
+                    guard let root = e.window?.contentView?.superview ?? e.window?.contentView else { return "no root" }
+                    var v = root.hitTest(p), out: [String] = []
+                    while let x = v { out.append("\(type(of: x))\(x.frame)"); v = x.superview }
+                    return out.joined(separator: " < ")
+                }
+                let p = e.locationInWindow
+                var s = "\(e.type == .leftMouseDown ? "down" : "up") \(p) first responder \(e.window?.firstResponder.map { "\(type(of: $0))" } ?? "-")\n  \(chain(p))\n"
+                if e.type == .leftMouseDown {
+                    for dy in stride(from: -16.0, through: 16.0, by: 4.0) {
+                        for dx in [-12.0, 0, 12] { s += "  dx \(dx) dy \(dy): \(chain(NSPoint(x: p.x + dx, y: p.y + dy)).prefix(90))\n" }
+                    }
+                }
+                if let h = FileHandle(forWritingAtPath: path) { h.seekToEndOfFile(); h.write(Data(s.utf8)); h.closeFile() }
+                else { try? s.write(toFile: path, atomically: true, encoding: .utf8) }
+                return e
+            }
+        }
     }
 
     // MARK: persistence
