@@ -121,6 +121,122 @@ jobs:
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
 
+      - name: Open-file probe
+        continue-on-error: true
+        run: |
+          # Builds the app's own sources with a probe in place of test/SelfTest.swift (same --selftest hook) and drives
+          # Workbench.open the way the app does, printing what the viewport would get.
+          W="$RUNNER_TEMP/probe"
+          mkdir -p "$W"
+          cat > "$W/OpenProbe.swift" <<'SWIFT'
+          #if SELFTEST
+          import AppKit
+          import Metal
+          import simd
+
+          @MainActor
+          enum SelfTest {
+              static func run(_ url: URL) -> Bool {
+                  setvbuf(stdout, nil, _IONBF, 0)
+                  _ = NSApplication.shared
+                  let lib = Workbench.shared
+                  let renderer: Renderer? = MTLCreateSystemDefaultDevice() == nil ? nil : Renderer()
+                  print("Metal device: \(renderer != nil)")
+                  var ok = true
+
+                  func settle(_ limit: Double = 240) {
+                      let end = Date().addingTimeInterval(limit)
+                      while Date() < end {
+                          RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                          if !lib.building && lib.doc.bodies.allSatisfy({ lib.meshes[$0.id] != nil }) { break }
+                      }
+                      RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                  }
+
+                  func report(_ title: String) {
+                      print("== \(title)")
+                      print("   bodies \(lib.doc.bodies.count) · building \(lib.building) · mode \(lib.mode) · angleEdit \(lib.angleEdit != nil) · selection \(lib.selection.count) · dirty \(lib.dirty) · requestFit \(lib.requestFit)")
+                      if let r = renderer, lib.requestFit, r.fit() { lib.requestFit = false }
+                      let f = renderer?.frame(CGSize(width: 1000, height: 820))
+                      let visible = lib.doc.bodies.filter { !$0.hidden }
+                      var drawn = 0
+                      for b in lib.doc.bodies {
+                          guard let m = lib.meshes[b.id] else { print("   \(b.name): NO MESH"); continue }
+                          var inView = "?"
+                          if let f, let (lo, hi) = lib.worldBounds(b) {
+                              let c = f.viewProj * SIMD4<Float>(SIMD3<Float>((lo + hi) / 2), 1)
+                              let ndc = SIMD3(c.x, c.y, c.z) / c.w
+                              inView = c.w > 0 && abs(ndc.x) <= 1 && abs(ndc.y) <= 1 && ndc.z >= 0 && ndc.z <= 1 ? "yes" : "NO \(ndc)"
+                          }
+                          if !m.vertices.isEmpty && !b.hidden { drawn += 1 }
+                          print("   \(b.name): hidden \(b.hidden) · \(m.vertices.count) verts · \(m.indices.count / 3) tris · valid \(m.valid) · vol \(String(format: "%.1f", m.volume)) · centre in view \(inView)")
+                      }
+                      print("   camera target \(lib.camera.target) distance \(lib.camera.distance) · drawable bodies \(drawn)/\(visible.count)")
+                      if drawn < visible.count { ok = false; print("   ✗ visible bodies with nothing to draw") }
+                      if lib.angleEdit != nil { ok = false; print("   ✗ the angle editor still covers the viewport and hides the tools") }
+                  }
+
+                  lib.rebuildScene()
+                  settle(10)
+                  report("launch, empty")
+
+                  let t0 = Date()
+                  lib.open(url)
+                  report("right after open")
+                  settle()
+                  report(String(format: "after the build (%.1f s)", Date().timeIntervalSince(t0)))
+                  let first = lib.doc.bodies.map { lib.meshes[$0.id]?.vertices.count ?? -1 }
+
+                  lib.open(url)
+                  settle()
+                  report("same file opened again")
+
+                  lib.dirty = false
+                  lib.newDocument()
+                  settle(5)
+                  lib.open(url)
+                  lib.open(url)
+                  settle()
+                  report("opened twice in a row, the second while the first builds")
+                  if lib.doc.bodies.map({ lib.meshes[$0.id]?.vertices.count ?? -1 }) != first { ok = false; print("   ✗ meshes differ from the first open") }
+
+                  if let b = lib.doc.bodies.first {
+                      lib.selection = [b.id]
+                      lib.choose(.angles)
+                      lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
+                      lib.workWithAngles()
+                      let end = Date().addingTimeInterval(20)
+                      while lib.angleEdit == nil && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+                      print("== angle editor open before the next open: \(lib.angleEdit != nil)")
+                      lib.open(url)
+                      settle()
+                      report("opened while the angle editor was open")
+                  }
+
+                  lib.dirty = false
+                  lib.newDocument()
+                  lib.open(url)
+                  settle()
+                  if let b = lib.doc.bodies.first { lib.selection = [b.id] }
+                  lib.enter(.hollow)
+                  lib.open(url)
+                  settle()
+                  report("opened while in Hollow mode")
+
+                  print(ok ? "PROBE OK" : "PROBE FOUND PROBLEMS")
+                  return ok
+              }
+          }
+          #endif
+          SWIFT
+          SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
+          OCCT="$PWD/Vendor/occt"
+          clang++ -O2 -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -w -I "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$W/k.o"
+          LIBS=(); for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
+          swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 -D SELFTEST -import-objc-header BcadKernel.h \
+            Bcad.swift Design.swift Viewport.swift Views.swift Files.swift "$W/OpenProbe.swift" "$W/k.o" "${LIBS[@]}" -lc++ -o "$W/probe"
+          APP_STRINGS="$PWD/i18n.json" perl -e 'alarm 900; exec @ARGV' "$W/probe" --selftest "$TMPDIR/bcad-selftest/test.3mf" 2>&1 | tee "$RUNNER_TEMP/results/probe.log"
+
       - name: Thumbnails
         if: always()
         continue-on-error: true
