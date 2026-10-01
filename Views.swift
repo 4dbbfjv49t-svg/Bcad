@@ -239,8 +239,9 @@ struct ShapeGroupButton: View {
     var body: some View {
         let k = lib.quick(group)
         HStack(spacing: 1) {
+            // Not 34: at that size a hovered button ignores clicks along its middle line.
             Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
-                .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
+                .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 36))
                 .help(L(k.primitive.name))
                 .accessibilityLabel(L(k.primitive.name))
                 #if SELFTEST

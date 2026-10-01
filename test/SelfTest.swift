@@ -399,7 +399,7 @@ enum ClickProbe {
     static func show(_ v: AnyView) {
         window?.close()
         frames = [:]
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 674), styleMask: [.titled], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 674), styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: v.environment(Workbench.shared).skinEnvironment())
         w.setFrameTopLeftPoint(NSPoint(x: 0, y: (NSScreen.main?.frame.height ?? 768) - 30))
@@ -444,8 +444,9 @@ enum ClickProbe {
             }
             sleep(1)
             var line = "\(name) \(onMain { frames[key].map { "\($0)" } ?? "no frame" }):"
-            for fy in [0.1, 0.45, 0.49, 0.5, 0.5088, 0.51, 0.55, 0.9] { line += String(format: " y%.4f", fy) + click(key, 0.5, fy) }
-            line += " x0.12" + click(key, 0.12, 0.5)
+            let h = onMain { frames[key]?.height ?? 34 }
+            for dy in [-6.0, -1, -0.5, 0, 0.5, 1, 6] as [CGFloat] { line += String(format: " %+.1f", dy) + click(key, 0.5, 0.5 + dy / h) }
+            line += " left" + click(key, 0.15, 0.5)
             print(line)
         }
         sleep(2)
@@ -457,22 +458,9 @@ enum ClickProbe {
             }
         }
         variant("whole interface") { AnyView(RootView()) }
-        one("34 cube") { Image(systemName: "cube") }
-        one("32 cube", size: 32) { Image(systemName: "cube") }
-        one("30 cube", size: 30) { Image(systemName: "cube") }
-        one("36 cube", size: 36) { Image(systemName: "cube") }
-        one("34 gear") { Image(systemName: "gearshape.fill") }
-        one("34 text") { Text("A") }
-        one("34 nothing") { Color.clear.frame(width: 10, height: 10) }
-        one("34 cube, symbol effects removed") { Image(systemName: "cube") } _: { AnyView($0.symbolEffectsRemoved()) }
-        one("34 cube, rectangle content shape") { Image(systemName: "cube") } _: { AnyView($0.contentShape(Rectangle())) }
-        one("34 cube, tap gesture") { Image(systemName: "cube") } _: { AnyView($0.highPriorityGesture(TapGesture().onEnded { ClickProbe.taps += 1 })) }
-        one("34 cube at the top", top: true) { Image(systemName: "cube") }
-        variant("plain 34 cube", "target") {
-            AnyView(Harness {
-                Button { ClickProbe.taps += 1 } label: { Image(systemName: "cube").frame(width: 34, height: 34).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).probed("target")
-            })
+        for size in [16, 24, 28, 30, 32, 34, 36] as [CGFloat] {
+            one("size \(Int(size))", size: size) { Image(systemName: "cube") }
+            one("size \(Int(size)) at the top", top: true, size: size) { Image(systemName: "cube") }
         }
         onMain {
             Kernel.shared.queue.sync {}
@@ -498,7 +486,6 @@ struct Harness<Content: View>: View {
         }
         .padding(.bottom, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WindowConfigurator())
         .ignoresSafeArea()
     }
 }
@@ -513,7 +500,6 @@ struct TopHarness<Content: View>: View {
         }
         .padding(.top, 60)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(WindowConfigurator())
         .ignoresSafeArea()
     }
 }
