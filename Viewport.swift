@@ -988,7 +988,7 @@ final class CadView: MTKView {
             lib.sceneVersion += 1
         case .axis(let i):
             let a = renderer.gizmoAxes()[i]
-            accum += along(a, dx, dy)
+            accum = travel(p, a, dx, dy)
             guides = []
             var shift = SIMD3<Double>(0, 0, 0)
             shift[i] = accum
@@ -1004,7 +1004,7 @@ final class CadView: MTKView {
             if !free { ang = (ang / lib.settings.turnStep).rounded() * lib.settings.turnStep }
             rotate(axis, ang)
         case .scaleAxis(let i):
-            accum += along(renderer.gizmoAxes()[i], dx, dy)
+            accum = travel(p, renderer.gizmoAxes()[i], dx, dy)
             guides = []
             let uniform = lib.settings.uniform || e.modifierFlags.contains(.shift)
             let symmetric = lib.settings.symmetric || e.modifierFlags.contains(.option)
@@ -1267,6 +1267,18 @@ final class CadView: MTKView {
         q[span] = hi[span]
         guides.append((p, q))
         for k in mark.ring.indices.dropFirst() { guides.append((mark.ring[k - 1], mark.ring[k])) }
+    }
+
+    // How far along axis a, through the gizmo as the drag began, the pointer has gone since the press (mm): exactly the point
+    // under it, or stepped from its movement while the axis points straight at the viewer.
+    private func travel(_ p: CGPoint, _ a: SIMD3<Double>, _ dx: CGFloat, _ dy: CGFloat) -> Double {
+        func reach(_ q: CGPoint) -> Double? {
+            let (o, d) = ray(q)
+            let w = o - startPlane, b = dot(d, a), across = 1 - b * b
+            return across > 1e-4 ? (dot(a, w) - b * dot(d, w)) / across : nil
+        }
+        if let now = reach(p), let then = reach(downAt) { return now - then }
+        return accum + along(a, dx, dy)
     }
 
     // Mouse movement along a world direction, in mm.

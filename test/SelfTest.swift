@@ -349,7 +349,8 @@ enum SelfTest {
         check("dragging the top handle keeps the bottom", abs(pullLo.z) < 0.01 && abs(pullHi.z - 30) < 0.6, String(format: "z %.2f … %.2f", pullLo.z, pullHi.z))
         pull(2, 5, .option)
         let (optLo, optHi) = bounds(cube.id)
-        check("⌥-dragging keeps the middle", abs((optLo.z + optHi.z) / 2 - 15) < 0.01 && abs(optHi.z - optLo.z - 40) < 1.2, String(format: "z %.2f … %.2f", optLo.z, optHi.z))
+        check("⌥-dragging keeps the middle", abs((optLo.z + optHi.z) / 2 - (pullLo.z + pullHi.z) / 2) < 0.01 && abs(optHi.z - optLo.z - (pullHi.z - pullLo.z) - 10) < 0.6,
+              String(format: "z %.2f … %.2f", optLo.z, optHi.z))
         let other = Solid(name: "Other", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(30, 0, 10)))
         use([cube, other])
         lib.selection = [cube.id, other.id]
