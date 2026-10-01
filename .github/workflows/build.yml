@@ -28,13 +28,6 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
           swiftc --version
           clang++ --version
-          ls -la /Library/Developer/CommandLineTools/SDKs || echo "no Command Line Tools SDKs"
-          if ! ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk >/dev/null 2>&1; then
-            echo "build.sh needs a Command Line Tools macOS 26 SDK; linking the Xcode one there"
-            sudo mkdir -p /Library/Developer/CommandLineTools/SDKs
-            sudo ln -s "$(xcrun --sdk macosx --show-sdk-path)" /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
-          fi
-          ls -la /Library/Developer/CommandLineTools/SDKs
 
       - name: Restore OpenCascade
         id: occt
@@ -42,10 +35,10 @@ jobs:
         with:
           path: Vendor/occt
           key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
+          restore-keys: occt-${{ runner.arch }}-
 
       - name: Build OpenCascade
         run: |
-          mkdir -p Vendor  # occt.sh expects Vendor/ to exist
           start=$(date +%s)
           ./occt.sh
           echo "occt.sh took $(( $(date +%s) - start )) s"
@@ -58,7 +51,6 @@ jobs:
           key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
 
       - name: Self-test
-        continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/results"
           start=$(date +%s)
@@ -120,6 +112,95 @@ jobs:
           cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null || echo "no crash reports"
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
+
+      - name: Verify the 3D view after a Finder-style open
+        continue-on-error: true
+        run: |
+          # Temporary check: the real app with a frame counter on its 3D view, launched with the file as a double-click
+          # does, then an orbit drag on empty space. Expect frames before and more frames after the drag.
+          W="$RUNNER_TEMP/probe"
+          R="$RUNNER_TEMP/results"
+          FILE="$TMPDIR/bcad-selftest/test.3mf"
+          mkdir -p "$W"
+          cat > "$W/LSProbe.swift" <<'SWIFT'
+          #if SELFTEST
+          import AppKit
+          import MetalKit
+
+          @MainActor
+          final class Spy: NSObject, MTKViewDelegate {
+              let inner: Renderer
+              var frames = 0
+              init(_ r: Renderer) { inner = r }
+              nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+              nonisolated func draw(in view: MTKView) {
+                  MainActor.assumeIsolated { frames += 1 }
+                  inner.draw(in: view)
+              }
+          }
+
+          @MainActor
+          enum SelfTest {
+              static var spy: Spy?
+
+              static func run(_ url: URL) -> Bool {
+                  setvbuf(stdout, nil, _IONBF, 0)
+                  let lib = Workbench.shared
+                  func find(_ v: NSView) -> CadView? { (v as? CadView) ?? v.subviews.lazy.compactMap(find).first }
+                  func cad() -> CadView? { NSApp.windows.lazy.compactMap { $0.contentView.flatMap(find) }.first }
+                  func state(_ title: String) {
+                      print("== \(title): frames \(spy?.frames ?? -1) · bodies \(lib.doc.bodies.count), meshes \(lib.meshes.count) · requestFit \(lib.requestFit) · yaw \(lib.camera.yaw)")
+                  }
+                  func at(_ t: Double, _ f: @escaping @MainActor () -> Void) {
+                      DispatchQueue.main.asyncAfter(deadline: .now() + t) { MainActor.assumeIsolated { f() } }
+                  }
+                  at(4) {
+                      guard let v = cad() else { print("✗ no 3D view"); return }
+                      let s = Spy(v.renderer)
+                      v.delegate = s
+                      spy = s
+                      state("1 four seconds after launch (counting starts)")
+                      lib.sceneVersion += 1
+                  }
+                  at(8) { state("2 after one change to the scene") }
+                  at(9) {
+                      guard let v = cad(), let w = v.window else { return }
+                      let start = v.convert(NSPoint(x: v.bounds.maxX - 60, y: v.bounds.minY + 60), to: nil)
+                      func ev(_ t: NSEvent.EventType, _ dx: CGFloat) -> NSEvent {
+                          NSEvent.mouseEvent(with: t, location: NSPoint(x: start.x + dx, y: start.y), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                      }
+                      v.mouseDown(with: ev(.leftMouseDown, 0))
+                      for k in 1...6 { v.mouseDragged(with: ev(.leftMouseDragged, -CGFloat(k) * 5)) }
+                      v.mouseUp(with: ev(.leftMouseUp, -30))
+                  }
+                  at(11) { state("3 after an orbit drag") }
+                  at(12) { exit(0) }
+                  BcadApp.main()
+                  return true
+              }
+          }
+          #endif
+          SWIFT
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          OCCT="$PWD/Vendor/occt"
+          clang++ -O2 -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -isystem "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$W/k.o"
+          LIBS=(); for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
+          swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 -D SELFTEST -import-objc-header BcadKernel.h \
+            Bcad.swift Design.swift Viewport.swift Views.swift Files.swift "$W/LSProbe.swift" "$W/k.o" "${LIBS[@]}" -lc++ -o "$W/lsprobe"
+          P="$RUNNER_TEMP/ProbeApp.app"
+          rm -rf "$P"
+          cp -R "$RUNNER_TEMP/out/Bcad.app" "$P"
+          cp "$W/lsprobe" "$P/Contents/MacOS/Bcad"
+          codesign --force -s - "$P"
+          pkill -x Bcad || true
+          sleep 2
+          open -a "$P" --stdout "$R/verify.out" --stderr "$R/verify.err" "$FILE" --args --selftest "$FILE"
+          sleep 6
+          screencapture -x "$R/shots/verify-cold-6s.png"
+          sleep 10
+          grep -E '^(==|✗)' "$R/verify.out" || tail -20 "$R/verify.out" "$R/verify.err"
+          pkill -x Bcad || true
 
       - name: Thumbnails
         if: always()
