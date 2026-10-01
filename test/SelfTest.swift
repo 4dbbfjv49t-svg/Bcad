@@ -206,6 +206,8 @@ enum SelfTest {
         }
         lib.open(u3)
         check("open leaves the tools behind", lib.mode == .select && lib.angleEdit == nil && lib.editBody == nil && lib.selection.isEmpty)
+        // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
+        k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")
         return ok
     }
