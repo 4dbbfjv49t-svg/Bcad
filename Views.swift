@@ -241,7 +241,6 @@ struct ShapeGroupButton: View {
         HStack(spacing: 1) {
             Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
                 .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
-                .contentTransition(.symbolEffect(.replace))
                 .help(L(k.primitive.name))
                 .accessibilityLabel(L(k.primitive.name))
             Button { withAnimation(Neon.glide) { open = open == group ? nil : group } } label: {

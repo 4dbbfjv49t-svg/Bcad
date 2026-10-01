@@ -195,8 +195,10 @@ jobs:
               print("shapes listed:", all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXStaticText" && texts($0.0).contains(a[1]) }.count)
           case "press":
               guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
+              var under: AXUIElement?
+              AXUIElementCopyElementAtPosition(root, Float(r.midX), Float(r.midY), &under)
               click(CGPoint(x: r.midX, y: r.midY))
-              print("pressed \(a[1]) at \(r)")
+              print("pressed \(a[1]) at \(r), under the pointer: \(under.map { texts($0) + [(value($0, kAXRoleAttribute) as? String) ?? ""] } ?? [])")
           case "slide":
               guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
               drag(CGPoint(x: r.midX, y: r.midY), CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.midY))
