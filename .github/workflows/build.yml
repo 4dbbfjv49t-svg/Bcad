@@ -1,0 +1,146 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    runs-on: macos-26
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+          swiftc --version
+          clang++ --version
+          ls -la /Library/Developer/CommandLineTools/SDKs || echo "no Command Line Tools SDKs"
+          if ! ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk >/dev/null 2>&1; then
+            echo "build.sh needs a Command Line Tools macOS 26 SDK; linking the Xcode one there"
+            sudo mkdir -p /Library/Developer/CommandLineTools/SDKs
+            sudo ln -s "$(xcrun --sdk macosx --show-sdk-path)" /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
+          fi
+          ls -la /Library/Developer/CommandLineTools/SDKs
+
+      - name: Restore OpenCascade
+        id: occt
+        uses: actions/cache/restore@v4
+        with:
+          path: Vendor/occt
+          key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
+
+      - name: Build OpenCascade
+        run: |
+          start=$(date +%s)
+          ./occt.sh
+          echo "occt.sh took $(( $(date +%s) - start )) s"
+
+      - name: Save OpenCascade
+        if: steps.occt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: Vendor/occt
+          key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
+
+      - name: Self-test
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          start=$(date +%s)
+          ./test/selftest.sh 2>&1 | tee "$RUNNER_TEMP/results/selftest.log"
+          echo "self-test took $(( $(date +%s) - start )) s"
+
+      - name: Build app
+        run: |
+          start=$(date +%s)
+          ./build.sh "$RUNNER_TEMP/out/Bcad.app"
+          echo "build took $(( $(date +%s) - start )) s"
+          ls -la "$RUNNER_TEMP/out/Bcad.app/Contents" "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS"
+          codesign -dv "$RUNNER_TEMP/out/Bcad.app" 2>&1 || true
+          codesign --verify --strict "$RUNNER_TEMP/out/Bcad.app" && echo "signature ok" || echo "signature NOT valid"
+          ditto -c -k --keepParent "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app.zip"
+
+      - name: Launch and open a file
+        continue-on-error: true
+        run: |
+          APP="$RUNNER_TEMP/out/Bcad.app"
+          FILE="$TMPDIR/bcad-selftest/test.3mf"
+          R="$RUNNER_TEMP/results"
+          mkdir -p "$R/shots"
+          ls -la "$FILE" || echo "no test.3mf from the self-test"
+          snap() {
+            sleep "$2"
+            screencapture -x "$R/shots/$1.png" || echo "screencapture failed"
+            if pgrep -x Bcad >/dev/null; then echo "$1: Bcad running"; else echo "$1: Bcad NOT running"; fi
+          }
+          quit() {
+            pkill -TERM -x Bcad || true
+            for i in $(seq 1 50); do pgrep -x Bcad >/dev/null || break; sleep 0.2; done
+            pkill -KILL -x Bcad 2>/dev/null || true
+          }
+
+          echo "▸ 1 launch empty"
+          open --stdout "$R/1.out" --stderr "$R/1.err" "$APP"
+          snap 1-empty 15
+
+          echo "▸ 2 open the file in the running app"
+          open -a "$APP" "$FILE"
+          snap 2-open-running-10s 10
+          snap 2-open-running-40s 30
+          quit
+
+          echo "▸ 3 cold launch with the file (Finder double-click)"
+          open -a "$APP" --stdout "$R/3.out" --stderr "$R/3.err" "$FILE"
+          snap 3-cold-10s 10
+          snap 3-cold-40s 30
+
+          echo "▸ 4 open the same file again"
+          open -a "$APP" "$FILE"
+          snap 4-reopen-30s 30
+          quit
+
+          log show --last 15m --style compact --predicate 'process == "Bcad"' > "$R/unified.log" 2>&1 || true
+          tail -100 "$R/unified.log"
+          mkdir -p "$R/crashes"
+          cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null || echo "no crash reports"
+          ls -la "$R" "$R/shots" "$R/crashes"
+          for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
+
+      - name: Thumbnails
+        if: always()
+        continue-on-error: true
+        run: |
+          for f in "$RUNNER_TEMP"/results/shots/*.png; do
+            sips -Z 900 -s format jpeg -s formatOptions 45 "$f" --out "${f%.png}.jpg" >/dev/null
+            echo "=== THUMB $(basename "${f%.png}") ==="
+            base64 -i "${f%.png}.jpg" | tr -d '\n'
+            echo
+            echo "=== END ==="
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bcad.app
+          path: ${{ runner.temp }}/out/Bcad.app.zip
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            ${{ runner.temp }}/results
+            ${{ runner.temp }}/tmp/bcad-selftest
