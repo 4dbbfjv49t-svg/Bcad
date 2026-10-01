@@ -188,6 +188,11 @@ jobs:
               print("accessibility trusted: \(AXIsProcessTrusted()) · window \(window())")
           case "tree":
               for (e, d) in all(root) where !texts(e).isEmpty { print(String(repeating: " ", count: d), texts(e).joined(separator: " | "), frame(e).map { "\($0)" } ?? "") }
+          case "axpress":
+              let hit = all(root).first { texts($0.0).contains(a[1]) }
+              print("axpress \(a[1]):", hit.map { AXUIElementPerformAction($0.0, kAXPressAction as CFString).rawValue } ?? -1)
+          case "count":
+              print("shapes listed:", all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXStaticText" && texts($0.0).contains(a[1]) }.count)
           case "press":
               guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
               click(CGPoint(x: r.midX, y: r.midY))
@@ -225,7 +230,13 @@ jobs:
           $U trusted
           $U tree | head -80
           $U press Untitled; sleep 2
-          $U press Cube; shot ui-01-cube-move
+          $U press Cylinder; sleep 2; $U count Cylinder
+          $U press Torus; sleep 2; $U count Torus
+          $U press Cube; sleep 2; $U count Cube
+          $U press Cube; sleep 2; $U count Cube
+          $U axpress Cube; sleep 2; $U count Cube
+          $U key 0 cmd; sleep 1; $U key 51; sleep 1
+          $U press Cube; shot ui-01-cube-move; $U count Cube
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
           $U slide Red 0.9; $U slide Green 0.1; shot ui-03-mixed
