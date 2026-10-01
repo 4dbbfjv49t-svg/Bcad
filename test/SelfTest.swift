@@ -444,24 +444,35 @@ enum ClickProbe {
             }
             sleep(1)
             var line = "\(name) \(onMain { frames[key].map { "\($0)" } ?? "no frame" }):"
-            for fy in [0.1, 0.4, 0.45, 0.5, 0.55, 0.6, 0.9] { line += String(format: " y%.2f", fy) + click(key, 0.5, fy) }
+            for fy in [0.1, 0.45, 0.49, 0.5, 0.5088, 0.51, 0.55, 0.9] { line += String(format: " y%.4f", fy) + click(key, 0.5, fy) }
             line += " x0.12" + click(key, 0.12, 0.5)
             print(line)
         }
         sleep(2)
-        variant("whole interface") { AnyView(RootView()) }
-        variant("copy") { AnyView(RootCopy(leave: [])) }
-        for piece in ["backdrop", "3D view", "scaled", "drawer", "rail", "animations"] {
-            variant("copy without \(piece)") { AnyView(RootCopy(leave: [piece])) }
+        func one<L: View>(_ name: String, top: Bool = false, size: CGFloat = 34, @ViewBuilder _ label: @escaping () -> L,
+                          _ wrap: @escaping @MainActor (AnyView) -> AnyView = { $0 }) {
+            variant(name, "target") {
+                let b = wrap(AnyView(Button { ClickProbe.taps += 1 } label: { label() }.buttonStyle(NeonButtonStyle(size: size)))).probed("target")
+                return top ? AnyView(TopHarness { b }) : AnyView(Harness { b })
+            }
         }
-        variant("bar alone") { AnyView(Harness { ShapeBar() }) }
-        variant("copied bar", "target") { AnyView(Harness { ProbeBar() }) }
-        variant("copied bar, no arrows", "target") { AnyView(Harness { ProbeBar(arrows: false) }) }
-        variant("copied bar, no menus", "target") { AnyView(Harness { ProbeBar(menus: false) }) }
-        variant("copied bar, no glass", "target") { AnyView(Harness { ProbeBar(glass: false) }) }
-        variant("copied bar, symbols", "target") { AnyView(Harness { ProbeBar(symbols: true) }) }
-        variant("one button", "target") {
-            AnyView(Harness { Button { ClickProbe.taps += 1 } label: { Image(systemName: "cube") }.buttonStyle(NeonButtonStyle(size: 34)).probed("target") })
+        variant("whole interface") { AnyView(RootView()) }
+        one("34 cube") { Image(systemName: "cube") }
+        one("32 cube", size: 32) { Image(systemName: "cube") }
+        one("30 cube", size: 30) { Image(systemName: "cube") }
+        one("36 cube", size: 36) { Image(systemName: "cube") }
+        one("34 gear") { Image(systemName: "gearshape.fill") }
+        one("34 text") { Text("A") }
+        one("34 nothing") { Color.clear.frame(width: 10, height: 10) }
+        one("34 cube, symbol effects removed") { Image(systemName: "cube") } _: { AnyView($0.symbolEffectsRemoved()) }
+        one("34 cube, rectangle content shape") { Image(systemName: "cube") } _: { AnyView($0.contentShape(Rectangle())) }
+        one("34 cube, tap gesture") { Image(systemName: "cube") } _: { AnyView($0.highPriorityGesture(TapGesture().onEnded { ClickProbe.taps += 1 })) }
+        one("34 cube at the top", top: true) { Image(systemName: "cube") }
+        variant("plain 34 cube", "target") {
+            AnyView(Harness {
+                Button { ClickProbe.taps += 1 } label: { Image(systemName: "cube").frame(width: 34, height: 34).contentShape(Rectangle()) }
+                    .buttonStyle(.plain).probed("target")
+            })
         }
         onMain {
             Kernel.shared.queue.sync {}
@@ -486,6 +497,21 @@ struct Harness<Content: View>: View {
             content
         }
         .padding(.bottom, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WindowConfigurator())
+        .ignoresSafeArea()
+    }
+}
+
+struct TopHarness<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 10) {
+            content
+            Spacer()
+        }
+        .padding(.top, 60)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowConfigurator())
         .ignoresSafeArea()
