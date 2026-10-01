@@ -339,22 +339,88 @@ jobs:
       - name: LaunchServices probe
         continue-on-error: true
         run: |
-          # The app probe again, but inside a copy of Bcad.app and with the file opened by `open -a` as Finder does.
+          # Inside a copy of Bcad.app, launched with the file the way a Finder double-click does: lists every window and
+          # 3D view, counts each view's frames, then tries an orbit drag, a forced draw and continuous drawing.
           W="$RUNNER_TEMP/probe"
           R="$RUNNER_TEMP/results"
           FILE="$TMPDIR/bcad-selftest/test.3mf"
-          python3 - "$W/AppProbe.swift" "$W/LSProbe.swift" <<'PY'
-          import sys
-          s = open(sys.argv[1]).read()
-          s = s.replace('let cold = env["MODE"] == "cold", shots = env["SHOTS"] ?? "/tmp", tag = cold ? "cold" : "warm"',
-                        'let a = CommandLine.arguments, shots = a[a.count - 2], tag = "ls-" + a[a.count - 1]; _ = env')
-          start = s.index('        if cold {')
-          end = s.index('        at(17) { orbit() }')
-          s = s[:start] + '        at(6) { spyOn(); state("1 six seconds after launch") }\n        at(16) { state("2 sixteen seconds after launch") }\n' + s[end:]
-          s = s.replace('at(20) { exit(0) }', 'at(21) { exit(0) }')
-          open(sys.argv[2], 'w').write(s)
-          PY
-          grep -n 'tag = \|at(' "$W/LSProbe.swift"
+          cat > "$W/LSProbe.swift" <<'SWIFT'
+          #if SELFTEST
+          import AppKit
+          import MetalKit
+
+          @MainActor
+          final class Spy: NSObject, MTKViewDelegate {
+              let inner: Renderer
+              var frames = 0, early = 0
+              init(_ r: Renderer) { inner = r }
+              nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+              nonisolated func draw(in view: MTKView) {
+                  MainActor.assumeIsolated {
+                      frames += 1
+                      if view.currentRenderPassDescriptor == nil { early += 1 }
+                  }
+                  inner.draw(in: view)
+              }
+          }
+
+          @MainActor
+          enum SelfTest {
+              static var spies: [ObjectIdentifier: Spy] = [:]
+
+              static func run(_ url: URL) -> Bool {
+                  setvbuf(stdout, nil, _IONBF, 0)
+                  let lib = Workbench.shared
+                  func all(_ v: NSView) -> [CadView] { ((v as? CadView).map { [$0] } ?? []) + v.subviews.flatMap(all) }
+                  func views() -> [CadView] { NSApp.windows.flatMap { $0.contentView.map(all) ?? [] } }
+                  func state(_ title: String) {
+                      print("== \(title) · active \(NSApp.isActive) · bodies \(lib.doc.bodies.count), meshes \(lib.meshes.count) · building \(lib.building) · requestFit \(lib.requestFit) · yaw \(lib.camera.yaw)")
+                      for w in NSApp.windows {
+                          print("   window \(w.windowNumber) \(type(of: w)) visible \(w.isVisible) occlusion-visible \(w.occlusionState.contains(.visible)) key \(w.isKeyWindow) frame \(w.frame) views \(w.contentView.map(all)?.count ?? 0)")
+                      }
+                      for v in views() {
+                          let s = spies[ObjectIdentifier(v)]
+                          print("   3D view in window \(v.window?.windowNumber ?? -1): hidden \(v.isHiddenOrHasHiddenAncestor) bounds \(v.bounds.size) drawable \(v.drawableSize) paused \(v.isPaused) setNeedsDisplay \(v.enableSetNeedsDisplay) layer \(v.layer.map { String(describing: type(of: $0)) } ?? "none") frames \(s?.frames ?? -1) early \(s?.early ?? -1)")
+                      }
+                  }
+                  func spyAll() {
+                      for v in views() where spies[ObjectIdentifier(v)] == nil {
+                          let s = Spy(v.renderer)
+                          v.delegate = s
+                          spies[ObjectIdentifier(v)] = s
+                      }
+                  }
+                  func orbit() {
+                      for v in views() {
+                          guard let w = v.window else { continue }
+                          let start = v.convert(NSPoint(x: v.bounds.maxX - 60, y: v.bounds.minY + 60), to: nil)
+                          func ev(_ t: NSEvent.EventType, _ dx: CGFloat) -> NSEvent {
+                              NSEvent.mouseEvent(with: t, location: NSPoint(x: start.x + dx, y: start.y), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+                          }
+                          v.mouseDown(with: ev(.leftMouseDown, 0))
+                          for k in 1...6 { v.mouseDragged(with: ev(.leftMouseDragged, -CGFloat(k) * 5)) }
+                          v.mouseUp(with: ev(.leftMouseUp, -30))
+                      }
+                  }
+                  func at(_ t: Double, _ f: @escaping @MainActor () -> Void) {
+                      DispatchQueue.main.asyncAfter(deadline: .now() + t) { MainActor.assumeIsolated { f() } }
+                  }
+                  at(8) { spyAll(); state("1 eight seconds after launch") }
+                  at(14) { state("2 fourteen seconds after launch") }
+                  at(15) { orbit() }
+                  at(17) { state("3 after an orbit drag") }
+                  at(18) { for v in views() { v.draw() } }
+                  at(20) { state("4 after a forced draw()") }
+                  at(21) { for v in views() { v.isPaused = false } }
+                  at(24) { state("5 after unpausing (continuous drawing)") }
+                  at(25) { exit(0) }
+                  BcadApp.main()
+                  return true
+              }
+          }
+          #endif
+          SWIFT
           SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
           OCCT="$PWD/Vendor/occt"
           LIBS=(); for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
@@ -367,21 +433,21 @@ jobs:
           codesign --force -s - "$P"
           pkill -x Bcad || true
           sleep 2
-
-          echo "▸ warm: launch empty, open the file 8 s later with open -a"
-          open -a "$P" --stdout "$R/ls-warm.out" --stderr "$R/ls-warm.err" --args --selftest "$FILE" "$R/shots" warm
-          sleep 8
-          open -a "$P" "$FILE"
-          sleep 16
-          grep '^==' "$R/ls-warm.out" || cat "$R/ls-warm.out" "$R/ls-warm.err" | tail -20
-          pkill -x Bcad || true
-          sleep 2
-
-          echo "▸ cold: launch with the file, as a double-click does"
-          open -a "$P" --stdout "$R/ls-cold.out" --stderr "$R/ls-cold.err" "$FILE" --args --selftest "$FILE" "$R/shots" cold
-          sleep 25
-          grep '^==' "$R/ls-cold.out" || cat "$R/ls-cold.out" "$R/ls-cold.err" | tail -20
-          pkill -x Bcad || true
+          for mode in cold empty; do
+            echo "▸ $mode"
+            if [ $mode = cold ]; then
+              open -a "$P" --stdout "$R/ls-$mode.out" --stderr "$R/ls-$mode.err" "$FILE" --args --selftest "$FILE"
+            else
+              open -a "$P" --stdout "$R/ls-$mode.out" --stderr "$R/ls-$mode.err" --args --selftest "$FILE"
+            fi
+            for t in 14 17 20 24; do sleep $(( t - ${last:-0} )); last=$t; screencapture -x "$R/shots/ls-$mode-$t.png"; done
+            last=0
+            sleep 3
+            cat "$R/ls-$mode.out" | grep -v '^\s*$' | tail -40
+            tail -5 "$R/ls-$mode.err"
+            pkill -x Bcad || true
+            sleep 2
+          done
 
       - name: Thumbnails
         if: always()
