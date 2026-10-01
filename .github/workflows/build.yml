@@ -245,11 +245,12 @@ jobs:
           $U key 0 cmd; sleep 1
           $U press Resize; shot ui-12-many
           $U tree | grep -iE "torus|bolt|cube|width|height|depth|symmetric|thread" | head -60
+          $U key 12 cmd; shot ui-13-quit 2
           pkill -x Bcad || true
           sleep 3
           ls -la "$HOME/Library/Application Support/Bcad" || echo "no settings saved"
           open -a "$APP"
-          shot ui-13-hot 8
+          shot ui-14-hot 8
           pkill -x Bcad || true
           sleep 5
           echo "new Bcad crash reports: $(( $(crashes) - before ))"
