@@ -1,5 +1,6 @@
 #if SELFTEST
 import AppKit
+import SwiftUI
 import simd
 
 // Kernel, file and editing checks: bash test/selftest.sh
