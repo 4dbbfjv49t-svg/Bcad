@@ -193,6 +193,16 @@ jobs:
               print("axpress \(a[1]):", hit.map { AXUIElementPerformAction($0.0, kAXPressAction as CFString).rawValue } ?? -1)
           case "count":
               print("shapes listed:", all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXStaticText" && texts($0.0).contains(a[1]) }.count)
+          case "hold":
+              // A press held for a while, at a spot in the element (fractions of its size).
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              let p = CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.minY + r.height * CGFloat(Double(a[3])!))
+              post(.mouseMoved, p)
+              usleep(600_000)
+              post(.leftMouseDown, p)
+              usleep(UInt32(Int(a[4])!) * 1000)
+              post(.leftMouseUp, p)
+              print("held \(a[1]) at \(p)")
           case "press":
               guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
               var under: AXUIElement?
@@ -232,12 +242,13 @@ jobs:
           $U trusted
           $U tree | head -80
           $U press Untitled; sleep 2
-          $U press Cylinder; sleep 2; $U count Cylinder
-          $U press Torus; sleep 2; $U count Torus
-          $U press Cube; sleep 2; $U count Cube
-          $U press Cube; sleep 2; $U count Cube
-          $U axpress Cube; sleep 2; $U count Cube
-          $U key 0 cmd; sleep 1; $U key 51; sleep 1
+          $U press "Hide the side panel"; sleep 2; $U count Untitled; shot ui-00a-no-panel
+          $U press "Show the side panel"; sleep 2; $U count Untitled
+          $U hold Cube 0.5 0.5 200; sleep 2; $U count Cube
+          $U hold Cube 0.5 0.2 80; sleep 2; $U count Cube
+          $U hold Cylinder 0.3 0.5 120; sleep 2; $U count Cylinder
+          $U press "More shapes" 1; sleep 1; shot ui-00b-blocks-menu
+          $U press Cube 2; sleep 2; $U count Cube
           $U press Cube; shot ui-01-cube-move; $U count Cube
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
