@@ -161,10 +161,10 @@ jobs:
           $M click 0.656 0.519
           sleep 2
           screencapture -x "$R/shots/use-1-clicked-the-cube.png"
-          $M drag 0.90 0.72 -0.25
+          $M drag 0.45 0.74 0.15
           sleep 2
           screencapture -x "$R/shots/use-2-orbited.png"
-          $M scroll 0.80 0.60 -40
+          $M scroll 0.45 0.74 -40
           sleep 2
           screencapture -x "$R/shots/use-3-scrolled.png"
           pkill -x Bcad || true
