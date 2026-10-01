@@ -378,45 +378,41 @@ enum SelfTest {
     }
 }
 
-// TEMPORARY: which part of the shape bar's quick button loses a click in its middle. Real pointer events (CGEvent) and
-// events handed to the window (sendEvent), on cut-down buttons and on the real interface.
+// TEMPORARY: which part of the interface makes the shape bar's quick button lose a click in its middle. Real pointer
+// events (CGEvent) on the interface built up piece by piece.
 @MainActor
 enum ClickProbe {
-    static var hits: [String: Int] = [:]
     static var frames: [String: CGRect] = [:]
     static var window: NSWindow?
-
-    static func hit(_ name: String) { hits[name, default: 0] += 1 }
 
     static func run() {
         setvbuf(stdout, nil, _IONBF, 0)
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         print("accessibility trusted:", AXIsProcessTrusted())
-        show(AnyView(ProbeRows()), CGSize(width: 520, height: 560))
         Thread.detachNewThread { drive() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 240) { print("✗ probe timed out"); exit(1) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 400) { print("✗ probe timed out"); exit(1) }
         app.run()
     }
 
-    static func show(_ v: AnyView, _ size: CGSize) {
-        window?.orderOut(nil)
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height), styleMask: [.titled], backing: .buffered, defer: false)
+    static func show(_ v: AnyView) {
+        window?.close()
+        frames = [:]
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 674), styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: v.environment(Workbench.shared).skinEnvironment())
-        w.setFrameTopLeftPoint(NSPoint(x: 0, y: (NSScreen.main?.frame.height ?? 768) - 40))
+        w.setFrameTopLeftPoint(NSPoint(x: 0, y: (NSScreen.main?.frame.height ?? 768) - 30))
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window = w
     }
 
-    // A spot in a probed view (fractions of its frame), in the window and on the screen (CG: top-left origin).
-    static func spot(_ name: String, _ fx: CGFloat, _ fy: CGFloat) -> (NSPoint, CGPoint)? {
-        guard let w = window, let f = frames[name], let c = w.contentView else { return nil }
+    // A spot in the quick cube button (fractions of its frame), on the screen (CG: top-left origin).
+    static func spot(_ fx: CGFloat, _ fy: CGFloat) -> CGPoint? {
+        guard let w = window, let f = frames["root-blocks"], let c = w.contentView else { return nil }
         let x = f.minX + f.width * fx, y = f.minY + f.height * fy
-        let inWindow = c.convert(NSPoint(x: x, y: c.isFlipped ? y : c.bounds.height - y), to: nil)
-        let screen = w.convertPoint(toScreen: inWindow)
-        let top = NSScreen.screens.first?.frame.height ?? 768
-        return (inWindow, CGPoint(x: screen.x, y: top - screen.y))
+        let screen = w.convertPoint(toScreen: c.convert(NSPoint(x: x, y: c.isFlipped ? y : c.bounds.height - y), to: nil))
+        return CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 768) - screen.y)
     }
 
     nonisolated static func onMain<T: Sendable>(_ f: @MainActor () -> T) -> T { DispatchQueue.main.sync { MainActor.assumeIsolated(f) } }
@@ -426,46 +422,46 @@ enum ClickProbe {
             CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
             usleep(25_000)
         }
-        func count(_ name: String) -> Int { onMain { name.hasPrefix("root") ? Workbench.shared.doc.bodies.count : hits[name, default: 0] } }
-        func real(_ name: String, _ fx: CGFloat, _ fy: CGFloat) {
-            guard let at = onMain({ spot(name, fx, fy) }) else { print("✗ no frame for \(name)"); return }
-            let p = at.1
-            let before = count(name)
+        func click(_ fx: CGFloat, _ fy: CGFloat) -> String {
+            guard let p = onMain({ spot(fx, fy) }) else { return "no frame" }
+            let before = onMain { Workbench.shared.doc.bodies.count }
             post(.mouseMoved, p)
             usleep(600_000)
             post(.leftMouseDown, p)
             usleep(60_000)
             post(.leftMouseUp, p)
-            usleep(700_000)
-            print(count(name) > before ? "  took" : "  LOST", "pointer   \(name) at \(fx), \(fy) → \(p)")
+            usleep(600_000)
+            return onMain { Workbench.shared.doc.bodies.count } > before ? "✓" : "✗"
         }
-        func sent(_ name: String, _ fx: CGFloat, _ fy: CGFloat) {
-            guard let at = onMain({ spot(name, fx, fy) }) else { return }
-            let q = at.0
-            let before = count(name)
+        func variant(_ name: String, _ make: @escaping @MainActor () -> AnyView) {
+            onMain { show(make()) }
+            sleep(2)
             onMain {
-                guard let w = window else { return }
-                for t in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                    w.sendEvent(NSEvent.mouseEvent(with: t, location: q, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                                   windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
-                }
+                NSApp.activate(ignoringOtherApps: true)
+                window?.makeKeyAndOrderFront(nil)
             }
-            usleep(700_000)
-            print(count(name) > before ? "  took" : "  LOST", "sendEvent \(name) at \(fx), \(fy)")
+            sleep(1)
+            var line = "\(name) \(onMain { frames["root-blocks"].map { "\($0)" } ?? "no frame" }):"
+            for fy in stride(from: 0.1, through: 0.91, by: 0.1) { line += String(format: " y%.1f", fy) + click(0.5, fy) }
+            line += " x0.12" + click(0.12, 0.5)
+            print(line)
         }
-        func probe(_ names: [String]) {
-            for n in names {
-                print("— \(n) \(onMain { frames[n].map { "\($0)" } ?? "no frame" })")
-                for (fx, fy) in [(0.5, 0.12), (0.5, 0.5), (0.12, 0.5), (0.5, 0.88)] as [(CGFloat, CGFloat)] { real(n, fx, fy) }
-                sent(n, 0.5, 0.5)
-            }
+        let bar = { AnyView(VStack(spacing: 10) { Spacer(); ShapeBar() }.padding(.bottom, 16)) }
+        let rail = {
+            AnyView(HStack(alignment: .top, spacing: 10) { ToolRail() }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(.top, 14).padding(.trailing, 14))
         }
-        sleep(3)
-        probe(["plain", "neon", "neon+chev", "chev", "neon+chev+glass", "neon-in-bar", "root-blocks"])
-        print("— the whole interface")
-        onMain { show(AnyView(RootView()), CGSize(width: 1024, height: 674)) }
-        sleep(4)
-        probe(["root-blocks", "root-cylinders"])
+        sleep(2)
+        variant("bar") { AnyView(ZStack { Color.black; bar() }) }
+        variant("bar again") { AnyView(ZStack { Color.black; bar() }) }
+        variant("bar + 3D view") { AnyView(ZStack { Viewport(); bar() }) }
+        variant("bar + rail") { AnyView(ZStack { Color.black; bar(); rail() }) }
+        variant("bar + 3D view + rail") { AnyView(ZStack { Viewport(); bar(); rail() }) }
+        variant("bar + backdrop") { AnyView(ZStack { Backdrop(); bar() }) }
+        variant("bar in ScaledUI") { AnyView(ZStack { Color.black; ScaledUI { bar() } }) }
+        variant("whole interface") { AnyView(RootView()) }
+        onMain { Workbench.shared.drawerOpen = false }
+        variant("whole interface, side panel hidden") { AnyView(RootView()) }
         onMain {
             Kernel.shared.queue.sync {}
             exit(0)
@@ -476,38 +472,6 @@ enum ClickProbe {
 extension View {
     func probed(_ name: String) -> some View {
         onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { ClickProbe.frames[name] = $0 }
-    }
-}
-
-struct ProbeRows: View {
-    @Environment(Workbench.self) private var lib
-
-    var body: some View {
-        let neon = NeonButtonStyle(tint: lib.accent, size: 34)
-        VStack(alignment: .leading, spacing: 26) {
-            Button { ClickProbe.hit("plain") } label: { Image(systemName: "cube").frame(width: 34, height: 34).contentShape(Rectangle()) }
-                .buttonStyle(.plain).probed("plain")
-            Button { ClickProbe.hit("neon") } label: { Image(systemName: "cube") }.buttonStyle(neon).probed("neon")
-            HStack(spacing: 1) {
-                Button { ClickProbe.hit("neon+chev") } label: { Image(systemName: "cube") }.buttonStyle(neon).probed("neon+chev")
-                Button { ClickProbe.hit("chev") } label: { Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black)) }
-                    .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 16)).probed("chev")
-            }
-            HStack(spacing: 1) {
-                Button { ClickProbe.hit("neon+chev+glass") } label: { Image(systemName: "cube") }.buttonStyle(neon).probed("neon+chev+glass")
-                Button {} label: { Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black)) }.buttonStyle(NeonButtonStyle(tint: lib.accent, size: 16))
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8).glassBar(22)
-            HStack(spacing: 8) {
-                Button { ClickProbe.hit("neon-in-bar") } label: { Image(systemName: "cube") }.buttonStyle(neon).probed("neon-in-bar")
-                Button {} label: { Image(systemName: "cylinder") }.buttonStyle(neon)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8).glassBar(22)
-            ShapeBar()
-        }
-        .padding(30)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black)
     }
 }
 #endif
