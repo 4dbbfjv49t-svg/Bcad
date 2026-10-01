@@ -336,6 +336,53 @@ jobs:
               | grep -E '^(==|✗)' | tee -a "$RUNNER_TEMP/results/appprobe.log"
           done
 
+      - name: LaunchServices probe
+        continue-on-error: true
+        run: |
+          # The app probe again, but inside a copy of Bcad.app and with the file opened by `open -a` as Finder does.
+          W="$RUNNER_TEMP/probe"
+          R="$RUNNER_TEMP/results"
+          FILE="$TMPDIR/bcad-selftest/test.3mf"
+          python3 - "$W/AppProbe.swift" "$W/LSProbe.swift" <<'PY'
+          import sys
+          s = open(sys.argv[1]).read()
+          s = s.replace('let cold = env["MODE"] == "cold", shots = env["SHOTS"] ?? "/tmp", tag = cold ? "cold" : "warm"',
+                        'let a = CommandLine.arguments, shots = a[a.count - 2], tag = "ls-" + a[a.count - 1]; _ = env')
+          start = s.index('        if cold {')
+          end = s.index('        at(17) { orbit() }')
+          s = s[:start] + '        at(6) { spyOn(); state("1 six seconds after launch") }\n        at(16) { state("2 sixteen seconds after launch") }\n' + s[end:]
+          s = s.replace('at(20) { exit(0) }', 'at(21) { exit(0) }')
+          open(sys.argv[2], 'w').write(s)
+          PY
+          grep -n 'tag = \|at(' "$W/LSProbe.swift"
+          SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26*.sdk | tail -1)"
+          OCCT="$PWD/Vendor/occt"
+          LIBS=(); for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
+          swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 -D SELFTEST -import-objc-header BcadKernel.h \
+            Bcad.swift Design.swift Viewport.swift Views.swift Files.swift "$W/LSProbe.swift" "$W/k.o" "${LIBS[@]}" -lc++ -o "$W/lsprobe"
+          P="$RUNNER_TEMP/ProbeApp.app"
+          rm -rf "$P"
+          cp -R "$RUNNER_TEMP/out/Bcad.app" "$P"
+          cp "$W/lsprobe" "$P/Contents/MacOS/Bcad"
+          codesign --force -s - "$P"
+          pkill -x Bcad || true
+          sleep 2
+
+          echo "▸ warm: launch empty, open the file 8 s later with open -a"
+          open -a "$P" --stdout "$R/ls-warm.out" --stderr "$R/ls-warm.err" --args --selftest "$FILE" "$R/shots" warm
+          sleep 8
+          open -a "$P" "$FILE"
+          sleep 16
+          grep '^==' "$R/ls-warm.out" || cat "$R/ls-warm.out" "$R/ls-warm.err" | tail -20
+          pkill -x Bcad || true
+          sleep 2
+
+          echo "▸ cold: launch with the file, as a double-click does"
+          open -a "$P" --stdout "$R/ls-cold.out" --stderr "$R/ls-cold.err" "$FILE" --args --selftest "$FILE" "$R/shots" cold
+          sleep 25
+          grep '^==' "$R/ls-cold.out" || cat "$R/ls-cold.out" "$R/ls-cold.err" | tail -20
+          pkill -x Bcad || true
+
       - name: Thumbnails
         if: always()
         continue-on-error: true
