@@ -215,10 +215,10 @@ enum SelfTest {
         let copy = dir.appendingPathComponent("saved.3mf")
         lib.fileURL = copy
         var saved: Bool?
-        let t2 = Date()
+        let asked = Date()
         lib.saveDocument { saved = $0 }
-        let returned = Date().timeIntervalSince(t2) < 0.5
-        while saved == nil && Date().timeIntervalSince(t2) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let returned = Date().timeIntervalSince(asked) < 0.5
+        while saved == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
