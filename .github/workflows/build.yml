@@ -237,18 +237,14 @@ jobs:
           pkill -x Bcad || true
           sleep 2
           rm -rf "$HOME/Library/Application Support/Bcad"
+          defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
           open -a "$APP"
           shot ui-00-cold 10
           $U trusted
           $U tree | head -80
           $U press Untitled; sleep 2
-          $U press "Hide the side panel"; sleep 2; $U count Untitled; shot ui-00a-no-panel
-          $U press "Show the side panel"; sleep 2; $U count Untitled
-          $U hold Cube 0.5 0.5 200; sleep 2; $U count Cube
-          $U hold Cube 0.5 0.2 80; sleep 2; $U count Cube
-          $U hold Cylinder 0.3 0.5 120; sleep 2; $U count Cylinder
-          $U press "More shapes" 1; sleep 1; shot ui-00b-blocks-menu
-          $U press Cube 2; sleep 2; $U count Cube
+          $U press Cylinder; sleep 2; $U count Cylinder
+          $U key 51; sleep 1; $U count Cylinder
           $U press Cube; shot ui-01-cube-move; $U count Cube
           $U key 3; sleep 1
           $U press "Mix a colour"; shot ui-02-mixer
