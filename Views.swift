@@ -268,17 +268,21 @@ struct ShapeGroupButton: View {
     }
 }
 
-// A shape's picture: a symbol, or for a torus with a polygon tube (and any oval torus) its tube cut through.
+// A shape's picture: a symbol, or for a torus with a polygon tube (and any oval torus) its tube cut through. Only a picture:
+// a click on it belongs to the button around it.
 struct ShapeIcon: View {
     let prim: Primitive
     let size: CGFloat
 
     var body: some View {
-        if let name = prim.symbol {
-            Image(systemName: name)
-        } else {
-            TubeGlyph(sides: prim.sides).frame(width: size * 1.25, height: size)
+        Group {
+            if let name = prim.symbol {
+                Image(systemName: name)
+            } else {
+                TubeGlyph(sides: prim.sides).frame(width: size * 1.25, height: size)
+            }
         }
+        .allowsHitTesting(false)
     }
 }
 
