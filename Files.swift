@@ -145,7 +145,8 @@ enum ThreeMF {
         return s == "-0" ? "0" : s
     }
 
-    static func write(_ url: URL, meshes: [(String, Mesh)], doc: Document) throws {
+    // Each object carries its body's id as part number, so opening the file can show it before the kernel rebuilds it.
+    static func write(_ url: URL, meshes: [(Solid, Mesh)], doc: Document) throws {
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
@@ -154,10 +155,10 @@ enum ThreeMF {
 
         """
         var items = ""
-        for (i, (name, mesh)) in meshes.enumerated() {
+        for (i, (body, mesh)) in meshes.enumerated() {
             let (pts, tris) = Weld.run(mesh)
             guard !tris.isEmpty else { continue }
-            var obj = "  <object id=\"\(i + 1)\" type=\"model\" name=\"\(escape(name))\">\n   <mesh>\n    <vertices>\n"
+            var obj = "  <object id=\"\(i + 1)\" type=\"model\" name=\"\(escape(body.name))\" partnumber=\"\(body.id.uuidString)\">\n   <mesh>\n    <vertices>\n"
             obj.reserveCapacity(pts.count * 60 + tris.count * 50)
             for p in pts { obj += "     <vertex x=\"\(num(p.x))\" y=\"\(num(p.y))\" z=\"\(num(p.z))\"/>\n" }
             obj += "    </vertices>\n    <triangles>\n"
@@ -182,11 +183,54 @@ enum ThreeMF {
         try zip.write(to: url, options: .atomic)
     }
 
-    static func read(_ url: URL) throws -> Document {
+    // The document, and the bodies' shapes as saved (world coordinates), by body id.
+    static func read(_ url: URL) throws -> (doc: Document, meshes: [UUID: SavedMesh]) {
         let files = try Zip.read(try Data(contentsOf: url))
         guard let json = files[docPath] else { throw FileError.notBcad }
         guard let doc = try? JSONDecoder().decode(Document.self, from: json), doc.valid else { throw FileError.corrupt }
-        return doc
+        let reader = ModelReader()
+        if let model = files[modelPath] {
+            let parser = XMLParser(data: model)
+            parser.delegate = reader
+            parser.parse()
+        }
+        return (doc, reader.meshes)
+    }
+}
+
+struct SavedMesh {
+    var points: [SIMD3<Float>] = []
+    var triangles: [SIMD3<UInt32>] = []
+}
+
+// Reads the objects Bcad wrote (those with a body id as part number); one with a bad number or index is left out.
+private final class ModelReader: NSObject, XMLParserDelegate {
+    var meshes: [UUID: SavedMesh] = [:]
+    private var id: UUID?
+    private var mesh = SavedMesh()
+
+    func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String] = [:]) {
+        switch name {
+        case "object":
+            id = a["partnumber"].flatMap(UUID.init)
+            mesh = SavedMesh()
+        case "vertex" where id != nil:
+            mesh.points.append(SIMD3(Float(a["x"] ?? "") ?? .nan, Float(a["y"] ?? "") ?? .nan, Float(a["z"] ?? "") ?? .nan))
+        case "triangle" where id != nil:
+            let v = ["v1", "v2", "v3"].compactMap { a[$0].flatMap { UInt32($0) } }
+            if v.count == 3 { mesh.triangles.append(SIMD3(v[0], v[1], v[2])) } else { mesh.triangles.append(SIMD3(repeating: .max)) }
+        default: break
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) {
+        guard name == "object", let id else { return }
+        let n = UInt32(mesh.points.count)
+        if !mesh.triangles.isEmpty, mesh.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }),
+           mesh.triangles.allSatisfy({ $0.max() < n }) {
+            meshes[id] = mesh
+        }
+        self.id = nil
     }
 }
 

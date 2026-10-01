@@ -1125,7 +1125,7 @@ struct PrimitiveSizes: View {
             }
             ForEach(Array(prim.fields.enumerated()), id: \.offset) { i, field in
                 SettingLine(title: L(field)) {
-                    MMField(value: prim.size[i], unit: prim.degrees.contains(i) ? "°" : nil, range: prim.range(i)) { v in
+                    MMField(value: prim.size[i], unit: prim.degrees.contains(i) ? "°" : nil, range: prim.range(i, limit: lib.settings.longest)) { v in
                         lib.setBase(id) { n in
                             guard case .primitive(var p) = n else { return n }
                             if lib.settings.uniform, !p.degrees.contains(i), p.size[i] > 0 {
@@ -1322,7 +1322,7 @@ struct ThreadControls: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction(.default) { withAnimation(Neon.glide) { sizesOpen.toggle() } }
                 Text(L("Length")).font(.ui(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Ink.text.opacity(0.55))
-                MMField(value: f.length, unit: L("mm"), range: 1...2000, width: compact ? 54 : 60) { v in
+                MMField(value: f.length, unit: L("mm"), range: 1...lib.settings.longest, width: compact ? 54 : 60) { v in
                     var n = f
                     n.length = v
                     change(n)

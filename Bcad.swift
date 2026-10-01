@@ -66,22 +66,23 @@ struct Primitive: Codable, Equatable, Sendable {
     // Sizes given in degrees rather than millimetres (they never follow a resize).
     var degrees: Set<Int> { kind == .oval ? [2] : [] }
 
-    // What size i may be, given the others: walls fit inside, a tube inside its torus, one cone end stays wider than zero.
-    func range(_ i: Int) -> ClosedRange<Double> {
+    // What size i may be, given the others: walls fit inside, a tube inside its torus, one cone end stays wider than zero,
+    // nothing larger than `limit` (the print bed).
+    func range(_ i: Int, limit: Double) -> ClosedRange<Double> {
         if degrees.contains(i) { return 5...175 }
-        var low = mayBeZero.contains(i) ? 0 : 0.1, high = 10000.0
+        var low = mayBeZero.contains(i) ? 0 : 0.1, high = limit
         switch (kind, i) {
         case (.cone, 0), (.cone, 1): if size[1 - i] == 0 { low = 0.1 }
         case (.torus, 0): low = max(low, size[1] * 1.06)
-        case (.torus, 1): high = size[0] / 1.06
+        case (.torus, 1): high = min(high, size[0] / 1.06)
         case (.ring, 0): low = max(low, size[1] + 0.1)
-        case (.ring, 1): high = size[0] - 0.1
+        case (.ring, 1): high = min(high, size[0] - 0.1)
         case (.bowl, 0): low = max(low, size[1] * 2 / 0.95)
-        case (.bowl, 1): high = size[0] / 2 * 0.95
+        case (.bowl, 1): high = min(high, size[0] / 2 * 0.95)
         case (.glass, 0): low = max(low, size[2] * 2 / 0.95)
         case (.glass, 1): low = max(low, size[3] / 0.95)
-        case (.glass, 2): high = size[0] / 2 * 0.95
-        case (.glass, 3): high = size[1] * 0.95
+        case (.glass, 2): high = min(high, size[0] / 2 * 0.95)
+        case (.glass, 3): high = min(high, size[1] * 0.95)
         default: break
         }
         return low...max(low, high)
@@ -344,6 +345,33 @@ struct Mesh {
         valid = b.valid != 0
     }
 
+    // A saved shape back in its body's own coordinates: flat-shaded triangles, shown until the kernel's exact mesh (with
+    // its edges and faces) takes their place.
+    init?(saved s: SavedMesh, place: Placement) {
+        let m = place.matrix
+        guard abs(m.determinant) > 1e-12 else { return nil }
+        let back = simd_float4x4(m.inverse)
+        let local = s.points.map { (back * SIMD4($0, 1)).xyz }
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        var signed = 0.0
+        for t in s.triangles {
+            let a = local[Int(t.x)], b = local[Int(t.y)], c = local[Int(t.z)]
+            let n = cross(b - a, c - a)
+            let normal = SIMD4(length(n) > 0 ? normalize(n) : SIMD3<Float>(0, 0, 1), 0)
+            for p in [a, b, c] {
+                indices.append(UInt32(vertices.count))
+                vertices.append(SIMD4(p, 0))
+                normals.append(normal)
+                lo = simd_min(lo, p)
+                hi = simd_max(hi, p)
+            }
+            signed += Double(dot(a, cross(b, c))) / 6
+        }
+        low = SIMD3<Double>(lo)
+        high = SIMD3<Double>(hi)
+        volume = abs(signed)
+    }
+
     var size: SIMD3<Double> { high - low }
 }
 
@@ -602,6 +630,9 @@ struct Settings: Codable, Equatable {
         uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
         off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
     }
+
+    // The print bed's longest side: no size or thread is made longer.
+    var longest: Double { max(bed.x, bed.y, bed.z) }
 
     func key(_ a: Action) -> String { keys[a.rawValue] ?? Settings.defaultKeys[a.rawValue] ?? "" }
     func isOn(_ a: Action) -> Bool { !off.contains(a.rawValue) }
@@ -1031,8 +1062,13 @@ final class Workbench: DesignHost {
         flashTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3.5))
             guard !Task.isCancelled else { return }
-            withAnimation(Neon.spring) { self?.busy = nil }
+            self?.ended(text)
         }
+    }
+
+    // Takes down the note `text`, unless another one has taken its place by now.
+    func ended(_ text: String) {
+        if busy == text { withAnimation(Neon.spring) { busy = nil } }
     }
 
     func toggleSettings() {
@@ -1065,17 +1101,22 @@ final class Workbench: DesignHost {
     func undo() {
         guard let d = undoStack.popLast() else { return }
         redoStack.append(doc)
-        doc = d
-        selection = selection.filter { id in d.bodies.contains { $0.id == id } }
-        cancelMode()
-        rebuildScene()
+        restore(d)
     }
 
     func redo() {
         guard let d = redoStack.popLast() else { return }
         undoStack.append(doc)
+        restore(d)
+    }
+
+    // Puts back an earlier or later document: an open tool closes (its picks belong to the shapes as they were), and the
+    // selection keeps the shapes that are still there.
+    private func restore(_ d: Document) {
         doc = d
         selection = selection.filter { id in d.bodies.contains { $0.id == id } }
+        if angleEdit != nil { closeAngles() }
+        if mode != .select { cancelMode() }
         rebuildScene()
     }
 
@@ -1616,20 +1657,26 @@ final class Workbench: DesignHost {
         building = true
         builtClearance = clearance
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.1.base { true } else { false } }
-        if slow { busy = L("Building…") }
+        let note = L("Building…")
+        if slow { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
-            var out: [(UUID, Node, Mesh?)] = []
-            for (id, node) in todo { out.append((id, node, Kernel.shared.mesh(node))) }
+            // Each shape shows as soon as it's built, rather than all of them at the end.
+            for (id, node) in todo {
+                let mesh = Kernel.shared.mesh(node) ?? Mesh()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self.built[id] = node
+                        self.meshes[id] = mesh
+                        self.sceneVersion += 1
+                    }
+                }
+            }
             let problems = Kernel.shared.takeProblems()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    for (id, node, mesh) in out {
-                        self.built[id] = node
-                        if let mesh { self.meshes[id] = mesh } else { self.meshes[id] = Mesh() }
-                    }
                     self.building = false
-                    if slow { withAnimation(Neon.spring) { self.busy = nil } }
+                    if slow { self.ended(note) }
                     self.sceneVersion += 1
                     self.applyDrops()
                     self.report(problems)
@@ -1738,28 +1785,31 @@ final class Workbench: DesignHost {
 
     var title: String { fileURL?.deletingPathExtension().lastPathComponent ?? L("Untitled") }
 
-    func confirmDiscard() -> Bool {
-        guard dirty else { return true }
+    // Asks about unsaved changes before they'd be lost; `done` learns whether to go ahead (once saved, if that was chosen).
+    func confirmDiscard(_ done: @escaping (Bool) -> Void) {
+        guard dirty else { done(true); return }
         let a = NSAlert()
         a.messageText = L("Save changes to “{name}”?", ["name": title])
         a.informativeText = L("Your changes are lost if you don't save them.")
         a.addButton(withTitle: L("Save"))
-        a.addButton(withTitle: L("Cancel"))
+        a.addButton(withTitle: L("Cancel")).keyEquivalent = "\u{1b}"
         a.addButton(withTitle: L("Don't Save"))
         switch a.runModal() {
-        case .alertFirstButtonReturn: return saveDocument()
-        case .alertThirdButtonReturn: return true
-        default: return false
+        case .alertFirstButtonReturn: saveDocument(done: done)
+        case .alertThirdButtonReturn: done(true)
+        default: done(false)
         }
     }
 
     func newDocument() {
-        guard confirmDiscard() else { return }
-        resetEditing()
-        doc = Document()
-        saved = doc
-        fileURL = nil
-        rebuildScene()
+        confirmDiscard { go in
+            guard go else { return }
+            self.resetEditing()
+            self.doc = Document()
+            self.saved = self.doc
+            self.fileURL = nil
+            self.rebuildScene()
+        }
     }
 
     // Leaves every tool, editor and pending step of the current document behind, before another one comes in.
@@ -1784,20 +1834,26 @@ final class Workbench: DesignHost {
     }
 
     func openDocument() {
-        guard confirmDiscard() else { return }
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        open(url)
+        confirmDiscard { go in
+            guard go else { return }
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            self.open(url)
+        }
     }
 
     func open(_ url: URL) {
         do {
-            let d = try ThreeMF.read(url)
+            let (d, shapes) = try ThreeMF.read(url)
             resetEditing()
             doc = d
             saved = d
             fileURL = url
+            // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
+            meshes = [:]
+            for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
+            built = [:]
             requestFit = true
             rebuildScene()
         } catch FileError.notBcad {
@@ -1807,33 +1863,37 @@ final class Workbench: DesignHost {
         }
     }
 
-    @discardableResult
-    func saveDocument(as: Bool = false) -> Bool {
+    // The file is written on the kernel's thread, so the window stays live; `done` learns whether it worked.
+    func saveDocument(as: Bool = false, done: @escaping (Bool) -> Void = { _ in }) {
         var url = fileURL
         if url == nil || `as` {
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
             panel.nameFieldStringValue = title + ".3mf"
-            guard panel.runModal() == .OK, let u = panel.url else { return false }
+            guard panel.runModal() == .OK, let u = panel.url else { done(false); return }
             url = u
         }
-        guard let url else { return false }
-        let bodies = doc.bodies.filter { !$0.hidden }
-        let doc = self.doc
-        busy = L("Saving…")
-        let ok: Bool = Kernel.shared.queue.sync {
-            let meshes = bodies.compactMap { b in Kernel.shared.worldMesh(b).map { (b.name, $0) } }
-            return (try? ThreeMF.write(url, meshes: meshes, doc: doc)) != nil
+        guard let url else { done(false); return }
+        let doc = self.doc, clearance = settings.clearance, note = L("Saving…")
+        withAnimation(Neon.spring) { busy = note }
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            let meshes = doc.bodies.filter { !$0.hidden }.compactMap { b in Kernel.shared.worldMesh(b).map { (b, $0) } }
+            let ok = (try? ThreeMF.write(url, meshes: meshes, doc: doc)) != nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.ended(note)
+                    if ok {
+                        self.fileURL = url
+                        self.saved = doc
+                        self.flash(L("Saved {name}", ["name": url.lastPathComponent]))
+                    } else {
+                        self.flash(L("Couldn't save the file"))
+                    }
+                    done(ok)
+                }
+            }
         }
-        withAnimation(Neon.spring) { busy = nil }
-        if ok {
-            fileURL = url
-            saved = doc
-            flash(L("Saved {name}", ["name": url.lastPathComponent]))
-        } else {
-            flash(L("Couldn't save the file"))
-        }
-        return ok
     }
 
     func export(step: Bool) {
@@ -1843,15 +1903,24 @@ final class Workbench: DesignHost {
         panel.allowedContentTypes = [UTType(filenameExtension: step ? "step" : "stl") ?? .data]
         panel.nameFieldStringValue = title + (step ? ".step" : ".stl")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        busy = L("Exporting…")
-        let ok: Bool = Kernel.shared.queue.sync {
-            if step { return Kernel.shared.exportStep(bodies, to: url.path) }
-            let meshes = bodies.compactMap { Kernel.shared.worldMesh($0) }
-            guard meshes.count == bodies.count else { return false }
-            return (try? STL.write(url, meshes: meshes)) != nil
+        let clearance = settings.clearance, note = L("Exporting…")
+        withAnimation(Neon.spring) { busy = note }
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            let ok: Bool
+            if step {
+                ok = Kernel.shared.exportStep(bodies, to: url.path)
+            } else {
+                let meshes = bodies.compactMap { Kernel.shared.worldMesh($0) }
+                ok = meshes.count == bodies.count && (try? STL.write(url, meshes: meshes)) != nil
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.ended(note)
+                    self.flash(ok ? L("Exported {name}", ["name": url.lastPathComponent]) : L("Export failed"))
+                }
+            }
         }
-        withAnimation(Neon.spring) { busy = nil }
-        flash(ok ? L("Exported {name}", ["name": url.lastPathComponent]) : L("Export failed"))
     }
 }
 
@@ -1869,15 +1938,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            Workbench.shared.save()
-            return Workbench.shared.confirmDiscard() ? .terminateNow : .terminateCancel
+            let lib = Workbench.shared
+            lib.save()
+            guard lib.dirty else { return .terminateNow }
+            lib.confirmDiscard { go in DispatchQueue.main.async { MainActor.assumeIsolated { NSApp.reply(toApplicationShouldTerminate: go) } } }
+            return .terminateLater
         }
     }
 
+    // OpenCascade tears itself down as the process exits and crashes if a shape is still being built; everything worth
+    // keeping is saved by now, so the app leaves without that teardown.
+    func applicationWillTerminate(_ n: Notification) { _exit(0) }
+
     func application(_ app: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {
-            guard let u = urls.first, Workbench.shared.confirmDiscard() else { return }
-            Workbench.shared.open(u)
+            guard let u = urls.first else { return }
+            Workbench.shared.confirmDiscard { go in if go { Workbench.shared.open(u) } }
         }
     }
 }

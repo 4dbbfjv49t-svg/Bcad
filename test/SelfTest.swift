@@ -147,10 +147,11 @@ enum SelfTest {
                       Solid(name: "Oval", color: 3, node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
                                                                  picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
                       Solid(name: "Bevelled", color: 4, node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10)))]
-        let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b.name, $0) } }
+        let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
         let u3 = dir.appendingPathComponent("test.3mf")
         try? ThreeMF.write(u3, meshes: meshes, doc: doc)
-        check("3mf reopens editable", (try? ThreeMF.read(u3)) == doc)
+        check("3mf reopens editable", (try? ThreeMF.read(u3))?.doc == doc)
+        check("3mf carries every body's shape", (try? ThreeMF.read(u3))?.meshes.count == doc.bodies.count)
         let parts = (try? Zip.read(Data(contentsOf: u3))) ?? [:]
         check("3mf model parses", parts[ThreeMF.modelPath].map { XMLParser(data: $0).parse() } == true)
         let stl = dir.appendingPathComponent("test.stl")
@@ -192,6 +193,11 @@ enum SelfTest {
         let lib = Workbench.shared
         lib.open(u3)
         check("open loads the file unchanged", lib.doc == doc && !lib.dirty)
+        let shown = zip(doc.bodies, meshes).allSatisfy { b, m in
+            guard let p = lib.meshes[b.id], !p.vertices.isEmpty else { return false }
+            return abs(p.volume - m.1.volume) < m.1.volume * 0.02
+        }
+        check("open shows the saved shapes at once", shown)
         lib.begin()
         lib.undoLastIfUnchanged()
         check("a click changes nothing", !lib.dirty)
@@ -206,6 +212,14 @@ enum SelfTest {
         }
         lib.open(u3)
         check("open leaves the tools behind", lib.mode == .select && lib.angleEdit == nil && lib.editBody == nil && lib.selection.isEmpty)
+        let copy = dir.appendingPathComponent("saved.3mf")
+        lib.fileURL = copy
+        var saved: Bool?
+        let t2 = Date()
+        lib.saveDocument { saved = $0 }
+        let returned = Date().timeIntervalSince(t2) < 0.5
+        while saved == nil && Date().timeIntervalSince(t2) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")
