@@ -9,15 +9,17 @@ extern "C" {
 
 typedef struct BKShape BKShape;
 
-enum { BK_BOX, BK_CYLINDER, BK_CONE, BK_SPHERE, BK_PRISM, BK_TORUS, BK_WEDGE, BK_PYRAMID, BK_HEMISPHERE, BK_BOWL, BK_RING, BK_GLASS, BK_OVAL };
+enum { BK_BOX, BK_CYLINDER, BK_CONE, BK_SPHERE, BK_PRISM, BK_TORUS, BK_WEDGE, BK_PYRAMID, BK_HEMISPHERE, BK_BOWL, BK_RING, BK_GLASS, BK_OVAL, BK_OVAL_TORUS };
 enum { BK_UNION, BK_SUBTRACT, BK_INTERSECT };
 enum { BK_PICK_EDGE, BK_PICK_CORNER, BK_PICK_FACE, BK_PICK_BODY };
 
 // Primitives are centred on the origin (bounding-box centre).
 // box: w d h | cylinder: d h | cone: d1 d2 h | sphere: d | prism: sides d h (d across corners)
-// torus: D d | wedge: w d h (ramp rising along +x) | pyramid: sides d h (d across corners; 3, 4, 6, 8 …)
+// torus: sides D d (D outside; the tube d wide: round for sides 0, a triangle with its point up for 3, a hexagon lying flat for 6;
+// the polygons are d·√3/2 tall) | wedge: w d h (ramp rising along +x) | pyramid: sides d h (d across corners; 3, 4, 6, 8 …)
 // half-sphere: d (dome up) | bowl: d wall (open top) | ring: D d h | glass: d h wall bottom (open top)
 // oval: dA dB angle h (diameter dA along x, diameter dB at angle° from it, 5…175; 90 = plain ellipse)
+// oval torus: sides dA dB angle d (the tube of a torus along an oval: dA and dB outside, as for oval)
 BKShape *bk_primitive(int kind, const double *p);
 // ISO metric coarse bolt / nut. size = index into bk_thread_sizes (M3 … M24).
 BKShape *bk_bolt(int size, double length, int threadOnly, double clearance);
@@ -25,6 +27,8 @@ BKShape *bk_nut(int size, double length, int threadOnly, double clearance);
 int bk_thread_count(void);
 const char *bk_thread_name(int size);
 double bk_thread_default_length(int size, int nut);
+// The bounding size (x y z) of the bolt or nut those arguments make.
+void bk_fastener_extent(int size, double length, int nut, int threadOnly, double clearance, double *out);
 
 // m = row-major 3x4 affine matrix (rotation·scale | translation).
 BKShape *bk_transform(const BKShape *s, const double *m);
@@ -81,6 +85,9 @@ typedef struct {
   int edgeCount, edgePointCount;
   float *edgePoints;                // xyz polylines, concatenated
   uint32_t *edgeStart;              // edgeCount + 1 offsets (in points)
+  int32_t *edgeFaces;               // per edge: the faces on either side (-1 when there is none)
+  int circleCount;
+  double *circles;                  // per circular edge of half a turn or more: centre xyz, axis xyz, radius
   int cornerCount;
   float *corners;                   // xyz per topological vertex
   double bbox[6];                   // min xyz, max xyz

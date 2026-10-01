@@ -168,6 +168,28 @@ static TopoDS_Shape revolve(const std::vector<std::pair<double, double>> &rz) {
   return BRepPrimAPI_MakeRevol(face, gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))).Shape();
 }
 
+// A polygon tube's outline across its ring, in the (radius, height) plane around radius r: a triangle with its point up
+// (sides 3) or a hexagon lying flat (6), both 2w wide and w·√3 tall.
+static std::vector<std::pair<double, double>> tubeOutline(int sides, double w, double r) {
+  double h = w * sqrt(3.0) / 2;
+  if (sides == 3) return {{r - w, -h}, {r + w, -h}, {r, h}};
+  return {{r - w, 0}, {r - w / 2, -h}, {r + w / 2, -h}, {r + w, 0}, {r + w / 2, h}, {r - w / 2, h}};
+}
+
+// The ellipse with conjugate semi-diameters u = (a, 0) and v = b·(cos t, sin t) is [u v] applied to the unit circle;
+// its semi-axes are the square roots of the eigenvalues of [u v][u v]ᵀ, along the eigenvectors (phi: the major axis).
+static void conjugate(double a, double b, double t, double &major, double &minor, double &phi) {
+  double sxx = a * a + b * b * cos(t) * cos(t), sxy = b * b * cos(t) * sin(t), syy = b * b * sin(t) * sin(t);
+  double mean = (sxx + syy) / 2, spread = hypot((sxx - syy) / 2, sxy);
+  major = sqrt(mean + spread), minor = sqrt(std::max(mean - spread, 0.0)), phi = atan2(2 * sxy, sxx - syy) / 2;
+}
+
+static TopoDS_Edge oval(double major, double minor, double phi) {
+  gp_Ax2 axes(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(cos(phi), sin(phi), 0));
+  return major - minor <= 1e-9 * major ? BRepBuilderAPI_MakeEdge(gp_Circ(axes, major)).Edge()
+                                       : BRepBuilderAPI_MakeEdge(gp_Elips(axes, major, minor)).Edge();
+}
+
 // Merges faces and edges that lie on the same surface (no seams left from the parts) and returns a lone
 // solid as itself rather than wrapped in a compound, so a merge is one monolithic part.
 static TopoDS_Shape unify(const TopoDS_Shape &s) {
@@ -214,9 +236,9 @@ static TopoDS_Shape common(const TopoDS_Shape &a, const TopoDS_Shape &b) {
 BKShape *bk_primitive(int kind, const double *p) {
   return guarded("shape", [&]() -> TopoDS_Shape {
     // How many numbers each kind takes, and which must be above zero (a cone end and a ring's hole may be 0).
-    static const int counts[] = {3, 2, 3, 1, 3, 2, 3, 3, 1, 2, 3, 4, 4};
-    static const std::vector<int> above[] = {{0, 1, 2}, {0, 1}, {2}, {0}, {1, 2}, {0, 1}, {0, 1, 2}, {1, 2}, {0}, {0, 1}, {0, 2}, {0, 1, 2, 3}, {0, 1, 3}};
-    need(kind >= BK_BOX && kind <= BK_OVAL, "unknown shape");
+    static const int counts[] = {3, 2, 3, 1, 3, 3, 3, 3, 1, 2, 3, 4, 4, 5};
+    static const std::vector<int> above[] = {{0, 1, 2}, {0, 1}, {2}, {0}, {1, 2}, {1, 2}, {0, 1, 2}, {1, 2}, {0}, {0, 1}, {0, 2}, {0, 1, 2, 3}, {0, 1, 3}, {1, 2, 4}};
+    need(kind >= BK_BOX && kind <= BK_OVAL_TORUS, "unknown shape");
     need(finite(p, counts[kind]), "sizes must be numbers");
     for (int i = 0; i < counts[kind]; i++) need(p[i] >= 0, "sizes can't be below zero");
     for (int i : above[kind]) need(p[i] >= 0.001, "sizes must be above zero");
@@ -236,9 +258,16 @@ BKShape *bk_primitive(int kind, const double *p) {
     case BK_PRISM:
       return centred(prism(std::max(3, (int)lround(p[0])), p[1] / 2, 0, p[2]));
     case BK_TORUS: {
-      double tube = p[1] / 2, ring = p[0] / 2 - tube;
-      need(ring > tube * 0.05, "the tube is too thick for this torus");
-      return BRepPrimAPI_MakeTorus(ring, tube).Shape();
+      int sides = (int)lround(p[0]);
+      need(sides == 0 || sides == 3 || sides == 6, "unknown tube shape");
+      double tube = p[2] / 2, ring = p[1] / 2 - tube;
+      if (sides == 0) {
+        need(ring > tube * 0.05, "the tube is too thick for this torus");
+        return BRepPrimAPI_MakeTorus(ring, tube).Shape();
+      }
+      // A polygon tube keeps a hole: crossing the axis would make the turned outline overlap itself.
+      need(ring - tube > tube * 0.05, "the tube is too thick for this torus");
+      return centred(revolve(tubeOutline(sides, tube, ring)));
     }
     case BK_WEDGE:
       return centred(BRepPrimAPI_MakeWedge(p[0], p[1], p[2], 0).Shape());
@@ -273,17 +302,38 @@ BKShape *bk_primitive(int kind, const double *p) {
       return centred(revolve({{0, 0}, {r, 0}, {r, h}, {r - w, h}, {r - w, b}, {0, b}}));
     }
     case BK_OVAL: {
-      // The ellipse with conjugate semi-diameters u = (a, 0) and v = b·(cos t, sin t) is [u v] applied to the unit circle;
-      // its semi-axes are the square roots of the eigenvalues of [u v][u v]ᵀ, along the eigenvectors.
       double a = std::max(p[0], 0.01) / 2, b = std::max(p[1], 0.01) / 2, t = std::min(std::max(p[2], 5.0), 175.0) * M_PI / 180;
-      double sxx = a * a + b * b * cos(t) * cos(t), sxy = b * b * cos(t) * sin(t), syy = b * b * sin(t) * sin(t);
-      double mean = (sxx + syy) / 2, spread = hypot((sxx - syy) / 2, sxy);
-      double major = sqrt(mean + spread), minor = sqrt(std::max(mean - spread, 0.0)), phi = atan2(2 * sxy, sxx - syy) / 2;
-      gp_Ax2 axes(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(cos(phi), sin(phi), 0));
-      TopoDS_Edge rim = major - minor <= 1e-9 * major ? BRepBuilderAPI_MakeEdge(gp_Circ(axes, major)).Edge()
-                                                      : BRepBuilderAPI_MakeEdge(gp_Elips(axes, major, minor)).Edge();
-      TopoDS_Face base = BRepBuilderAPI_MakeFace(BRepBuilderAPI_MakeWire(rim).Wire()).Face();
+      double major, minor, phi;
+      conjugate(a, b, t, major, minor, phi);
+      TopoDS_Face base = BRepBuilderAPI_MakeFace(BRepBuilderAPI_MakeWire(oval(major, minor, phi)).Wire()).Face();
       return centred(BRepPrimAPI_MakePrism(base, gp_Vec(0, 0, p[3])).Shape());
+    }
+    case BK_OVAL_TORUS: {
+      // The tube is swept along the oval through its middle, upright all the way round (a fixed binormal along z).
+      int sides = (int)lround(p[0]);
+      need(sides == 0 || sides == 3 || sides == 6, "unknown tube shape");
+      double w = p[4] / 2, a = p[1] / 2 - w, b = p[2] / 2 - w, t = std::min(std::max(p[3], 5.0), 175.0) * M_PI / 180;
+      need(a > 0 && b > 0, "the tube is too thick for this torus");
+      double major, minor, phi;
+      conjugate(a, b, t, major, minor, phi);
+      // The tube must fit the tightest bend (radius minor²/major) or its inner side folds over itself.
+      need(w * 1.05 < minor * minor / major, "the tube is too thick for this torus");
+      gp_Dir radial(cos(phi), sin(phi), 0), up(0, 0, 1);
+      gp_Pnt start(major * cos(phi), major * sin(phi), 0);
+      TopoDS_Wire section;
+      if (sides == 0) {
+        section = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(start, up.Crossed(radial), radial), w)).Edge()).Wire();
+      } else {
+        std::vector<gp_Pnt> pts;
+        for (auto &q : tubeOutline(sides, w, 0)) pts.push_back(start.Translated(gp_Vec(radial) * q.first + gp_Vec(up) * q.second));
+        section = polygon(pts);
+      }
+      BRepOffsetAPI_MakePipeShell pipe(BRepBuilderAPI_MakeWire(oval(major, minor, phi)).Wire());
+      pipe.SetMode(up);
+      pipe.Add(section);
+      pipe.Build();
+      need(pipe.IsDone() && pipe.MakeSolid(), "the tube can't follow this oval");
+      return centred(pipe.Shape());
     }
     }
     return TopoDS_Shape();
@@ -312,6 +362,17 @@ const char *bk_thread_name(int size) { return size >= 0 && size < sizeCount ? si
 double bk_thread_default_length(int size, int nut) {
   if (size < 0 || size >= sizeCount) return 10;
   return nut ? sizes[size].m : sizes[size].length;
+}
+
+void bk_fastener_extent(int size, double length, int nut, int threadOnly, double clearance, double *out) {
+  const ThreadSize &t = sizes[std::max(0, std::min(sizeCount - 1, size))];
+  double len = std::isfinite(length) ? std::max(length, t.p * 2) : t.p * 2, c = std::isfinite(clearance) ? std::max(0.0, clearance) : 0;
+  // A hex is 2·s/√3 across its corners (along x) and s across its flats (along y).
+  double hx = 2 * t.s / sqrt(3.0), hy = t.s, d = nut ? t.d + c + 3.2 : t.d - c;
+  bool hex = !threadOnly;
+  out[0] = hex ? hx : d;
+  out[1] = hex ? hy : d;
+  out[2] = nut || threadOnly ? len : len + t.k;
 }
 
 // A thread is built face by face instead of by sweeping and fusing: per turn, a crest strip on the major
@@ -1139,6 +1200,10 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
     }
     std::vector<float> ep;
     std::vector<uint32_t> es{0};
+    std::vector<int32_t> ef;
+    std::vector<double> circles;
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
     for (int ei = 1; ei <= edges.Extent(); ei++) {
       TopoDS_Edge e = TopoDS::Edge(edges(ei));
       if (!BRep_Tool::Degenerated(e)) {
@@ -1149,8 +1214,23 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
             gp_Pnt p = pts.Value(i);
             ep.insert(ep.end(), {(float)p.X(), (float)p.Y(), (float)p.Z()});
           }
+        if (curve.GetType() == GeomAbs_Circle && curve.LastParameter() - curve.FirstParameter() >= M_PI - 1e-6) {
+          gp_Circ c = curve.Circle();
+          gp_Pnt o = c.Location();
+          gp_Dir n = c.Axis().Direction();
+          circles.insert(circles.end(), {o.X(), o.Y(), o.Z(), n.X(), n.Y(), n.Z(), c.Radius()});
+        }
       }
       es.push_back((uint32_t)(ep.size() / 3));
+      int32_t side[2] = {-1, -1}, k = 0;
+      int i = edgeFaces.FindIndex(e);
+      if (i)
+        for (TopTools_ListOfShape::Iterator it(edgeFaces(i)); it.More() && k < 2; it.Next()) {
+          int f = faces.FindIndex(it.Value()) - 1;
+          if (k == 1 && f == side[0]) continue;
+          side[k++] = f;
+        }
+      ef.insert(ef.end(), {side[0], side[1]});
     }
     std::vector<float> cs;
     for (int vi = 1; vi <= vertices.Extent(); vi++) {
@@ -1169,6 +1249,9 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
     m->edgePointCount = (int)(ep.size() / 3);
     m->edgePoints = mallocCopy(ep);
     m->edgeStart = mallocCopy(es);
+    m->edgeFaces = mallocCopy(ef);
+    m->circleCount = (int)(circles.size() / 7);
+    m->circles = mallocCopy(circles);
     m->cornerCount = vertices.Extent();
     m->corners = mallocCopy(cs);
     Bnd_Box box;
@@ -1193,6 +1276,8 @@ void bk_mesh_free(BKMesh *m) {
   free(m->faceInfo);
   free(m->edgePoints);
   free(m->edgeStart);
+  free(m->edgeFaces);
+  free(m->circles);
   free(m->corners);
   delete m;
 }

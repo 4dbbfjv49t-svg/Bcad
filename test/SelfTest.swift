@@ -1,8 +1,8 @@
 #if SELFTEST
-import Foundation
+import AppKit
 import simd
 
-// Kernel and file checks: bash test/selftest.sh
+// Kernel, file and editing checks: bash test/selftest.sh
 @MainActor
 enum SelfTest {
     static func run(_ dir: URL) -> Bool {
@@ -28,6 +28,38 @@ enum SelfTest {
             let m = mesh(.primitive(p))
             check(p.name, m?.valid == true && (m?.volume ?? 0) > 0, String(format: "%.2f mm³", m?.volume ?? 0))
         }
+
+        // Tori: a polygon tube turned round (Pappus), any tube taken along an oval (its area times the oval's length).
+        func ovalLength(_ a: Double, _ b: Double, _ degrees: Double) -> Double {
+            let t = degrees * .pi / 180
+            var length = 0.0, last = SIMD2(a, 0.0)
+            for k in 1...20000 {
+                let s = 2 * Double.pi * Double(k) / 20000, p = SIMD2(a * cos(s) + b * cos(t) * sin(s), b * sin(t) * sin(s))
+                length += simd_distance(p, last)
+                last = p
+            }
+            return length
+        }
+        let triangle = sqrt(3) / 4 * 64, hexagon = 3 * sqrt(3) / 8 * 64, circle = Double.pi * 16
+        let tori: [(Primitive, Double, Bool)] = [
+            (.make(.torus, sides: 3), triangle * 2 * .pi * 11, true), (.make(.torus, sides: 6), hexagon * 2 * .pi * 11, true),
+            (Primitive(kind: .ovalTorus, sides: 0, size: [40, 30, 90, 8]), circle * ovalLength(16, 11, 90), false),
+            (Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8]), hexagon * ovalLength(16, 11, 60), false)
+        ]
+        for (p, want, closed) in tori {
+            let m = mesh(.primitive(p))
+            check(p.name, m?.valid == true && abs((m?.volume ?? 0) - want) < want * 0.002 && (!closed || manifold(m!)),
+                  String(format: "%.2f / %.2f mm³", m?.volume ?? 0, want))
+        }
+        _ = k.takeProblems()
+        check("too thick a tube for an oval refused", mesh(.primitive(Primitive(kind: .ovalTorus, sides: 0, size: [40, 12, 90, 8]))) == nil && k.takeProblems().contains("bend"))
+        let every = prims + tori.map(\.0) + [.make(.hemisphere), .make(.bowl), .make(.ring), .make(.glass), .make(.oval), Primitive(kind: .oval, size: [20, 12, 60, 20]),
+                                              Primitive(kind: .cone, size: [8, 20, 15]), .make(.ovalTorus, sides: 3)]
+        let mismatched = every.filter { p in
+            guard let m = mesh(.primitive(p)) else { return true }
+            return simd_reduce_max(simd_abs(m.size - p.extent)) > 0.02
+        }
+        check("every shape's size is known before it's built", mismatched.isEmpty, mismatched.map(\.name).joined(separator: ", "))
 
         let shaped: [(Primitive, Double)] = [
             (.make(.hemisphere), 2.0 / 3 * .pi * 1000), (.make(.bowl), 2.0 / 3 * .pi * (8000 - 5832)),
@@ -91,7 +123,8 @@ enum SelfTest {
                     let m = mesh(.fastener(fs))
                     let h = m?.size.z ?? 0
                     let lengthOK = nut || only ? abs(h - fs.length) < 0.01 : h > fs.length
-                    check(fs.name, m?.valid == true && lengthOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
+                    let sizeOK = m.map { simd_reduce_max(simd_abs($0.size - fs.extent(clearance: 0.2))) < 0.05 } == true
+                    check(fs.name, m?.valid == true && lengthOK && sizeOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
                 }
             }
         }
@@ -131,6 +164,11 @@ enum SelfTest {
         check("inward rounding", cove?.valid == true && abs((cove?.volume ?? 0) - coveWant) < 1, String(format: "%.2f / %.2f mm³", cove?.volume ?? 0, coveWant))
         let coves = mesh(.cove(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1))
         check("inward rounding on all edges", coves?.valid == true && (coves?.volume ?? 8000) < 8000 && manifold(coves!))
+        let holed = mesh(.group(op: Int32(BK_SUBTRACT), parts: [base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())]))
+        let rims = holed?.circles.filter { abs($0.radius - 4) < 1e-6 && abs($0.center.x) < 1e-6 && abs($0.center.y) < 1e-6 && abs(abs($0.center.z) - 10) < 1e-6 } ?? []
+        check("a hole's rims are found", rims.count >= 2, "\(holed?.circles.count ?? 0) circles")
+        let topEdges = mesh(box).map { Picking.faceEdges($0, Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))).count }
+        check("a face knows its edges", topEdges == 4, "\(topEdges ?? 0) edges")
         let cut = k.section(box, edge)
         check("cut through an edge", cut.map { abs($0.angle - 90) < 0.01 && $0.loops.count == 1 } == true, cut.map { String(format: "%.1f° · %d loops", $0.angle, $0.loops.count) } ?? "none")
 
@@ -141,16 +179,19 @@ enum SelfTest {
         check("threaded hole", hole?.valid == true && (hole?.volume ?? 0) < 18000 - 600 && manifold(hole!), String(format: "%.1f s · %.2f mm³", Date().timeIntervalSince(t0), hole?.volume ?? 0))
 
         var doc = Document()
-        doc.bodies = [Solid(name: "Cube", color: 0, node: .round(of: box, picks: [edge], radius: 2)),
-                      Solid(name: "M8 bolt", color: 1, node: .fastener(Fastener(nut: false, size: 4, length: 30, threadOnly: false)), place: Placement(move: SIMD3(40, 0, 15))),
-                      Solid(name: "Box", color: 2, node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
-                      Solid(name: "Oval", color: 3, node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
+        let mixed = SIMD3<UInt8>(12, 34, 56)
+        doc.bodies = [Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2)),
+                      Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(nut: false, size: 4, length: 30, threadOnly: false)), place: Placement(move: SIMD3(40, 0, 15))),
+                      Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
+                      Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
                                                                  picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
-                      Solid(name: "Bevelled", color: 4, node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10)))]
+                      Solid(name: "Bevelled", color: Palette.colors[4], node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10))),
+                      Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
         let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
         let u3 = dir.appendingPathComponent("test.3mf")
         try? ThreeMF.write(u3, meshes: meshes, doc: doc)
         check("3mf reopens editable", (try? ThreeMF.read(u3))?.doc == doc)
+        check("a mixed colour is saved", (try? ThreeMF.read(u3))?.doc.bodies.first?.color == mixed)
         check("3mf carries every body's shape", (try? ThreeMF.read(u3))?.meshes.count == doc.bodies.count)
         let parts = (try? Zip.read(Data(contentsOf: u3))) ?? [:]
         check("3mf model parses", parts[ThreeMF.modelPath].map { XMLParser(data: $0).parse() } == true)
@@ -184,7 +225,7 @@ enum SelfTest {
         try? Data(bad).write(to: damaged)
         check("damaged 3mf refused", (try? ThreeMF.read(damaged)) == nil)
         var odd = Document()
-        odd.bodies = [Solid(name: "Odd", color: 0, node: .primitive(Primitive(kind: .box, size: [20])))]
+        odd.bodies = [Solid(name: "Odd", color: Palette.colors[0], node: .primitive(Primitive(kind: .box, size: [20])))]
         let oddURL = dir.appendingPathComponent("odd.3mf")
         try? ThreeMF.write(oddURL, meshes: [], doc: odd)
         check("3mf with wrong sizes refused", (try? ThreeMF.read(oddURL)) == nil)
@@ -220,6 +261,114 @@ enum SelfTest {
         let returned = Date().timeIntervalSince(asked) < 0.5
         while saved == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
+
+        // Resizing: a new size keeps the left, front and bottom sides (or the middle), roundings go along, drags stretch one
+        // side, several shapes stretch along one axis only, and nothing drops to the bed.
+        func settle() {
+            let t = Date()
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } while lib.building && Date().timeIntervalSince(t) < 120
+        }
+        func bounds(_ id: UUID) -> (SIMD3<Double>, SIMD3<Double>) { lib.body(id).flatMap { lib.worldBounds($0) } ?? (.zero, .zero) }
+        func near(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ tolerance: Double = 0.01) -> Bool { simd_reduce_max(simd_abs(a - b)) < tolerance }
+        func use(_ bodies: [Solid]) {
+            lib.selection = []
+            lib.doc.bodies = bodies
+            lib.rebuildScene()
+            settle()
+        }
+        lib.settings = Settings()
+        let rounded = Solid(name: "Rounded", color: Palette.colors[0], node: .round(of: box, picks: [edge], radius: 2), place: Placement(move: SIMD3(0, 0, 30)))
+        use([rounded])
+        lib.reshape(rounded.id) { n in
+            guard case .primitive(var p) = n else { return n }
+            p.size = [40, 20, 40]
+            return .primitive(p)
+        }
+        settle()
+        let (wideLo, wideHi) = bounds(rounded.id)
+        check("a new size keeps the left, front and bottom sides", near(wideLo, SIMD3(-10, -10, 20)) && near(wideHi, SIMD3(30, 10, 60)))
+        let wide = lib.meshes[rounded.id]?.volume ?? 0, wideWant = 32000 - (4 - Double.pi) * 40
+        check("a rounding goes along with a new size", abs(wide - wideWant) < 1, String(format: "%.2f / %.2f mm³", wide, wideWant))
+        lib.settings.symmetric = true
+        lib.reshape(rounded.id) { n in
+            guard case .primitive(var p) = n else { return n }
+            p.size = [20, 20, 20]
+            return .primitive(p)
+        }
+        settle()
+        let (backLo, backHi) = bounds(rounded.id)
+        check("a symmetric new size keeps the middle", near((backLo + backHi) / 2, (wideLo + wideHi) / 2) && near(backHi - backLo, SIMD3(20, 20, 20)))
+        lib.settings.symmetric = false
+        lib.selection = [rounded.id]
+        if let start = lib.body(rounded.id)?.place { lib.stretch([rounded.id: start], axis: 2, by: 1.5, uniform: false, symmetric: false) }
+        lib.finishScale()
+        settle()
+        let (tallLo, tallHi) = bounds(rounded.id)
+        let baked = lib.body(rounded.id).map { $0.place.scale == SIMD3(1, 1, 1) && $0.node.base == .primitive(Primitive(kind: .box, size: [20, 20, 30])) } == true
+        check("a resize drag keeps the bottom and stays up", near(tallLo, SIMD3(backLo.x, backLo.y, backLo.z)) && abs(tallHi.z - backLo.z - 30) < 0.01 && baked)
+        let left = Solid(name: "Left", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(-20, 0, 10)))
+        let right = Solid(name: "Right", color: Palette.colors[1], node: .primitive(.make(.cylinder)), place: Placement(move: SIMD3(20, 0, 10)))
+        use([left, right])
+        lib.stretch([left.id: left.place, right.id: right.place], axis: 0, by: 2, uniform: false, symmetric: false)
+        check("several shapes stretch along one axis only", near(bounds(left.id).0, SIMD3(-30, -10, 0)) && near(bounds(left.id).1, SIMD3(10, 10, 20))
+              && near(bounds(right.id).0, SIMD3(50, -10, 0)) && near(bounds(right.id).1, SIMD3(90, 10, 20)))
+        lib.selection = []
+        lib.addThread()
+        settle()
+        check("⌘B adds a bolt and opens Thread", lib.primary.map { if case .fastener = $0.node { true } else { false } } == true && lib.screen == .thread)
+
+        // Real mouse events on the 3D view (offscreen): handles, ⌥ for symmetric, two shapes, a face in Angles.
+        let view = CadView()
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        func event(_ type: NSEvent.EventType, _ p: CGPoint, _ mods: NSEvent.ModifierFlags) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        func drag(_ from: CGPoint, _ to: CGPoint, _ mods: NSEvent.ModifierFlags = []) {
+            view.mouseDown(with: event(.leftMouseDown, from, mods))
+            for k in 1...12 {
+                let t = CGFloat(k) / 12
+                view.mouseDragged(with: event(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t), mods))
+            }
+            view.mouseUp(with: event(.leftMouseUp, to, mods))
+            settle()
+        }
+        // From the handle of axis i to where it lies `mm` further along that axis.
+        func pull(_ i: Int, _ mm: Double, _ mods: NSEvent.ModifierFlags = []) {
+            let r = view.renderer!, c = r.gizmoCenter, a = r.gizmoAxes()[i], at = r.gizmoLength * 0.95
+            guard let from = view.project(c + a * at), let to = view.project(c + a * (at + mm)) else { return }
+            drag(from, to, mods)
+        }
+        let cube = Solid(name: "Cube", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
+        use([cube])
+        lib.camera = Camera()
+        lib.camera.distance = 150
+        lib.selection = [cube.id]
+        lib.choose(.resize)
+        pull(2, 10)
+        let (pullLo, pullHi) = bounds(cube.id)
+        check("dragging the top handle keeps the bottom", abs(pullLo.z) < 0.01 && abs(pullHi.z - 30) < 0.6, String(format: "z %.2f … %.2f", pullLo.z, pullHi.z))
+        pull(2, 5, .option)
+        let (optLo, optHi) = bounds(cube.id)
+        check("⌥-dragging keeps the middle", abs((optLo.z + optHi.z) / 2 - 15) < 0.01 && abs(optHi.z - optLo.z - 40) < 1.2, String(format: "z %.2f … %.2f", optLo.z, optHi.z))
+        let other = Solid(name: "Other", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(30, 0, 10)))
+        use([cube, other])
+        lib.selection = [cube.id, other.id]
+        lib.choose(.move)
+        lib.choose(.resize)
+        pull(0, 10)
+        let pair = [cube.id, other.id].map { lib.body($0)?.node.base }
+        let widened = pair.allSatisfy { if case .primitive(let p) = $0 { p.size[0] > 20.5 && p.size[1] == 20 && p.size[2] == 20 } else { false } }
+        check("dragging the side handle of two shapes changes that side only", widened, pair.map { "\($0.map { "\($0)" } ?? "none")" }.joined(separator: " · "))
+        use([cube])
+        lib.selection = [cube.id]
+        lib.choose(.angles)
+        if let p = view.project(SIMD3(0, 0, 20)) {
+            view.mouseDown(with: event(.leftMouseDown, p, []))
+            view.mouseUp(with: event(.leftMouseUp, p, []))
+        }
+        let picked = lib.edgePicks.first
+        let lit = picked.flatMap { pk in lib.meshes[cube.id].map { Picking.faceEdges($0, pk).count } } ?? 0
+        check("a face clicked in Angles is picked with its edges", lib.edgePicks.count == 1 && picked?.kind == Int32(BK_PICK_FACE) && lit == 4, "\(lit) edges")
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")

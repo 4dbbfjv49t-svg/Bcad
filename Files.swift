@@ -256,8 +256,12 @@ extension Node {
     var valid: Bool {
         switch self {
         case .primitive(let p):
-            let sided = p.kind == .prism || p.kind == .pyramid
-            return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy(\.isFinite) && (!sided || (3...24).contains(p.sides))
+            let sides = switch p.kind {
+            case .prism, .pyramid: (3...24).contains(p.sides)
+            case .torus, .ovalTorus: [0, 3, 6].contains(p.sides)
+            default: true
+            }
+            return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy(\.isFinite) && sides
         case .fastener(let f):
             return (0..<Int(bk_thread_count())).contains(f.size) && f.length.isFinite
         case .group(let op, let parts):

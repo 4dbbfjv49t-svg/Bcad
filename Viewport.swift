@@ -282,10 +282,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 rim = SIMD4(1, 0.15, 0.25, 1.1 * glow)
             } else if selected {
                 rim.w = 0.95 * glow
-            } else if hovered && lib.mode == .select {
+            } else if hovered && (lib.mode == .select || lib.mode == .thread) {
                 rim.w = 0.45 * glow
             }
-            let c = Palette.colors[(b.color % Palette.colors.count + Palette.colors.count) % Palette.colors.count]
+            let c = SIMD3<Float>(b.color) / 255
             let facePicking = ((lib.mode == .round || lib.mode == .angles) && lib.hover.edge < 0 && lib.hover.corner < 0) || lib.mode == .hollow
             let faceHover = facePicking && hovered ? Int32(lib.hover.face) : -1
             var u = BodyU(model: model, normalM: nm, color: SIMD4(c, 1), rim: rim, hoverFace: faceHover, flags: selected ? 1 : 0)
@@ -304,7 +304,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setVertexBytes(&mm, length: 64, index: 2)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: g.edgeCount)
             }
-            if lib.mode == .round || lib.mode == .angles { drawRoundMarks(enc, b, m, model, accent: accent, accent2: accent2) }
+            if lib.mode == .round || lib.mode == .angles {
+                if lib.editBody == b.id {
+                    let faces = lib.edgePicks.filter { $0.kind == Int32(BK_PICK_FACE) }.compactMap { Picking.face(m, $0) }
+                    tint(enc, m, g, model, nm, [(faces, SIMD4(accent2.x, accent2.y, accent2.z, 0.35))])
+                }
+                drawRoundMarks(enc, b, m, model, accent: accent, accent2: accent2)
+            }
             if lib.mode == .hollow, lib.editBody == b.id { drawHollowMarks(enc, m, g, model, nm, accent2: accent2) }
         }
 
@@ -379,11 +385,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Openings in red, faces with their own wall in the second accent (brighter when being edited).
     private func drawHollowMarks(_ enc: MTLRenderCommandEncoder, _ m: Mesh, _ g: GPUBody, _ model: simd_float4x4, _ nm: simd_float4x4, accent2: SIMD4<Float>) {
         let focus = lib.focusWall.flatMap { lib.hollowWalls.indices.contains($0) ? Picking.face(m, lib.hollowWalls[$0].face) : nil }
-        let groups: [([Int], SIMD4<Float>)] = [
+        tint(enc, m, g, model, nm, [
             (lib.hollowOpen.compactMap { Picking.face(m, $0) }, SIMD4(1, 0.1, 0.18, 0.8)),
             (lib.hollowWalls.compactMap { Picking.face(m, $0.face) }.filter { $0 != focus }, SIMD4(accent2.x, accent2.y, accent2.z, 0.5)),
             (focus.map { [$0] } ?? [], SIMD4(accent2.x, accent2.y, accent2.z, 0.85))
-        ]
+        ])
+    }
+
+    // Faces of a body washed over in a see-through colour, each group in its own.
+    private func tint(_ enc: MTLRenderCommandEncoder, _ m: Mesh, _ g: GPUBody, _ model: simd_float4x4, _ nm: simd_float4x4, _ groups: [([Int], SIMD4<Float>)]) {
         for (faces, tint) in groups where !faces.isEmpty {
             let set = Set(faces)
             var idx: [UInt32] = []
@@ -471,7 +481,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         return [SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)]
     }
 
-    static let axisColors: [SIMD4<Float>] = [SIMD4(1, 0.3, 0.38, 1), SIMD4(0.35, 1, 0.55, 1), SIMD4(0.38, 0.62, 1, 1)]
+    static let axisColors: [SIMD4<Float>] = Axis.rgb.map { SIMD4($0, 1) }
 
     func ring(_ axis: Int, _ c: SIMD3<Double>, _ r: Double) -> [SIMD3<Double>] { circle(around: gizmoAxes()[axis], c, r) }
 
@@ -527,6 +537,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         lib.camera.distance = Float(r / tan(Double(lib.camera.fov) / 2) * 1.25)
         return true
     }
+}
+
+// The axes' colours, x red, y green, z blue: the same on the gizmo, in the inspector and on the split chips, in every style.
+enum Axis {
+    static let rgb: [SIMD3<Float>] = [SIMD3(1, 0.3, 0.38), SIMD3(0.35, 1, 0.55), SIMD3(0.38, 0.62, 1)]
+    static func color(_ i: Int) -> Color { Color(red: Double(rgb[i].x), green: Double(rgb[i].y), blue: Double(rgb[i].z)) }
 }
 
 // MARK: - Picking
@@ -585,9 +601,9 @@ enum Picking {
         return (e.last!, normalize(e[e.count - 1] - e[e.count - 2]))
     }
 
-    // The mesh face a face pick (normal, centroid) points at.
+    // The mesh face a face pick (normal, centroid) points at, within the kernel's reach for picks.
     static func face(_ m: Mesh, _ pick: Pick) -> Int? {
-        var best = 0.5, hit: Int?
+        var best = max(0.3, simd_length(m.high - m.low) * 0.02), hit: Int?
         for (i, f) in m.faceInfo.enumerated() where dot(f.normal, pick.a) > 0.7 {
             let d = length(f.centroid - pick.b)
             if d < best { best = d; hit = i }
@@ -615,23 +631,10 @@ enum Picking {
         return hit
     }
 
+    // The edges around a picked face: the ones a rounding of the face works on.
     static func faceEdges(_ m: Mesh, _ pick: Pick) -> [Int] {
-        var best = Double.infinity, face = -1
-        for (i, f) in m.faceInfo.enumerated() {
-            var d = length(f.centroid - pick.b)
-            if dot(f.normal, pick.a) < 0.7 { d += 1000 }
-            if d < best { best = d; face = i }
-        }
-        guard face >= 0 else { return [] }
-        // edges lying on the face: sample points near the face's triangles' vertices
-        var pts = Set<SIMD3<Int32>>()
-        let q: (SIMD3<Float>) -> SIMD3<Int32> = { SIMD3<Int32>(Int32(($0.x * 100).rounded()), Int32(($0.y * 100).rounded()), Int32(($0.z * 100).rounded())) }
-        for v in m.vertices where Int(v.w) == face { pts.insert(q(SIMD3(v.x, v.y, v.z))) }
-        return m.edges.indices.filter { i in
-            let e = m.edges[i]
-            guard e.count > 1 else { return false }
-            return pts.contains(q(e.first!)) && pts.contains(q(e.last!)) && pts.contains(q(midpoint(e).0)) || (pts.contains(q(e.first!)) && pts.contains(q(e.last!)) && e.count > 2)
-        }
+        guard let f = face(m, pick).map(Int32.init) else { return [] }
+        return m.edgeFaces.indices.filter { m.edgeFaces[$0].x == f || m.edgeFaces[$0].y == f }
     }
 }
 
@@ -656,6 +659,9 @@ final class CadView: MTKView {
     private var tracking: NSTrackingArea?
     private var startBox: Box?
     private var others: [Box] = []
+    private var marks: [[Mark]] = [[], [], []]
+    // The selection's own holes' and pegs' middles as the drag began.
+    private var ownRings: [SIMD3<Double>] = []
     private var frameAsked = false
     var guides: [(SIMD3<Double>, SIMD3<Double>)] = []
 
@@ -927,7 +933,7 @@ final class CadView: MTKView {
             }
             drag = .none
             return
-        case .select:
+        case .select, .thread:
             break
         }
         if let axis = gizmoHit(p) {
@@ -1000,18 +1006,17 @@ final class CadView: MTKView {
         case .scaleAxis(let i):
             accum += along(renderer.gizmoAxes()[i], dx, dy)
             guides = []
-            var f = max(0.02, 1 + accum / renderer.gizmoLength)
-            if !free, lib.selection.count == 1, let b = lib.primary, let m = lib.meshes[b.id], let st = starts[b.id] {
-                let s0 = m.size[i] * st.scale[i]
-                if s0 > 0 { f = resize(s0 * f, axis: i, body: b, start: st) / s0 }
+            let uniform = lib.settings.uniform || e.modifierFlags.contains(.shift)
+            let symmetric = lib.settings.symmetric || e.modifierFlags.contains(.option)
+            // The dragged side follows the pointer; symmetric, the other side comes along the other way.
+            var s0 = startBox.map { $0.hi[i] - $0.lo[i] } ?? renderer.gizmoLength
+            if lib.selection.count == 1, let b = lib.primary, let m = lib.meshes[b.id], let st = starts[b.id] { s0 = m.size[i] * st.scale[i] }
+            guard s0 > 0 else { return }
+            var f = max(0.02, 1 + accum * (symmetric ? 2 : 1) / s0)
+            if !free, lib.selection.count == 1, let b = lib.primary, let st = starts[b.id] {
+                f = resize(s0 * f, axis: i, start: st, symmetric: symmetric) / s0
             }
-            let uniform = lib.settings.uniform || e.modifierFlags.contains(.shift) || lib.selection.count > 1
-            for (id, s) in starts {
-                lib.mutate(id) { b in
-                    if uniform { b.place.scale = s.scale * f } else { b.place.scale[i] = s.scale[i] * f }
-                }
-            }
-            lib.sceneVersion += 1
+            lib.stretch(starts, axis: i, by: f, uniform: uniform, symmetric: symmetric)
         case .round:
             let wpp = worldPerPoint(at: startPlane)
             startRadius += Double(dy) * wpp * 0.6
@@ -1057,7 +1062,7 @@ final class CadView: MTKView {
     override func mouseUp(with e: NSEvent) {
         switch drag {
         case .orbit, .pan:
-            if !moved && lib.mode == .select && !e.modifierFlags.contains(.shift) { lib.selection = [] }
+            if !moved && (lib.mode == .select || lib.mode == .thread) && !e.modifierFlags.contains(.shift) { lib.selection = [] }
         case .round:
             if moved { lib.commitRound() } else { lib.clearPreview() }
         case .scaleAxis:
@@ -1144,47 +1149,86 @@ final class CadView: MTKView {
         func moved(_ d: SIMD3<Double>) -> Box { Box(lo: lo + d, hi: hi + d) }
     }
 
+    // A place along one axis a moving side or middle can line up with: what it belongs to, and a hole's or peg's rim to show.
+    struct Mark {
+        var value: Double
+        var box: Box?
+        var ring: [SIMD3<Double>] = []
+    }
+
+    // Where the other shapes can be lined up with, gathered as a drag starts: their sides and middles, the middles and rims of
+    // their holes, pegs and round edges, their flat faces square to an axis (steps, the walls of a square hole) and those
+    // faces' middles; then the bed's edges, middle, floor and top.
     private func captureBoxes() {
         var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
         for b in lib.selected { if let (l, h) = lib.worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) } }
         startBox = lo.x.isFinite ? Box(lo: lo, hi: hi) : nil
-        others = lib.doc.bodies.filter { !$0.hidden && !lib.selection.contains($0.id) }.compactMap { b in lib.worldBounds(b).map { Box(lo: $0.0, hi: $0.1) } }
+        var found: [[Mark]] = [[], [], []]
+        others = []
+        for b in lib.doc.bodies where !b.hidden && !lib.selection.contains(b.id) {
+            guard let (l, h) = lib.worldBounds(b), let m = lib.meshes[b.id] else { continue }
+            let box = Box(lo: l, hi: h)
+            others.append(box)
+            for a in 0..<3 { found[a] += [Mark(value: l[a], box: box), Mark(value: h[a], box: box), Mark(value: box.mid[a], box: box)] }
+            for r in Self.rings(m, b.place) {
+                let rim = renderer.circle(around: r.axis, r.center, r.radius)
+                for a in 0..<3 {
+                    found[a].append(Mark(value: r.center[a], box: box, ring: rim))
+                    let reach = r.radius * sqrt(max(0, 1 - r.axis[a] * r.axis[a]))
+                    if reach > 0.01 { found[a] += [Mark(value: r.center[a] - reach, box: box, ring: rim), Mark(value: r.center[a] + reach, box: box, ring: rim)] }
+                }
+            }
+            let mat = b.place.matrix
+            for f in m.faceInfo {
+                let n = unit(b.place.rotation * (f.normal / b.place.scale)), c = (mat * SIMD4(f.centroid, 1)).xyz
+                guard (0..<3).contains(where: { abs(n[$0]) > 0.999 }) else { continue }
+                for k in 0..<3 { found[k].append(Mark(value: c[k], box: box)) }
+            }
+        }
+        let bed = lib.settings.bed
+        for a in 0..<2 { found[a] += [-bed[a] / 2, 0, bed[a] / 2].map { Mark(value: $0, box: nil) } }
+        found[2] += [0, bed.z].map { Mark(value: $0, box: nil) }
+        marks = found
+        ownRings = lib.selected.flatMap { b in lib.meshes[b.id].map { Self.rings($0, b.place).map(\.center) } ?? [] }
+    }
+
+    // A shape's circles in the world, each once (a hole's rim often comes in two halves).
+    static func rings(_ m: Mesh, _ place: Placement) -> [Ring] {
+        let mat = place.matrix, grow = (place.scale.x + place.scale.y + place.scale.z) / 3
+        var out: [Ring] = []
+        for r in m.circles {
+            let w = Ring(center: (mat * SIMD4(r.center, 1)).xyz, axis: unit(place.rotation * (r.axis / place.scale)), radius: r.radius * grow)
+            if !out.contains(where: { simd_distance($0.center, w.center) < 1e-4 && abs($0.radius - w.radius) < 1e-4 }) { out.append(w) }
+        }
+        return out
     }
 
     private var linkReach: Double { 10 * worldPerPoint(at: startBox?.mid ?? startPlane) }
 
-    // Planes a face or centre can link to on one axis: other shapes' faces and centres, the bed's edges, centre and floor.
-    private func planes(_ a: Int) -> [(value: Double, box: Box?)] {
-        var out: [(Double, Box?)] = []
-        for o in others { out += [(o.lo[a], o), (o.hi[a], o), (o.mid[a], o)] }
-        let bed = lib.settings.bed
-        out += a < 2 ? [(-bed[a] / 2, nil), (0, nil), (bed[a] / 2, nil)] : [(0, nil), (bed.z, nil)]
-        return out
-    }
-
-    // A move along one world axis: links a face or the centre of the selection to the nearest plane in reach
-    // (shapes first, then 10 mm grid lines), otherwise steps by the snap step.
+    // A move along one world axis: lines a side, the middle or one of its own holes' middles up with the nearest mark in reach
+    // (marks first, then 10 mm grid lines), otherwise steps by the snap step.
     private func place(_ value: Double, axis a: Int, shift: SIMD3<Double>) -> Double {
         let step = (value / lib.settings.snap).rounded() * lib.settings.snap
         guard lib.settings.autoLink, let box = startBox?.moved(shift) else { return step }
         let reach = linkReach
-        let features = [box.lo[a], box.hi[a], box.mid[a]]
-        var best: (score: Double, move: Double, at: Double, target: Box?)?
+        let features = [box.lo[a], box.hi[a], box.mid[a]] + ownRings.map { $0[a] + shift[a] }
+        var best: (score: Double, move: Double, mark: Mark)?
         for f in features {
-            for p in planes(a) {
-                let d = p.value - f
-                if abs(d) < reach, best == nil || abs(d) < best!.score { best = (abs(d), d, p.value, p.box) }
+            for m in marks[a] {
+                let d = m.value - f
+                if abs(d) < reach, best == nil || abs(d) < best!.score { best = (abs(d), d, m) }
             }
             let g = (f / 10).rounded() * 10
-            if abs(g - f) < reach * 0.5, best == nil || abs(g - f) * 2 < best!.score { best = (abs(g - f) * 2, g - f, g, nil) }
+            if abs(g - f) < reach * 0.5, best == nil || abs(g - f) * 2 < best!.score { best = (abs(g - f) * 2, g - f, Mark(value: g)) }
         }
         guard let best else { return step }
-        guide(on: a, at: best.at, box.moved(SIMD3(repeating: 0)), best.target)
+        guide(on: a, at: best.mark.value, box, best.mark)
         return value + best.move
     }
 
-    // A resize along one axis: links the size to another shape's width, depth or height, or a face to a nearby surface.
-    private func resize(_ size: Double, axis i: Int, body b: Solid, start: Placement) -> Double {
+    // A resize along one axis: links the size to another shape's width, depth or height, or the moving side to a mark in reach
+    // (with symmetric resizing, the size the middle reaching out both ways would make).
+    private func resize(_ size: Double, axis i: Int, start: Placement, symmetric: Bool) -> Double {
         let step = max(lib.settings.snap, (size / lib.settings.snap).rounded() * lib.settings.snap)
         guard lib.settings.autoLink, let box = startBox else { return step }
         let reach = linkReach
@@ -1196,9 +1240,9 @@ final class CadView: MTKView {
             }
         }
         if start.turn == SIMD3(0, 0, 0) {
-            for p in planes(i) {
-                let s = 2 * abs(p.value - box.mid[i])
-                if abs(s - size) < reach, best == nil || abs(s - size) < best!.score { best = (abs(s - size), s, p.box) }
+            for m in marks[i] {
+                let s = symmetric ? 2 * abs(m.value - box.mid[i]) : m.value - box.lo[i]
+                if s > 0, abs(s - size) < reach, best == nil || abs(s - size) < best!.score { best = (abs(s - size), s, m.box) }
             }
         }
         guard let best else { return step }
@@ -1211,17 +1255,18 @@ final class CadView: MTKView {
         return best.size
     }
 
-    // A guide line across the linked plane, spanning the moving box and its target.
-    private func guide(on a: Int, at v: Double, _ box: Box, _ target: Box?) {
+    // A guide line across the linked plane, spanning the moving box and what it lines up with, and the rim it lines up with.
+    private func guide(on a: Int, at v: Double, _ box: Box, _ mark: Mark) {
         let span = a == 0 ? 1 : 0
         var lo = box.lo, hi = box.hi
-        if let t = target { lo = simd_min(lo, t.lo); hi = simd_max(hi, t.hi) } else { lo -= 20; hi += 20 }
+        if let t = mark.box { lo = simd_min(lo, t.lo); hi = simd_max(hi, t.hi) } else { lo -= 20; hi += 20 }
         var p = SIMD3<Double>(box.mid.x, box.mid.y, a == 2 ? v : box.lo.z)
         p[a] = v
         var q = p
         p[span] = lo[span]
         q[span] = hi[span]
         guides.append((p, q))
+        for k in mark.ring.indices.dropFirst() { guides.append((mark.ring[k - 1], mark.ring[k])) }
     }
 
     // Mouse movement along a world direction, in mm.

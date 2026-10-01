@@ -24,11 +24,12 @@ enum Entry {
 // MARK: - Model
 
 enum PrimKind: Int, Codable, CaseIterable, Sendable {
-    case box, cylinder, cone, sphere, prism, torus, wedge, pyramid, hemisphere, bowl, ring, glass, oval
+    case box, cylinder, cone, sphere, prism, torus, wedge, pyramid, hemisphere, bowl, ring, glass, oval, ovalTorus
 }
 
 struct Primitive: Codable, Equatable, Sendable {
     var kind: PrimKind
+    // Corners of a prism or pyramid; a torus's tube: 0 round, 3 a triangle with its point up, 6 a hexagon lying flat.
     var sides = 0
     var size: [Double]
 
@@ -39,42 +40,126 @@ struct Primitive: Codable, Equatable, Sendable {
         case .cone: Primitive(kind: kind, size: [20, 0, 20])
         case .sphere, .hemisphere: Primitive(kind: kind, size: [20])
         case .prism, .pyramid: Primitive(kind: kind, sides: sides, size: [20, 20])
-        case .torus: Primitive(kind: kind, size: [30, 8])
+        case .torus: Primitive(kind: kind, sides: sides, size: [30, 8])
         case .bowl: Primitive(kind: kind, size: [40, 2])
         case .ring: Primitive(kind: kind, size: [30, 20, 5])
         case .glass: Primitive(kind: kind, size: [30, 40, 2, 3])
         case .oval: Primitive(kind: kind, size: [20, 14, 90, 20])
+        case .ovalTorus: Primitive(kind: kind, sides: sides, size: [30, 20, 90, 6])
         }
     }
 
-    var params: [Double] { kind == .prism || kind == .pyramid ? [Double(sides)] + size : size }
+    var sided: Bool { [.prism, .pyramid, .torus, .ovalTorus].contains(kind) }
+    var params: [Double] { sided ? [Double(sides)] + size : size }
 
     var fields: [String] {
+        let tube = sides == 0 ? "Tube diameter" : "Tube width"
         switch kind {
-        case .box, .wedge: ["Width", "Depth", "Height"]
-        case .cylinder, .prism, .pyramid: ["Diameter", "Height"]
-        case .cone: ["Bottom diameter", "Top diameter", "Height"]
-        case .sphere, .hemisphere: ["Diameter"]
-        case .torus: ["Outer diameter", "Tube diameter"]
-        case .bowl: ["Diameter", "Wall thickness"]
-        case .ring: ["Outer diameter", "Inner diameter", "Height"]
-        case .glass: ["Diameter", "Height", "Wall thickness", "Bottom thickness"]
-        case .oval: ["Diameter A", "Diameter B", "Angle between diameters", "Height"]
+        case .box, .wedge: return ["Width", "Depth", "Height"]
+        case .cylinder, .prism, .pyramid: return ["Diameter", "Height"]
+        case .cone: return ["Bottom diameter", "Top diameter", "Height"]
+        case .sphere, .hemisphere: return ["Diameter"]
+        case .torus: return ["Outer diameter", tube]
+        case .bowl: return ["Diameter", "Wall thickness"]
+        case .ring: return ["Outer diameter", "Inner diameter", "Height"]
+        case .glass: return ["Diameter", "Height", "Wall thickness", "Bottom thickness"]
+        case .oval: return ["Diameter A", "Diameter B", "Angle between diameters", "Height"]
+        case .ovalTorus: return ["Diameter A", "Diameter B", "Angle between diameters", tube]
+        }
+    }
+
+    // The axis (x 0, y 1, z 2) each size runs along, when it runs along just one.
+    var axes: [Int?] {
+        switch kind {
+        case .box, .wedge: [0, 1, 2]
+        case .cylinder, .prism, .pyramid: [nil, 2]
+        case .cone, .ring: [nil, nil, 2]
+        case .sphere, .hemisphere: [nil]
+        case .torus, .bowl: [nil, nil]
+        case .glass: [nil, 2, nil, nil]
+        case .oval: [0, 1, nil, 2]
+        case .ovalTorus: [0, 1, nil, nil]
         }
     }
 
     // Sizes given in degrees rather than millimetres (they never follow a resize).
-    var degrees: Set<Int> { kind == .oval ? [2] : [] }
+    var degrees: Set<Int> { kind == .oval || kind == .ovalTorus ? [2] : [] }
+
+    // How much of a polygon tube's width its height is.
+    private var tall: Double { sides == 0 ? 1 : sqrt(3) / 2 }
+
+    // The shape's bounding size; the kernel centres every primitive on its own origin.
+    var extent: SIMD3<Double> {
+        switch kind {
+        case .box, .wedge: return SIMD3(size[0], size[1], size[2])
+        case .cylinder, .glass: return SIMD3(size[0], size[0], size[1])
+        case .cone: return SIMD3(max(size[0], size[1]), max(size[0], size[1]), size[2])
+        case .sphere: return SIMD3(repeating: size[0])
+        case .hemisphere, .bowl: return SIMD3(size[0], size[0], size[0] / 2)
+        case .prism, .pyramid:
+            // Corners on a circle, one side facing -y (as the kernel lays them out).
+            let n = max(3, sides), r = size[0] / 2
+            let angles = (0..<n).map { -Double.pi / 2 + .pi / Double(n) + 2 * .pi * Double($0) / Double(n) }
+            let xs = angles.map { cos($0) }, ys = angles.map { sin($0) }
+            return SIMD3((xs.max()! - xs.min()!) * r, (ys.max()! - ys.min()!) * r, size[1])
+        case .torus: return SIMD3(size[0], size[0], size[1] * tall)
+        case .ring: return SIMD3(size[0], size[0], size[2])
+        case .oval:
+            let half = Primitive.span(max(size[0], 0.01) / 2, max(size[1], 0.01) / 2, size[2])
+            return SIMD3(half.x * 2, half.y * 2, size[3])
+        case .ovalTorus:
+            // The outline is the oval through the tube's middle, pushed out by half the tube.
+            let w = size[3] / 2, half = Primitive.span(size[0] / 2 - w, size[1] / 2 - w, size[2])
+            return SIMD3((half.x + w) * 2, (half.y + w) * 2, size[3] * tall)
+        }
+    }
+
+    // How far the oval with semi-diameters a (along x) and b (at `degrees` from it) reaches along x and y.
+    static func span(_ a: Double, _ b: Double, _ degrees: Double) -> SIMD2<Double> {
+        let t = min(175, max(5, degrees)) * .pi / 180
+        return SIMD2(sqrt(a * a + b * b * cos(t) * cos(t)), b * sin(t))
+    }
+
+    // An oval torus's tube must stay thinner than its tightest bend (radius minor²/major) by `margin`, or the kernel refuses it.
+    func bends(_ margin: Double = 1.05) -> Bool {
+        guard kind == .ovalTorus else { return true }
+        let w = size[3] / 2, a = size[0] / 2 - w, b = size[1] / 2 - w, t = min(175, max(5, size[2])) * .pi / 180
+        guard a > 0, b > 0 else { return false }
+        let sxx = a * a + b * b * cos(t) * cos(t), sxy = b * b * cos(t) * sin(t), syy = b * b * sin(t) * sin(t)
+        let mean = (sxx + syy) / 2, spread = hypot((sxx - syy) / 2, sxy)
+        let major = sqrt(mean + spread), minor = sqrt(max(mean - spread, 0))
+        return w * margin < minor * minor / major
+    }
+
+    // The sizes around the current one that still bend (they form one stretch: the bend is tightest at the extremes). A
+    // tube that doesn't fit counts from the thinnest one, which always fits better.
+    private func bending(_ i: Int, _ low: Double, _ high: Double) -> ClosedRange<Double> {
+        func ok(_ v: Double) -> Bool { var p = self; p.size[i] = v; return p.bends(1.06) }
+        let v = min(high, max(low, size[i]))
+        guard let good = ok(v) ? v : (i == 3 && ok(low) ? low : nil) else { return low...max(low, high) }
+        func edge(_ bad: Double) -> Double {
+            guard !ok(bad) else { return bad }
+            var (g, b) = (good, bad)
+            for _ in 0..<48 { let m = (g + b) / 2; if ok(m) { g = m } else { b = m } }
+            return g
+        }
+        let lo = (edge(low) * 100).rounded(.up) / 100, hi = (edge(high) * 100).rounded(.down) / 100
+        return min(lo, good)...max(hi, good)
+    }
 
     // What size i may be, given the others: walls fit inside, a tube inside its torus, one cone end stays wider than zero,
     // nothing larger than `limit` (the print bed).
     func range(_ i: Int, limit: Double) -> ClosedRange<Double> {
         if degrees.contains(i) { return 5...175 }
         var low = mayBeZero.contains(i) ? 0 : 0.1, high = limit
+        // A polygon tube keeps a hole in the middle; a round one may close it.
+        let hole = sides == 0 ? 1.06 : 2.1
         switch (kind, i) {
         case (.cone, 0), (.cone, 1): if size[1 - i] == 0 { low = 0.1 }
-        case (.torus, 0): low = max(low, size[1] * 1.06)
-        case (.torus, 1): high = min(high, size[0] / 1.06)
+        case (.torus, 0): low = max(low, size[1] * hole)
+        case (.torus, 1): high = min(high, size[0] / hole)
+        case (.ovalTorus, 0), (.ovalTorus, 1): return bending(i, max(low, size[3] * 2.1), high)
+        case (.ovalTorus, 3): return bending(i, low, min(high, min(size[0], size[1]) / 2.1))
         case (.ring, 0): low = max(low, size[1] + 0.1)
         case (.ring, 1): high = min(high, size[0] - 0.1)
         case (.bowl, 0): low = max(low, size[1] * 2 / 0.95)
@@ -104,7 +189,8 @@ struct Primitive: Codable, Equatable, Sendable {
         case .cylinder: return "Cylinder"
         case .cone: return "Cone"
         case .sphere: return "Sphere"
-        case .torus: return "Torus"
+        case .torus: return ["3": "Triangular torus", "6": "Hexagonal torus"][String(sides)] ?? "Torus"
+        case .ovalTorus: return ["3": "Oval triangular torus", "6": "Oval hexagonal torus"][String(sides)] ?? "Oval torus"
         case .wedge: return "Wedge"
         case .prism: return n + " prism"
         case .pyramid: return n + " pyramid"
@@ -116,7 +202,8 @@ struct Primitive: Codable, Equatable, Sendable {
         }
     }
 
-    // Applies a scale to the sizes, keeping round shapes round (the axis changed most wins) and walls as they are.
+    // Applies a scale to the sizes, keeping round shapes round (the axis changed most wins) and walls as they are; a torus's
+    // tube is its height, and stays thin enough for its ring.
     mutating func scale(by s: SIMD3<Double>) {
         func most(_ v: [Double]) -> Double { v.max { abs($0 - 1) < abs($1 - 1) } ?? 1 }
         let k = most([s.x, s.y])
@@ -126,13 +213,15 @@ struct Primitive: Codable, Equatable, Sendable {
         case .cylinder, .prism, .pyramid: next = [size[0] * k, size[1] * s.z]
         case .cone: next = [size[0] * k, size[1] * k, size[2] * s.z]
         case .sphere, .hemisphere: next = [size[0] * most([s.x, s.y, s.z])]
-        case .torus: next = [size[0] * k, size[1] * k]
+        case .torus: next = [size[0] * k, min(size[1] * s.z, size[0] * k / (sides == 0 ? 1.06 : 2.1))]
         case .bowl: next = [size[0] * most([s.x, s.y, s.z]), size[1]]
         case .ring: next = [size[0] * k, size[1] * k, size[2] * s.z]
         case .glass: next = [size[0] * k, size[1] * s.z, size[2], size[3]]
         case .oval: next = [size[0] * s.x, size[1] * s.y, size[2], size[3] * s.z]
+        case .ovalTorus: next = [size[0] * s.x, size[1] * s.y, size[2], size[3] * s.z]
         }
         size = next.enumerated().map { i, v in degrees.contains(i) ? v : max(mayBeZero.contains(i) ? 0 : 0.1, (v * 100).rounded() / 100) }
+        if !bends(1.06) { size[3] = range(3, limit: .infinity).upperBound }
     }
 }
 
@@ -146,6 +235,13 @@ struct Fastener: Codable, Equatable, Sendable {
         let m = String(cString: bk_thread_name(Int32(size)))
         if nut { return threadOnly ? L("{m} threaded sleeve", ["m": m]) : L("{m} nut", ["m": m]) }
         return threadOnly ? L("{m} threaded rod", ["m": m]) : L("{m} bolt", ["m": m])
+    }
+
+    // Its bounding size; the kernel centres it on its own origin like a primitive.
+    func extent(clearance: Double) -> SIMD3<Double> {
+        var out = [Double](repeating: 0, count: 3)
+        bk_fastener_extent(Int32(size), length, nut ? 1 : 0, threadOnly ? 1 : 0, clearance, &out)
+        return SIMD3(out[0], out[1], out[2])
     }
 }
 
@@ -215,13 +311,27 @@ struct Pick: Codable, Equatable, Sendable {
     var kind: Int32
     var a: SIMD3<Double>
     var b: SIMD3<Double>
+
+    // The same pick on its shape stretched by k along the shape's own axes: points stretch with it, normals the other way.
+    func stretched(_ k: SIMD3<Double>) -> Pick {
+        switch kind {
+        case Int32(BK_PICK_EDGE): Pick(kind: kind, a: a * k, b: unit(b * k))
+        case Int32(BK_PICK_CORNER), Int32(BK_PICK_FACE): Pick(kind: kind, a: unit(a / k), b: b * k)
+        default: self
+        }
+    }
+}
+
+func unit(_ v: SIMD3<Double>) -> SIMD3<Double> {
+    let l = simd_length(v)
+    return l > 1e-12 ? v / l : v
 }
 
 struct Part: Codable, Equatable, Sendable {
     var node: Node
     var place: Placement
     var name: String?
-    var color: Int?
+    var color: SIMD3<UInt8>?
 }
 
 // A face of a hollowed shape with its own wall thickness.
@@ -267,12 +377,34 @@ indirect enum Node: Codable, Equatable, Sendable {
     }
 
     var base: Node { inner?.base ?? self }
+
+    // The roundings, bevels, splits and hollows moved along with a base shape stretched by k (the base itself stays).
+    func following(_ k: SIMD3<Double>) -> Node {
+        switch self {
+        case .split(let n, let p, let s): .split(of: n.following(k), plane: Plane(point: p.point * k, normal: unit(p.normal / k)), side: s)
+        case .round(let n, let p, let r): .round(of: n.following(k), picks: p.map { $0.stretched(k) }, radius: r)
+        case .hollow(let n, let o, let w, let t):
+            .hollow(of: n.following(k), open: o.map { $0.stretched(k) }, walls: w.map { Wall(face: $0.face.stretched(k), thickness: $0.thickness) }, thickness: t)
+        case .bevel(let n, let p, let l, let c): .bevel(of: n.following(k), picks: p.map { $0.stretched(k) }, legs: l, corner: c)
+        case .cove(let n, let p, let r): .cove(of: n.following(k), picks: p.map { $0.stretched(k) }, radius: r)
+        default: self
+        }
+    }
+
+    // The bounding size of a primitive or a fastener, which sit centred on their own origin; none for a merged shape.
+    func extent(clearance: Double) -> SIMD3<Double>? {
+        switch self {
+        case .primitive(let p): p.extent
+        case .fastener(let f): f.extent(clearance: clearance)
+        default: nil
+        }
+    }
 }
 
 struct Solid: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
-    var color: Int
+    var color: SIMD3<UInt8>
     var hidden = false
     var node: Node
     var place = Placement()
@@ -282,12 +414,15 @@ struct Document: Codable, Equatable, Sendable {
     var bodies: [Solid] = []
 }
 
+// Colours are red, green and blue from 0 to 255.
 enum Palette {
-    static let colors: [SIMD3<Float>] = [
-        SIMD3(0.20, 0.78, 0.95), SIMD3(0.96, 0.35, 0.55), SIMD3(1.00, 0.72, 0.20), SIMD3(0.45, 0.90, 0.55),
-        SIMD3(0.70, 0.55, 1.00), SIMD3(0.92, 0.92, 0.95), SIMD3(1.00, 0.50, 0.30), SIMD3(0.55, 0.60, 0.70)
+    static let colors: [SIMD3<UInt8>] = [
+        SIMD3(51, 199, 242), SIMD3(245, 89, 140), SIMD3(255, 184, 51), SIMD3(115, 230, 140),
+        SIMD3(179, 140, 255), SIMD3(235, 235, 242), SIMD3(255, 128, 77), SIMD3(140, 153, 179)
     ]
-    static func color(_ i: Int) -> Color { let c = colors[(i % colors.count + colors.count) % colors.count]; return Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z)) }
+    static func color(_ c: SIMD3<UInt8>) -> Color { Color(red: Double(c.x) / 255, green: Double(c.y) / 255, blue: Double(c.z) / 255) }
+    // The palette colour after c (the first one after a mixed colour).
+    static func after(_ c: SIMD3<UInt8>) -> SIMD3<UInt8> { colors[((colors.firstIndex(of: c) ?? -1) + 1) % colors.count] }
 }
 
 // MARK: - Kernel bridge
@@ -300,12 +435,22 @@ final class ShapeRef: @unchecked Sendable {
     func with<T>(_ body: (OpaquePointer) -> T) -> T { withExtendedLifetime(self) { body(ptr) } }
 }
 
+// A circle on a shape: a hole's or a peg's rim, the round edge of a cylinder or a ring.
+struct Ring {
+    var center: SIMD3<Double>
+    var axis: SIMD3<Double>
+    var radius: Double
+}
+
 struct Mesh {
     var vertices: [SIMD4<Float>] = []   // xyz + face id
     var normals: [SIMD4<Float>] = []
     var indices: [UInt32] = []
     var faceInfo: [(normal: SIMD3<Double>, centroid: SIMD3<Double>)] = []
     var edges: [[SIMD3<Float>]] = []
+    // The faces either side of each edge (-1 when there is none).
+    var edgeFaces: [SIMD2<Int32>] = []
+    var circles: [Ring] = []
     var corners: [SIMD3<Float>] = []
     var low = SIMD3<Double>(0, 0, 0)
     var high = SIMD3<Double>(0, 0, 0)
@@ -337,6 +482,11 @@ struct Mesh {
         for e in 0..<Int(b.edgeCount) {
             let s = Int(b.edgeStart[e]), t = Int(b.edgeStart[e + 1])
             edges.append((s..<t).map { SIMD3(b.edgePoints[$0 * 3], b.edgePoints[$0 * 3 + 1], b.edgePoints[$0 * 3 + 2]) })
+            edgeFaces.append(SIMD2(b.edgeFaces[e * 2], b.edgeFaces[e * 2 + 1]))
+        }
+        circles = (0..<Int(b.circleCount)).map { i in
+            let c = b.circles + i * 7
+            return Ring(center: SIMD3(c[0], c[1], c[2]), axis: SIMD3(c[3], c[4], c[5]), radius: c[6])
         }
         corners = (0..<Int(b.cornerCount)).map { SIMD3(b.corners[$0 * 3], b.corners[$0 * 3 + 1], b.corners[$0 * 3 + 2]) }
         low = SIMD3(b.bbox.0, b.bbox.1, b.bbox.2)
@@ -457,6 +607,8 @@ final class Kernel: @unchecked Sendable {
     private func build(_ node: Node) -> OpaquePointer? {
         switch node {
         case .primitive(let p):
+            // An oval torus whose tube is too thick for its tightest bend is said so plainly, not as a failure.
+            guard p.bends() else { problems.append("bend"); return nil }
             return made(p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) })
         case .fastener(let f):
             return made(f.nut ? bk_nut(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance) : bk_bolt(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance))
@@ -611,6 +763,8 @@ struct Settings: Codable, Equatable {
     var clearance = 0.2
     var autoLink = true
     var uniform = false
+    // Resizing moves both sides of a size (the middle stays) instead of one (the left, front or bottom stays).
+    var symmetric = false
     // Shortcuts switched off: they don't fire and their keys are free for others.
     var off: Set<String> = []
 
@@ -628,7 +782,8 @@ struct Settings: Codable, Equatable {
         clearance = min(2, max(0, (try? c.decode(Double.self, forKey: .clearance)) ?? 0.2))
         autoLink = (try? c.decode(Bool.self, forKey: .autoLink)) ?? true
         uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
-        off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
+        symmetric = (try? c.decode(Bool.self, forKey: .symmetric)) ?? false
+        off =Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
     }
 
     // The print bed's longest side: no size or thread is made longer.
@@ -656,15 +811,11 @@ enum Paths {
     static let state = dir.appendingPathComponent("state.json")
 }
 
-enum Popup: Equatable {
-    case thread
-}
-
-enum Mode: Equatable { case select, round, split, hollow, angles }
+enum Mode: Equatable { case select, round, split, hollow, angles, thread }
 
 // The inspector's screens: its segments and the gizmo they bring.
 enum Screen: Int, CaseIterable {
-    case move, resize, rotate, angles
+    case move, resize, rotate, angles, thread
 
     var title: String {
         switch self {
@@ -672,15 +823,18 @@ enum Screen: Int, CaseIterable {
         case .resize: "Resize"
         case .rotate: "Rotate"
         case .angles: "Angles"
+        case .thread: "Thread"
         }
     }
 
-    var icon: String {
+    // The thread's own picture is drawn (there's no symbol for a thread).
+    var icon: String? {
         switch self {
         case .move: "arrow.up.and.down.and.arrow.left.and.right"
         case .resize: "arrow.up.left.and.arrow.down.right"
         case .rotate: "arrow.triangle.2.circlepath"
         case .angles: "angle"
+        case .thread: nil
         }
     }
 }
@@ -801,7 +955,7 @@ struct AngleEdit: Equatable {
 
 // Shapes of the bottom bar, grouped by kind; each group's first member is the program's own default.
 enum ShapeKind: String, CaseIterable {
-    case cube, wedge, cylinder, hexagon, glass, cone, pyramid, sphere, halfSphere, bowl, torus, ring
+    case cube, wedge, cylinder, hexagon, glass, cone, pyramid, sphere, halfSphere, bowl, torus, triangleTorus, hexagonTorus, ring
 
     var primitive: Primitive {
         switch self {
@@ -816,24 +970,9 @@ enum ShapeKind: String, CaseIterable {
         case .halfSphere: .make(.hemisphere)
         case .bowl: .make(.bowl)
         case .torus: .make(.torus)
+        case .triangleTorus: .make(.torus, sides: 3)
+        case .hexagonTorus: .make(.torus, sides: 6)
         case .ring: .make(.ring)
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .cube: "cube"
-        case .wedge: "righttriangle"
-        case .cylinder: "cylinder"
-        case .hexagon: "hexagon"
-        case .glass: "wineglass"
-        case .cone: "cone"
-        case .pyramid: "pyramid"
-        case .sphere: "circle.fill"
-        case .halfSphere: "circle.tophalf.filled"
-        case .bowl: "circle.bottomhalf.filled"
-        case .torus: "circle.circle"
-        case .ring: "smallcircle.circle"
         }
     }
 }
@@ -847,7 +986,7 @@ enum ShapeGroup: String, CaseIterable {
         case .cylinders: [.cylinder, .hexagon, .glass]
         case .cones: [.cone, .pyramid]
         case .spheres: [.sphere, .halfSphere, .bowl]
-        case .rings: [.torus, .ring]
+        case .rings: [.torus, .triangleTorus, .hexagonTorus, .ring]
         }
     }
 }
@@ -896,7 +1035,6 @@ final class Workbench: DesignHost {
     var splitTilt = SIMD2<Double>(0, 0)
     var showSettings = false
     var drawerOpen = true
-    var popup: Popup?
     var busy: String?
     var capturing: Action?
     var captureFail: Action?
@@ -1012,11 +1150,7 @@ final class Workbench: DesignHost {
         updateSettings { $0 = Settings() }
     }
 
-    // MARK: popups & capture
-
-    func show(_ p: Popup?) {
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { popup = p }
-    }
+    // MARK: capture
 
     func beginCapture(_ a: Action) { withAnimation(Neon.spring) { capturing = a; captureFail = nil } }
 
@@ -1125,7 +1259,13 @@ final class Workbench: DesignHost {
         change(&doc.bodies[i])
     }
 
-    private func nextColor() -> Int { doc.bodies.count % Palette.colors.count }
+    // A colour shown at once without an undo step of its own (the colour mixer keeps one for all it changes).
+    func paint(_ id: UUID, _ c: SIMD3<UInt8>) {
+        guard body(id)?.color != c else { return }
+        mutate(id) { $0.color = c }
+    }
+
+    private func nextColor() -> SIMD3<UInt8> { Palette.colors[doc.bodies.count % Palette.colors.count] }
 
     private func spawnPoint() -> SIMD3<Double> {
         let t = camera.target
@@ -1163,6 +1303,12 @@ final class Workbench: DesignHost {
 
     func addFastener(_ f: Fastener) {
         add(.fastener(f), name: f.name)
+    }
+
+    // ⌘B: the bolt or nut set up last, added at once, with the Thread tab open to change it.
+    func addThread() {
+        addFastener(thread)
+        choose(.thread)
     }
 
     @ObservationIgnored private var dropQueue: Set<UUID> = []
@@ -1248,7 +1394,7 @@ final class Workbench: DesignHost {
     func ungroup() {
         guard let b = primary, case .group(_, let parts) = b.node else { flash(L("Select a merged shape")); return }
         let bodies = parts.enumerated().map { i, p in
-            Solid(name: p.name ?? L("Part {n}", ["n": i + 1]), color: p.color ?? (b.color + i) % Palette.colors.count, node: p.node,
+            Solid(name: p.name ?? L("Part {n}", ["n": i + 1]), color: p.color ?? b.color, node: p.node,
                   place: Placement.from(b.place.matrix * p.place.matrix))
         }
         commit { d in
@@ -1296,7 +1442,7 @@ final class Workbench: DesignHost {
                 two.node = .split(of: b.node, plane: local, side: 1)
                 one.name = b.name + " ▲"
                 two.name = b.name + " ▼"
-                two.color = (b.color + 1) % Palette.colors.count
+                two.color = Palette.after(b.color)
                 d.bodies.replaceSubrange(i...i, with: [one, two])
                 made += [one.id, two.id]
             }
@@ -1349,31 +1495,97 @@ final class Workbench: DesignHost {
         rebuildScene()
     }
 
-    // After a drag: rotated or scaled parts settle back onto the bed.
+    // After a drag: rotated parts settle back onto the bed.
     func finishTransform() {
-        if settings.dropToBed && gizmo != .move { dropSoon(selection) }
+        if settings.dropToBed && gizmo == .rotate { dropSoon(selection) }
         applyDrops()
         sceneVersion += 1
     }
 
-    // Scaling a plain primitive or a fastener changes its sizes instead of stretching it (threads never distort).
+    // A resize drag: the shapes in `starts` stretched by f along axis i (all axes when uniform), a lone shape along its own
+    // axis, several along the world's, spreading from their shared box as one. The left, front and bottom sides stay put,
+    // or the middle when symmetric.
+    func stretch(_ starts: [UUID: Placement], axis i: Int, by f: Double, uniform: Bool, symmetric: Bool) {
+        let axes = uniform ? [0, 1, 2] : [i]
+        if starts.count == 1, let (id, s) = starts.first {
+            var keep = SIMD3<Double>(0, 0, 0)
+            if let m = meshes[id] {
+                keep = (m.low + m.high) / 2
+                if !symmetric { for k in axes { keep[k] = m.low[k] } }
+            }
+            var scale = s.scale
+            for k in axes { scale[k] *= f }
+            mutate(id) { $0.place.scale = scale; $0.place.move = s.move + s.rotation * ((s.scale - scale) * keep) }
+        } else {
+            var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+            for (id, s) in starts {
+                guard var b = body(id) else { continue }
+                b.place = s
+                if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
+            }
+            guard lo.x.isFinite else { return }
+            let pivot = symmetric ? (lo + hi) / 2 : lo
+            var d = SIMD3<Double>(1, 1, 1)
+            for k in axes { d[k] = f }
+            for (id, s) in starts {
+                var scale = s.scale
+                if uniform {
+                    scale *= f
+                } else {
+                    // The shape's own axis lying closest to the world's axis i.
+                    let r = s.rotation
+                    scale[(0..<3).max { abs(r[$0][i]) < abs(r[$1][i]) } ?? i] *= f
+                }
+                mutate(id) { $0.place.scale = scale; $0.place.move = pivot + d * (s.move - pivot) }
+            }
+        }
+        sceneVersion += 1
+    }
+
+    // After a resize: a primitive or a fastener (rounded, split or hollowed too) takes the stretch into its sizes, so roundings
+    // keep their radius and threads never distort. Nothing drops to the bed: shapes stay where the resize left them.
     func finishScale() {
         for id in selection {
             guard let b = body(id), b.place.scale != SIMD3(1, 1, 1) else { continue }
             let s = b.place.scale
-            switch b.node {
+            let next: Node
+            switch b.node.base {
             case .primitive(var p):
                 p.scale(by: s)
-                mutate(id) { $0.node = .primitive(p); $0.place.scale = SIMD3(1, 1, 1) }
+                next = .primitive(p)
             case .fastener(var f):
                 f.length = max(1, (f.length * s.z * 100).rounded() / 100)
-                mutate(id) { $0.node = .fastener(f); $0.place.scale = SIMD3(1, 1, 1) }
+                next = .fastener(f)
             default:
-                break
+                continue
             }
+            mutate(id) { $0.node = followed($0.node, to: next); $0.place.scale = SIMD3(1, 1, 1) }
         }
-        dropSoon(selection)
         rebuildScene()
+    }
+
+    // New sizes for a body's primitive or fastener (typed in, or switched from round to oval): the left, front and bottom
+    // sides stay where they were (the middle, when resizing is symmetric), and roundings, bevels, splits and hollows go along.
+    func reshape(_ id: UUID, _ f: (Node) -> Node) {
+        guard let b = body(id) else { return }
+        let next = f(b.node.base)
+        guard next != b.node.base else { return }
+        begin()
+        let c = settings.clearance
+        var move = b.place.move
+        if !settings.symmetric, let e0 = b.node.base.extent(clearance: c), let e1 = next.extent(clearance: c) {
+            move += b.place.rotation * (b.place.scale * (e1 - e0) / 2)
+        }
+        mutate(id) { $0.node = followed($0.node, to: next); $0.place.move = move }
+        rebuildScene()
+    }
+
+    // A body's node on a new base, its picks, planes and faces moved by as much as the base grew along each axis.
+    private func followed(_ node: Node, to next: Node) -> Node {
+        let c = settings.clearance
+        let out = node.replacingBase { _ in next }
+        guard let e0 = node.base.extent(clearance: c), let e1 = next.extent(clearance: c), e0.min() > 0 else { return out }
+        return out.following(e1 / e0)
     }
 
     // A click without dragging leaves no undo step behind.
@@ -1465,22 +1677,28 @@ final class Workbench: DesignHost {
         rebuildScene()
     }
 
-    func setBase(_ id: UUID, record: Bool = true, _ f: (Node) -> Node) {
-        if record { begin() }
-        mutate(id) { $0.node = $0.node.replacingBase(f) }
-        rebuildScene()
-    }
-
     func setPlace(_ id: UUID, record: Bool = true, _ f: (inout Placement) -> Void) {
         if record { begin() }
         mutate(id) { f(&$0.place) }
         sceneVersion += 1
     }
 
+    // A scale typed in for one shape: kept like a resize drag (which side stays, sizes taken in).
+    func rescale(_ id: UUID, axis i: Int, by f: Double) {
+        guard let b = body(id), f.isFinite, f > 0, abs(f - 1) > 1e-9 else { return }
+        begin()
+        stretch([id: b.place], axis: i, by: f, uniform: settings.uniform, symmetric: settings.symmetric)
+        finishScale()
+    }
+
     // MARK: inspector screens
 
     var screen: Screen {
-        if mode == .angles { return .angles }
+        switch mode {
+        case .angles: return .angles
+        case .thread: return .thread
+        default: break
+        }
         switch gizmo {
         case .move: return .move
         case .scale: return .resize
@@ -1489,7 +1707,8 @@ final class Workbench: DesignHost {
     }
 
     func choose(_ s: Screen) {
-        guard s != screen || mode != .select && s != .angles else { return }
+        // The current screen again does nothing, unless a tool (split, round, hollow) has the inspector hidden.
+        guard s != screen || [.round, .split, .hollow].contains(mode) else { return }
         if mode == .round { clearPreview() }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
@@ -1497,9 +1716,9 @@ final class Workbench: DesignHost {
             case .move: gizmo = .move
             case .resize: gizmo = .scale
             case .rotate: gizmo = .rotate
-            case .angles: break
+            case .angles, .thread: break
             }
-            mode = s == .angles ? .angles : .select
+            mode = s == .angles ? .angles : s == .thread ? .thread : .select
             edgePicks = []
             editBody = s == .angles ? selection.last : nil
         }
@@ -1695,6 +1914,8 @@ final class Workbench: DesignHost {
             flash(L("These edges can't be rounded inward"))
         } else if problems.contains("bevel") {
             flash(L("This bevel doesn't fit these edges — try smaller sizes"))
+        } else if problems.contains("bend") {
+            flash(L("The tube is too thick for this torus's tightest bend"))
         } else if problems.contains("empty") {
             flash(L("Nothing is left of this shape"))
         } else if problems.contains("pieces") {
@@ -1717,10 +1938,6 @@ final class Workbench: DesignHost {
         if let r = NSApp.keyWindow?.firstResponder, r is NSText || r is NSTextView { return false }
         let mods = e.modifierFlags.intersection([.command, .control, .option])
         if !mods.isEmpty { return false }
-        if popup != nil {
-            if e.keyCode == 53 { show(nil); return true }
-            return false
-        }
         let shift = e.modifierFlags.contains(.shift)
         switch name {
         case "Enter":
@@ -1827,7 +2044,6 @@ final class Workbench: DesignHost {
         hover = Hover()
         selection = []
         dropQueue = []
-        popup = nil
         capturing = nil
         undoStack = []
         redoStack = []
@@ -2010,7 +2226,7 @@ struct BcadApp: App {
                 Button(L("Hollow")) { lib.enter(.hollow) }
                 Button(L("Drop onto the bed")) { lib.dropToBed() }
                 Divider()
-                Button(L("Add Thread…")) { lib.show(.thread) }.keyboardShortcut("b")
+                Button(L("Add thread")) { lib.addThread() }.keyboardShortcut("b")
             }
         }
     }

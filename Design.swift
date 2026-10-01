@@ -1838,63 +1838,6 @@ struct KeyField: View {
     }
 }
 
-struct PopupHost: View {
-    @Environment(Workbench.self) private var lib
-    @State private var roomH: CGFloat = 800
-    @State private var contentH: CGFloat = 0
-
-    var body: some View {
-        let look = Skin.shared
-        ZStack {
-            if let p = lib.popup {
-                Color.black.opacity(look.dark ? 0.4 : 0.18)
-                    .background(.ultraThinMaterial.opacity(0.5))
-                    .ignoresSafeArea()
-                    .onTapGesture { lib.show(nil) }
-                    .transition(.opacity)
-                ZStack(alignment: .topTrailing) {
-                    FitHeight(limit: max(160, roomH - 100)) {
-                        ScrollView {
-                            card(p)
-                                .id(String(describing: p))
-                                .frame(maxWidth: .infinity)
-                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentH = $0 }
-                        }
-                        .contentMargins(.horizontal, 26, for: .scrollContent)
-                        .scrollIndicators(.never)
-                        .scrollBounceBehavior(.basedOnSize)
-                        .scrollClipDisabled(contentH <= roomH - 100)
-                    }
-                    .padding(.vertical, 26)
-                    CloseX { lib.show(nil) }
-                        .padding(12)
-                }
-                .frame(width: width(p))
-                .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.void.opacity(0.65)))
-                .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.ultraThinMaterial))
-                .shadow(color: look.accent.opacity(0.22 * look.glow), radius: 40)
-                .shadow(color: look.accent2.opacity(0.12 * look.glow), radius: 70, y: 20)
-                .transition(.scale(scale: 0.86).combined(with: .haze))
-            }
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { roomH = $0 }
-    }
-
-    private func width(_ p: Popup) -> CGFloat {
-        switch p {
-        case .thread: 420
-        }
-    }
-
-    @ViewBuilder
-    private func card(_ p: Popup) -> some View {
-        switch p {
-        case .thread:
-            ThreadCard()
-        }
-    }
-}
-
 struct IconArt: View {
     var body: some View {
         let plate = RoundedRectangle(cornerRadius: 186, style: .continuous)

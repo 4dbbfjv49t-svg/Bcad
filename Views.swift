@@ -35,34 +35,33 @@ struct RootView: View {
                                     .padding(.leading, 14)
                                     .transition(.scale.combined(with: .haze))
                                 }
-                                ToolRail()
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                                    .padding(.leading, 14)
                                 VStack(spacing: 10) {
                                     Spacer()
-                                    if lib.mode != .select && lib.mode != .angles {
+                                    if tool {
                                         ModeBar().transition(.move(edge: .bottom).combined(with: .haze))
                                     }
                                     ShapeBar()
                                 }
                                 .padding(.bottom, 16)
-                                if !lib.selection.isEmpty && (lib.mode == .select || lib.mode == .angles) {
-                                    Inspector()
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                                        .padding(.top, 14)
-                                        .padding(.trailing, 14)
-                                        .transition(.move(edge: .trailing).combined(with: .haze))
+                                // The tools sit beside the inspector, or at the right edge while it's away.
+                                HStack(alignment: .top, spacing: 10) {
+                                    ToolRail()
+                                    if !lib.selection.isEmpty && !tool {
+                                        Inspector().transition(.move(edge: .trailing).combined(with: .haze))
+                                    }
                                 }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                                .padding(.top, 14)
+                                .padding(.trailing, 14)
                             }
                         }
                     }
-                    if let busy = lib.busy, lib.popup == nil {
+                    if let busy = lib.busy {
                         BusyToast(text: busy)
                             .frame(maxHeight: .infinity, alignment: .top)
                             .padding(.top, 14)
                             .transition(.move(edge: .top).combined(with: .haze))
                     }
-                    PopupHost()
                 }
             }
         }
@@ -73,6 +72,9 @@ struct RootView: View {
         .animation(Neon.glide, value: lib.selection.isEmpty)
         .animation(Neon.glide, value: lib.drawerOpen)
     }
+
+    // A tool (split, round, hollow) is out: its bar shows instead of the inspector.
+    private var tool: Bool { [.round, .split, .hollow].contains(lib.mode) }
 }
 
 extension View {
@@ -87,7 +89,7 @@ extension View {
 
 // MARK: - Fields
 
-// A millimetre (or degree, percent) value with two decimals. ↑/↓ step by 1, ⇧ by 10, ⌥ by 0.1.
+// A millimetre (or degree, percent) value with two decimals, or as many as `digits`. ↑/↓ step by 1, ⇧ by 10, ⌥ by 0.1.
 struct MMField: View {
     @Environment(Workbench.self) private var lib
     let value: Double
@@ -95,15 +97,18 @@ struct MMField: View {
     var range: ClosedRange<Double> = -100000...100000
     var width: CGFloat = 64
     var tint: Color?
+    // How strongly the field is tinted at rest.
+    var fill = 0.07
+    var digits = 2
     let set: (Double) -> Void
     @State private var text = ""
     @State private var blink = false
     @State private var hover = false
     @FocusState private var focused: Bool
 
-    static func format(_ v: Double) -> String {
-        let r = (v * 100).rounded() / 100
-        return String(format: "%.2f", r == 0 ? 0 : r)
+    static func format(_ v: Double, digits: Int = 2) -> String {
+        let k = pow(10, Double(digits)), r = (v * k).rounded() / k
+        return String(format: "%.\(digits)f", r == 0 ? 0 : r)
     }
 
     var body: some View {
@@ -122,12 +127,12 @@ struct MMField: View {
                 .onKeyPress(keys: [.upArrow, .downArrow]) { press in
                     let step = press.modifiers.contains(.shift) ? 10 : press.modifiers.contains(.option) ? 0.1 : 1
                     let now = Double(text.replacingOccurrences(of: ",", with: ".")) ?? value
-                    text = Self.format(now + (press.key == .upArrow ? step : -step))
+                    text = Self.format(now + (press.key == .upArrow ? step : -step), digits: digits)
                     commit()
                     return .handled
                 }
                 .frame(width: width, height: 26)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(t.opacity(focused ? (blink ? 0.3 : 0.12) : (hover ? 0.14 : 0.07))))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(t.opacity(focused ? (blink ? 0.3 : max(0.12, fill)) : (hover ? fill + 0.07 : fill))))
                 .glow(t, focused ? (blink ? 12 : 3) : (hover ? 7 : 0))
                 .scaleEffect(hover && !focused ? 1.05 : 1)
                 .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
@@ -135,8 +140,8 @@ struct MMField: View {
                 Text(unit).font(.ui(size: 11, weight: .medium, design: .rounded)).foregroundStyle(Ink.text.opacity(0.45)).fixedSize()
             }
         }
-        .onAppear { text = Self.format(value) }
-        .onChange(of: value) { if !focused { text = Self.format(value) } }
+        .onAppear { text = Self.format(value, digits: digits) }
+        .onChange(of: value) { if !focused { text = Self.format(value, digits: digits) } }
         .onChange(of: focused) {
             if focused {
                 lib.endCapture()
@@ -151,10 +156,10 @@ struct MMField: View {
 
     private func commit() {
         let s = text.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
-        guard let n = Double(s), n.isFinite else { text = Self.format(value); return }
-        let v = (min(range.upperBound, max(range.lowerBound, n)) * 100).rounded() / 100
+        guard let n = Double(s), n.isFinite else { text = Self.format(value, digits: digits); return }
+        let k = pow(10, Double(digits)), v = (min(range.upperBound, max(range.lowerBound, n)) * k).rounded() / k
         if abs(v - value) > 0.000_1 { set(v) }
-        text = Self.format(v)
+        text = Self.format(v, digits: digits)
     }
 }
 
@@ -213,14 +218,11 @@ struct ToolButton: View {
 // MARK: - Toolbars
 
 struct ShapeBar: View {
-    @Environment(Workbench.self) private var lib
     @State private var open: ShapeGroup?
 
     var body: some View {
         HStack(spacing: 8) {
             ForEach(ShapeGroup.allCases, id: \.self) { g in ShapeGroupButton(group: g, open: $open) }
-            Rectangle().fill(Ink.text.opacity(0.12)).frame(width: 1, height: 24)
-            ToolButton(icon: "screwdriver", title: L("Add Thread…"), key: "⌘B", tint: lib.accent3) { lib.show(.thread) }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -237,8 +239,11 @@ struct ShapeGroupButton: View {
     var body: some View {
         let k = lib.quick(group)
         HStack(spacing: 1) {
-            ToolButton(icon: k.icon, title: L(k.primitive.name)) { lib.addShape(k) }
+            Button { lib.addShape(k) } label: { ShapeIcon(prim: k.primitive, size: 15) }
+                .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 34))
                 .contentTransition(.symbolEffect(.replace))
+                .help(L(k.primitive.name))
+                .accessibilityLabel(L(k.primitive.name))
             Button { withAnimation(Neon.glide) { open = open == group ? nil : group } } label: {
                 Image(systemName: "chevron.up").font(.ui(size: 8, weight: .black))
             }
@@ -264,6 +269,96 @@ struct ShapeGroupButton: View {
     }
 }
 
+// A shape's picture: a symbol, or for a torus with a polygon tube (and any oval torus) its tube cut through.
+struct ShapeIcon: View {
+    let prim: Primitive
+    let size: CGFloat
+
+    var body: some View {
+        if let name = prim.symbol {
+            Image(systemName: name)
+        } else {
+            TubeGlyph(sides: prim.sides).frame(width: size * 1.25, height: size)
+        }
+    }
+}
+
+extension Primitive {
+    var symbol: String? {
+        switch kind {
+        case .box: "cube"
+        case .cylinder: "cylinder"
+        case .cone: "cone"
+        case .sphere: "circle.fill"
+        case .torus: sides == 0 ? "circle.circle" : nil
+        case .ovalTorus: nil
+        case .wedge: "righttriangle"
+        case .prism: ["3": "triangle", "5": "pentagon", "8": "octagon"][String(sides)] ?? "hexagon"
+        case .pyramid: "pyramid"
+        case .hemisphere: "circle.tophalf.filled"
+        case .bowl: "circle.bottomhalf.filled"
+        case .ring: "smallcircle.circle"
+        case .glass: "wineglass"
+        case .oval: "oval"
+        }
+    }
+}
+
+// A torus cut through its middle: the tube's outline either side of the axis (a circle, a triangle point up, a flat hexagon).
+struct TubeGlyph: View {
+    let sides: Int
+
+    var body: some View {
+        Canvas { ctx, size in
+            let h = min(size.height, size.width * 0.4), cy = size.height / 2
+            var tubes = Path()
+            for cx in [h / 2, size.width - h / 2] {
+                let r = h / 2, t = r * sqrt(3) / 2
+                switch sides {
+                case 3:
+                    tubes.move(to: CGPoint(x: cx - r, y: cy + t))
+                    tubes.addLine(to: CGPoint(x: cx + r, y: cy + t))
+                    tubes.addLine(to: CGPoint(x: cx, y: cy - t))
+                    tubes.closeSubpath()
+                case 6:
+                    tubes.move(to: CGPoint(x: cx - r, y: cy))
+                    for (dx, dy) in [(-r / 2, t), (r / 2, t), (r, 0), (r / 2, -t), (-r / 2, -t)] { tubes.addLine(to: CGPoint(x: cx + dx, y: cy + dy)) }
+                    tubes.closeSubpath()
+                default:
+                    tubes.addEllipse(in: CGRect(x: cx - r, y: cy - r, width: h, height: h))
+                }
+            }
+            ctx.fill(tubes, with: .foreground)
+            var axis = Path()
+            axis.move(to: CGPoint(x: size.width / 2, y: cy - h * 0.7))
+            axis.addLine(to: CGPoint(x: size.width / 2, y: cy + h * 0.7))
+            ctx.stroke(axis, with: .foreground, style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [1.5, 2]))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+// A bolt with its thread: the Thread tab's picture (there's no symbol for a thread).
+struct ThreadGlyph: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let w = r.width, h = r.height
+        p.addRoundedRect(in: CGRect(x: r.minX + w * 0.16, y: r.minY + h * 0.04, width: w * 0.68, height: h * 0.22), cornerSize: CGSize(width: w * 0.06, height: w * 0.06))
+        let left = r.minX + w * 0.3, right = r.maxX - w * 0.3, top = r.minY + h * 0.26, bottom = r.maxY - h * 0.02
+        p.move(to: CGPoint(x: left, y: top))
+        p.addLine(to: CGPoint(x: left, y: bottom))
+        p.addLine(to: CGPoint(x: right, y: bottom))
+        p.addLine(to: CGPoint(x: right, y: top))
+        var y = top + h * 0.17
+        while y < bottom - h * 0.02 {
+            p.move(to: CGPoint(x: left, y: y))
+            p.addLine(to: CGPoint(x: right, y: y - h * 0.11))
+            y += h * 0.17
+        }
+        return p
+    }
+}
+
 // A click adds the shape; holding it for a second makes it the group's quick shape (a ring fills while holding).
 struct ShapeChoice: View {
     @Environment(Workbench.self) private var lib
@@ -282,7 +377,7 @@ struct ShapeChoice: View {
             withAnimation(Neon.glide) { open = nil }
             lib.addShape(kind)
         } label: {
-            Image(systemName: kind.icon)
+            ShapeIcon(prim: kind.primitive, size: 14)
         }
         .buttonStyle(NeonButtonStyle(tint: lib.accent, lit: quick, size: 32))
         .overlay {
@@ -313,13 +408,9 @@ struct ToolRail: View {
 
     var body: some View {
         let s = lib.settings
-        let many = lib.selection.count >= 2
         VStack(spacing: 6) {
             ToolButton(icon: "arrow.down.to.line", title: Action.drop.label, key: Keys.label(s.key(.drop)), tint: lib.accent3, size: 30) { lib.perform(.drop) }
             divider
-            ToolButton(icon: "square.on.square", title: L("Merge"), key: "⌘U", tint: lib.accent2, lit: many, size: 30) { lib.combine(Int32(BK_UNION)) }
-            ToolButton(icon: "minus.square", title: L("Subtract"), key: "⌘⌫", tint: lib.accent2, lit: many, size: 30) { lib.combine(Int32(BK_SUBTRACT)) }
-            ToolButton(icon: "square.on.square.intersection.dashed", title: L("Intersect"), key: "⌘I", tint: lib.accent2, lit: many, size: 30) { lib.combine(Int32(BK_INTERSECT)) }
             ToolButton(icon: "scissors", title: Action.split.label, key: Keys.label(s.key(.split)), tint: lib.accent2, lit: lib.mode == .split, size: 30) { lib.perform(.split) }
             ToolButton(icon: "app", title: Action.round.label, key: Keys.label(s.key(.round)), tint: lib.accent2, lit: lib.mode == .round, size: 30) { lib.perform(.round) }
             ToolButton(icon: "square.dashed.inset.filled", title: Action.hollow.label, key: Keys.label(s.key(.hollow)), tint: lib.accent2,
@@ -423,7 +514,7 @@ struct ModeBar: View {
     @ViewBuilder private var split: some View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { i in
-                Chip(text: ["X", "Y", "Z"][i], chosen: lib.splitAxis == i, tint: [Neon.red, Neon.green, Neon.cyan][i]) { lib.splitAxis = i }
+                Chip(text: ["X", "Y", "Z"][i], chosen: lib.splitAxis == i, tint: Axis.color(i)) { lib.splitAxis = i }
             }
         }
         Text(L("Offset")).foregroundStyle(Ink.text.opacity(0.55))
@@ -541,27 +632,12 @@ struct ObjectRow: View {
     @State private var flash = 0
     @FocusState private var focused: Bool
 
-    private var icon: String {
+    @ViewBuilder private var icon: some View {
         switch item.node.base {
-        case .primitive(let p):
-            switch p.kind {
-            case .box: "cube"
-            case .cylinder: "cylinder"
-            case .cone: "cone"
-            case .sphere: "circle.fill"
-            case .torus: "circle.circle"
-            case .wedge: "righttriangle"
-            case .prism: ["3": "triangle", "5": "pentagon", "8": "octagon"][String(p.sides)] ?? "hexagon"
-            case .pyramid: "pyramid"
-            case .hemisphere: "circle.tophalf.filled"
-            case .bowl: "circle.bottomhalf.filled"
-            case .ring: "smallcircle.circle"
-            case .glass: "wineglass"
-            case .oval: "oval"
-            }
-        case .fastener(let f): f.nut ? "circle.hexagonpath" : "screwdriver"
-        case .group: "square.on.square"
-        default: "cube"
+        case .primitive(let p): ShapeIcon(prim: p, size: 10)
+        case .fastener(let f): Image(systemName: f.nut ? "circle.hexagonpath" : "screwdriver")
+        case .group: Image(systemName: "square.on.square")
+        default: Image(systemName: "cube")
         }
     }
 
@@ -580,7 +656,7 @@ struct ObjectRow: View {
                 Text(item.name).lineLimit(1)
             }
             Spacer(minLength: 4)
-            Image(systemName: icon).font(.ui(size: 11, weight: .semibold)).foregroundStyle(Ink.text.opacity(0.35)).accessibilityHidden(true)
+            icon.font(.ui(size: 11, weight: .semibold)).foregroundStyle(Ink.text.opacity(0.35)).accessibilityHidden(true)
             Button {
                 lib.commit { d in if let i = d.bodies.firstIndex(where: { $0.id == item.id }) { d.bodies[i].hidden.toggle() } }
                 lib.selection.removeAll { $0 == item.id }
@@ -740,32 +816,31 @@ struct Inspector: View {
         VStack(alignment: .leading, spacing: 10) {
             NamesRow(items: items)
             ScreenSwitch().padding(.horizontal, 12)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ZStack(alignment: .topLeading) {
-                        ScreenContent(items: items)
-                            .id(lib.screen)
-                            .transition(slide)
+            Snug {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ZStack(alignment: .topLeading) {
+                            ScreenContent(items: items)
+                                .id(lib.screen)
+                                .transition(slide)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .clipped()
+                        if items.count == 1, let b = items.first {
+                            Info(item: b)
+                        } else {
+                            Combine()
+                        }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .clipped()
-                    if items.count == 1, let b = items.first {
-                        ColourLine(item: b)
-                        Info(item: b)
-                    } else {
-                        Combine()
-                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
+                .scrollIndicators(.never)
+                .scrollBounceBehavior(.basedOnSize)
             }
-            .scrollIndicators(.never)
-            .scrollBounceBehavior(.basedOnSize)
-            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 14)
         .frame(width: 300)
-        .frame(maxHeight: 660, alignment: .top)
         .glassBar(20)
         .shadow(color: lib.accent.opacity(0.12 * Skin.shared.glow), radius: 24)
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { lib.inspectorFrame = $0 }
@@ -775,6 +850,19 @@ struct Inspector: View {
         let forward = lib.screenStep > 0
         return .asymmetric(insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity),
                            removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity))
+    }
+}
+
+// Its content's own height, but never more than there's room for (the content scrolls then): a panel as tall as it needs.
+struct Snug: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let s = subviews.first else { return .zero }
+        let ideal = s.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: proposal.width ?? ideal.width, height: min(ideal.height, proposal.height ?? ideal.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
     }
 }
 
@@ -856,7 +944,7 @@ struct NameChip: View {
     }
 }
 
-// Move · Resize · Rotate · Angles: the lit segment slides to the chosen screen (a two-finger swipe over the panel does too).
+// Move · Resize · Rotate · Angles · Thread: the lit segment slides to the chosen screen (a two-finger swipe over the panel does too).
 struct ScreenSwitch: View {
     @Environment(Workbench.self) private var lib
     @Namespace private var lane
@@ -865,24 +953,31 @@ struct ScreenSwitch: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        HStack(spacing: 3) {
+        HStack(spacing: 2) {
             ForEach(Screen.allCases, id: \.self) { sc in
                 let on = sc == lib.screen
-                VStack(spacing: 3) {
-                    Image(systemName: sc.icon).font(.ui(size: 13, weight: .bold))
-                    Text(L(sc.title)).font(.ui(size: 10.5, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
+                VStack(spacing: 2) {
+                    Group {
+                        if let icon = sc.icon {
+                            Image(systemName: icon).font(.ui(size: 15, weight: .bold))
+                        } else {
+                            ThreadGlyph().stroke(style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)).frame(width: 14, height: 16)
+                        }
+                    }
+                    .frame(height: 18)
+                    Text(L(sc.title)).font(.ui(size: 11.5, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
                 }
                 .foregroundStyle(on ? Color.black : (hover == sc ? lib.accent : Ink.text.opacity(0.75)))
                 .frame(maxWidth: .infinity)
-                .frame(height: 44)
+                .frame(height: 40)
                 .background {
                     if on {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(lib.accent)
                             .glow(lib.accent, 12)
                             .matchedGeometryEffect(id: "lit", in: lane)
                     } else if hover == sc {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous).fill(lib.accent.opacity(0.12)).transition(.opacity)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(lib.accent.opacity(0.12)).transition(.opacity)
                     }
                 }
                 .contentShape(Rectangle())
@@ -898,7 +993,7 @@ struct ScreenSwitch: View {
                 .accessibilityAction(.default) { lib.choose(sc) }
             }
         }
-        .padding(4)
+        .padding(3)
         .background(shape.fill(Ink.text.opacity(0.06)))
         .pressWave(waves, shape: shape, tint: lib.accent)
     }
@@ -909,7 +1004,7 @@ struct ScreenSwitch: View {
         case .move: return s.isOn(.move) ? Keys.label(s.key(.move)) : nil
         case .resize: return s.isOn(.scale) ? Keys.label(s.key(.scale)) : nil
         case .rotate: return s.isOn(.rotate) ? Keys.label(s.key(.rotate)) : nil
-        case .angles: return nil
+        case .angles, .thread: return nil
         }
     }
 }
@@ -926,6 +1021,8 @@ struct ScreenContent: View {
                 if let b = one {
                     SettingsTitle(text: L("Position") + " · " + L("mm"))
                     AxisRow(values: b.place.move) { i, v in lib.setPlace(b.id) { $0.move[i] = v } }
+                    Rectangle().fill(Ink.text.opacity(0.12)).frame(height: 1).padding(.horizontal, 6).padding(.top, 6)
+                    ColourLine(item: b).id(b.id)
                 } else {
                     Hint(text: L("Drag the arrows to move all selected shapes"))
                 }
@@ -933,21 +1030,18 @@ struct ScreenContent: View {
                 if let b = one {
                     switch b.node.base {
                     case .primitive(let p): PrimitiveSizes(id: b.id, prim: p)
-                    case .fastener(let f): FastenerSizes(item: b, f: f)
+                    case .fastener(let f): FastenerLength(id: b.id, f: f)
                     default: EmptyView()
                     }
-                    if !isPlain(b) || b.place.scale != SIMD3(1, 1, 1) {
+                    if !plain(b) || b.place.scale != SIMD3(1, 1, 1) {
                         SettingsTitle(text: L("Scale") + " · %")
-                        AxisRow(values: b.place.scale * 100, range: 1...100000) { i, v in
-                            lib.setPlace(b.id) { p in
-                                if lib.settings.uniform, p.scale[i] > 0 { p.scale *= v / 100 / p.scale[i] } else { p.scale[i] = v / 100 }
-                            }
-                        }
+                        AxisRow(values: b.place.scale * 100, range: 1...100000) { i, v in lib.rescale(b.id, axis: i, by: v / 100 / b.place.scale[i]) }
                     }
                 } else {
                     Hint(text: L("Drag the handles to resize all selected shapes"))
                 }
                 ProportionsLine()
+                SymmetryLine()
             case .rotate:
                 if let b = one {
                     SettingsTitle(text: L("Rotation") + " · °")
@@ -957,13 +1051,16 @@ struct ScreenContent: View {
                 }
             case .angles:
                 AnglesScreen()
+            case .thread:
+                ThreadScreen(items: items)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func isPlain(_ b: Solid) -> Bool {
-        switch b.node {
+    // A primitive or a fastener, rounded or not: resizing changes its sizes rather than stretching it.
+    private func plain(_ b: Solid) -> Bool {
+        switch b.node.base {
         case .primitive, .fastener: true
         default: false
         }
@@ -999,34 +1096,153 @@ struct ProportionsLine: View {
     }
 }
 
+// Symmetric resizing, remembered for every shape: both sides of a size move and the middle stays; otherwise the left,
+// front or bottom side stays.
+struct SymmetryLine: View {
+    @Environment(Workbench.self) private var lib
+
+    var body: some View {
+        let on = lib.settings.symmetric
+        SettingLine(title: L("Symmetric resizing"), detail: L("or hold ⌥ while resizing")) {
+            HStack(spacing: 8) {
+                Image(systemName: on ? "arrow.left.and.right" : "arrow.right")
+                    .font(.ui(size: 13, weight: .bold))
+                    .foregroundStyle(on ? lib.accent3 : Ink.text.opacity(0.4))
+                    .contentTransition(.symbolEffect(.replace))
+                NeonToggle(state: on) { lib.updateSettings { $0.symmetric.toggle() } }
+                    .accessibilityLabel(L("Symmetric resizing"))
+            }
+        }
+    }
+}
+
+// The palette, and at its end a button that opens a mixer for any colour; closing it keeps the colour.
 struct ColourLine: View {
+    @Environment(Workbench.self) private var lib
+    let item: Solid
+    @State private var mixing = false
+
+    var body: some View {
+        let c = item.color
+        let mixed = !Palette.colors.contains(c)
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsTitle(text: L("Colour"))
+            HStack(spacing: 7) {
+                ForEach(Palette.colors.indices, id: \.self) { i in dot(i) }
+                Button { toggle() } label: { Image(systemName: "paintpalette.fill") }
+                    .buttonStyle(NeonButtonStyle(tint: mixed ? Palette.color(c) : lib.accent, lit: mixing, size: 24))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Ink.text, lineWidth: mixed ? 2 : 0).allowsHitTesting(false))
+                    .help(L("Mix a colour"))
+                    .accessibilityLabel(L("Mix a colour"))
+            }
+            .padding(.leading, 6)
+            if mixing {
+                ColourMixer(item: item).transition(.menu)
+            }
+        }
+        .onDisappear { if mixing { lib.undoLastIfUnchanged() } }
+    }
+
+    private func dot(_ i: Int) -> some View {
+        let c = Palette.colors[i], color = Palette.color(c), on = item.color == c
+        return Circle().fill(color)
+            .frame(width: 20, height: 20)
+            .overlay(Circle().strokeBorder(Ink.text, lineWidth: on ? 2 : 0))
+            .glow(color, on ? 8 : 0)
+            .contentShape(Circle())
+            .onTapGesture { recolor(c) }
+            .accessibilityElement()
+            .accessibilityLabel(L("Colour"))
+            .accessibilityValue("\(i + 1)")
+            .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction(.default) { recolor(c) }
+    }
+
+    // While the mixer is open its one undo step covers every change; otherwise a colour is a step of its own.
+    private func recolor(_ c: SIMD3<UInt8>) {
+        if mixing { lib.paint(item.id, c) } else { lib.commit { d in if let k = d.bodies.firstIndex(where: { $0.id == item.id }) { d.bodies[k].color = c } } }
+    }
+
+    private func toggle() {
+        withAnimation(Neon.glide) { mixing.toggle() }
+        if mixing { lib.begin() } else { lib.undoLastIfUnchanged() }
+    }
+}
+
+// Red, green and blue from 0 to 255: a slider for each, then the three as numbers.
+struct ColourMixer: View {
     @Environment(Workbench.self) private var lib
     let item: Solid
 
     var body: some View {
-        let b = item
-        SettingsTitle(text: L("Colour"))
-        HStack(spacing: 7) {
-            ForEach(0..<Palette.colors.count, id: \.self) { i in
-                let c = Palette.color(i)
-                Circle().fill(c)
-                    .frame(width: 20, height: 20)
-                    .overlay(Circle().strokeBorder(Ink.text, lineWidth: b.color == i ? 2 : 0))
-                    .glow(c, b.color == i ? 8 : 0)
-                    .contentShape(Circle())
-                    .onTapGesture { recolor(b.id, i) }
-                    .accessibilityElement()
-                    .accessibilityLabel(L("Colour"))
-                    .accessibilityValue("\(i + 1)")
-                    .accessibilityAddTraits(b.color == i ? [.isButton, .isSelected] : .isButton)
-                    .accessibilityAction(.default) { recolor(b.id, i) }
+        let c = item.color
+        VStack(spacing: 10) {
+            ForEach(0..<3, id: \.self) { k in ChannelSlider(color: c, channel: k) { set(k, $0) } }
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { k in
+                    HStack(spacing: 3) {
+                        Text(["R", "G", "B"][k]).font(.ui(size: 10.5, weight: .black, design: .rounded)).foregroundStyle(ChannelSlider.tint(k))
+                        MMField(value: Double(c[k]), range: 0...255, width: 52, tint: ChannelSlider.tint(k), digits: 0) { set(k, $0) }
+                            .accessibilityLabel(ChannelSlider.name(k))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
         }
-        .padding(.leading, 6)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Ink.text.opacity(0.05)))
     }
 
-    private func recolor(_ id: UUID, _ i: Int) {
-        lib.commit { d in if let k = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[k].color = i } }
+    private func set(_ k: Int, _ v: Double) {
+        var c = item.color
+        c[k] = UInt8(min(255, max(0, v.rounded())))
+        lib.paint(item.id, c)
+    }
+}
+
+// One channel of a colour: the track runs from the colour without it to the colour with all of it.
+struct ChannelSlider: View {
+    let color: SIMD3<UInt8>
+    let channel: Int
+    let set: (Double) -> Void
+    @State private var dragging = false
+    @State private var hover = false
+
+    static func tint(_ k: Int) -> Color { [Color(red: 1, green: 0.3, blue: 0.35), Color(red: 0.3, green: 0.9, blue: 0.4), Color(red: 0.35, green: 0.55, blue: 1)][k] }
+    @MainActor static func name(_ k: Int) -> String { [L("Red"), L("Green"), L("Blue")][k] }
+
+    var body: some View {
+        var none = color, full = color
+        none[channel] = 0
+        full[channel] = 255
+        let f = CGFloat(color[channel]) / 255
+        return GeometryReader { g in
+            let knob: CGFloat = dragging ? 16 : (hover ? 14 : 12), room = max(1, g.size.width - knob)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(LinearGradient(colors: [Palette.color(none), Palette.color(full)], startPoint: .leading, endPoint: .trailing))
+                    .overlay(Capsule().strokeBorder(Ink.text.opacity(0.18), lineWidth: 1))
+                    .frame(height: hover || dragging ? 9 : 7)
+                SliderKnob(size: knob, tint: Palette.color(color), active: dragging)
+                    .offset(x: f * room)
+            }
+            .frame(width: g.size.width, height: g.size.height)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    dragging = true
+                    set(Double(min(1, max(0, (v.location.x - knob / 2) / room))) * 255)
+                }
+                .onEnded { _ in dragging = false })
+        }
+        .frame(height: 22)
+        .environment(\.layoutDirection, .leftToRight)
+        .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
+        .animation(Neon.pop, value: dragging)
+        .accessibilityElement()
+        .accessibilityLabel(Self.name(channel))
+        .accessibilityValue("\(color[channel])")
+        .accessibilityAdjustableAction { d in set(Double(color[channel]) + (d == .increment ? 5 : -5)) }
     }
 }
 
@@ -1046,7 +1262,7 @@ struct Combine: View {
     }
 }
 
-// Picking the edges to work on; the editor opens once there is at least one.
+// Picking the edges to work on: just the hint until something is picked, then the ways to work on it.
 struct AnglesScreen: View {
     @Environment(Workbench.self) private var lib
 
@@ -1056,28 +1272,28 @@ struct AnglesScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             Hint(text: picks.isEmpty ? L("Click an edge, a corner or a face · ⇧ adds more") : (all ? L("All edges") : L("{n} picks", ["n": picks.count])))
                 .contentTransition(.opacity)
-            HStack(spacing: 8) {
-                ForEach([CornerGlyph.Look.outbound, .inbound, .bevel(45)], id: \.self) { g in
-                    CornerGlyph(look: g, tint: Ink.text)
-                        .frame(width: 44, height: 34)
-                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Ink.text.opacity(0.06)))
-                }
-                Spacer(minLength: 0)
-                Chip(text: L("All edges") + " · A", chosen: all, tint: lib.accent2) {
-                    if let b = lib.editBody ?? lib.selection.last {
-                        lib.editBody = b
-                        lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
-                    }
-                }
-            }
-            .saturation(picks.isEmpty ? 0 : 1)
-            .opacity(picks.isEmpty ? 0.4 : 1)
             if !picks.isEmpty {
-                Button { lib.workWithAngles() } label: {
-                    Label(L("Work with angles"), systemImage: "angle")
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        ForEach([CornerGlyph.Look.outbound, .inbound, .bevel(45)], id: \.self) { g in
+                            CornerGlyph(look: g, tint: Ink.text)
+                                .frame(width: 44, height: 34)
+                                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Ink.text.opacity(0.06)))
+                        }
+                        Spacer(minLength: 0)
+                        Chip(text: L("All edges") + " · A", chosen: all, tint: lib.accent2) {
+                            if let b = lib.editBody ?? lib.selection.last {
+                                lib.editBody = b
+                                lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
+                            }
+                        }
+                    }
+                    Button { lib.workWithAngles() } label: {
+                        Label(L("Work with angles"), systemImage: "angle")
+                    }
+                    .buttonStyle(PillStyle(tint: lib.accent2))
                 }
-                .buttonStyle(PillStyle(tint: lib.accent2))
-                .transition(.scale(scale: 0.9).combined(with: .haze))
+                .transition(.scale(scale: 0.9, anchor: .top).combined(with: .haze))
             }
         }
         .animation(Neon.spring, value: picks.isEmpty)
@@ -1093,12 +1309,35 @@ struct AxisRow: View {
         HStack(spacing: 6) {
             ForEach(0..<3, id: \.self) { i in
                 HStack(spacing: 3) {
-                    Text(["X", "Y", "Z"][i]).font(.ui(size: 10.5, weight: .black, design: .rounded)).foregroundStyle([Neon.red, Neon.green, Neon.cyan][i])
-                    MMField(value: values[i], range: range, width: 64, tint: [Neon.red, Neon.green, Neon.cyan][i]) { set(i, $0) }
+                    Text(["X", "Y", "Z"][i]).font(.ui(size: 10.5, weight: .black, design: .rounded)).foregroundStyle(Axis.color(i))
+                    MMField(value: values[i], range: range, width: 64, tint: Axis.color(i)) { set(i, $0) }
                 }
             }
         }
         .padding(.leading, 6)
+    }
+}
+
+// A size; one running along an axis is washed in that axis's colour, row and field, whatever the style or theme.
+struct SizeLine: View {
+    let title: String
+    let axis: Int?
+    let value: Double
+    var unit: String?
+    let range: ClosedRange<Double>
+    let set: (Double) -> Void
+
+    var body: some View {
+        let tint = axis.map(Axis.color)
+        HStack(spacing: 10) {
+            Text(title).font(.ui(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Ink.text).lineLimit(2)
+            Spacer(minLength: 4)
+            MMField(value: value, unit: unit, range: range, tint: tint, fill: tint == nil ? 0.07 : 0.24, set: set)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(minHeight: 44)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(tint.map { $0.opacity(0.13) } ?? Ink.text.opacity(0.05)))
     }
 }
 
@@ -1119,36 +1358,39 @@ struct PrimitiveSizes: View {
                     }
                 }
             }
-            if prim.kind == .cylinder || prim.kind == .oval {
+            if [.cylinder, .oval, .torus, .ovalTorus].contains(prim.kind) {
                 Segmented(options: [false, true], label: { $0 ? L("Oval") : L("Round") }, icon: { $0 ? "oval" : "circle" },
-                          current: prim.kind == .oval) { oval in shape(oval) }
+                          current: prim.kind == .oval || prim.kind == .ovalTorus) { oval in shape(oval) }
             }
             ForEach(Array(prim.fields.enumerated()), id: \.offset) { i, field in
-                SettingLine(title: L(field)) {
-                    MMField(value: prim.size[i], unit: prim.degrees.contains(i) ? "°" : nil, range: prim.range(i, limit: lib.settings.longest)) { v in
-                        lib.setBase(id) { n in
-                            guard case .primitive(var p) = n else { return n }
-                            if lib.settings.uniform, !p.degrees.contains(i), p.size[i] > 0 {
-                                let k = v / p.size[i]
-                                p.size = p.size.enumerated().map { j, x in p.degrees.contains(j) || x == 0 ? x : max(0.01, (x * k * 100).rounded() / 100) }
-                            }
-                            p.size[i] = v
-                            return .primitive(p)
+                SizeLine(title: L(field), axis: prim.axes[i], value: prim.size[i], unit: prim.degrees.contains(i) ? "°" : nil,
+                         range: prim.range(i, limit: lib.settings.longest)) { v in
+                    lib.reshape(id) { n in
+                        guard case .primitive(var p) = n else { return n }
+                        if lib.settings.uniform, !p.degrees.contains(i), p.size[i] > 0 {
+                            let k = v / p.size[i]
+                            p.size = p.size.enumerated().map { j, x in p.degrees.contains(j) || x == 0 ? x : max(0.01, (x * k * 100).rounded() / 100) }
                         }
+                        p.size[i] = v
+                        return .primitive(p)
                     }
                 }
             }
         }
     }
 
-    // A round cylinder becomes an oval with both diameters equal and square to each other, and back.
+    // A round cylinder or torus becomes an oval with both diameters equal and square to each other, and back.
     private func shape(_ oval: Bool) {
-        lib.setBase(id) { node in
+        lib.reshape(id) { node in
             guard case .primitive(var p) = node else { return node }
-            if oval, p.kind == .cylinder {
-                p = Primitive(kind: .oval, size: [p.size[0], p.size[0], 90, p.size[1]])
-            } else if !oval, p.kind == .oval {
-                p = Primitive(kind: .cylinder, size: [max(p.size[0], p.size[1]), p.size[3]])
+            switch (oval, p.kind) {
+            case (true, .cylinder): p = Primitive(kind: .oval, size: [p.size[0], p.size[0], 90, p.size[1]])
+            case (false, .oval): p = Primitive(kind: .cylinder, size: [max(p.size[0], p.size[1]), p.size[3]])
+            case (true, .torus):
+                p = Primitive(kind: .ovalTorus, sides: p.sides, size: [p.size[0], p.size[0], 90, p.size[1]])
+                if !p.bends(1.06) { p.size[3] = p.range(3, limit: .infinity).upperBound }
+            case (false, .ovalTorus): p = Primitive(kind: .torus, sides: p.sides, size: [max(p.size[0], p.size[1]), p.size[3]])
+            default: break
             }
             return .primitive(p)
         }
@@ -1156,7 +1398,7 @@ struct PrimitiveSizes: View {
 
     private func sides(_ n: Int) {
         guard (3...24).contains(n) else { return }
-        lib.setBase(id) { node in
+        lib.reshape(id) { node in
             guard case .primitive(var p) = node else { return node }
             p.sides = n
             return .primitive(p)
@@ -1164,19 +1406,41 @@ struct PrimitiveSizes: View {
     }
 }
 
-struct FastenerSizes: View {
+// A bolt's or nut's length, its height; the rest of it is on the Thread tab.
+struct FastenerLength: View {
     @Environment(Workbench.self) private var lib
-    let item: Solid
+    let id: UUID
     let f: Fastener
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SettingsTitle(text: L("Thread"))
+            SettingsTitle(text: L("Size") + " · " + L("mm"))
+            SizeLine(title: L("Length"), axis: 2, value: f.length, range: 1...lib.settings.longest) { v in
+                var n = f
+                n.length = v
+                lib.reshape(id) { _ in .fastener(n) }
+            }
+        }
+    }
+}
+
+// A selected bolt or nut changes as it's set; for anything else the same choices make a new one.
+struct ThreadScreen: View {
+    @Environment(Workbench.self) private var lib
+    let items: [Solid]
+
+    var body: some View {
+        if items.count == 1, let b = items.first, case .fastener(let f) = b.node.base {
             ThreadControls(f: f, compact: true) { n in
                 let old = f.name
-                lib.setBase(item.id) { _ in .fastener(n) }
-                lib.mutate(item.id) { if $0.name == old { $0.name = n.name } }
+                lib.reshape(b.id) { _ in .fastener(n) }
+                lib.mutate(b.id) { if $0.name == old { $0.name = n.name } }
             }
+        } else {
+            ThreadControls(f: lib.thread, compact: true) { lib.thread = $0 }
+            Button(lib.thread.nut ? L("Add nut") : L("Add bolt")) { lib.addFastener(lib.thread) }
+                .buttonStyle(PillStyle(tint: lib.accent))
+                .contentTransition(.interpolate)
         }
     }
 }
@@ -1263,7 +1527,7 @@ struct Segmented<Option: Hashable>: View {
     }
 }
 
-// Bolt | Nut, Plain | Hexed, thread size and length — shared by the Thread card and the inspector.
+// Bolt | Nut, Plain | Hexed, thread size and length: the Thread tab's choices.
 struct ThreadControls: View {
     @Environment(Workbench.self) private var lib
     let f: Fastener
@@ -1357,27 +1621,6 @@ struct ThreadControls: View {
     }
 }
 
-struct ThreadCard: View {
-    @Environment(Workbench.self) private var lib
-
-    var body: some View {
-        VStack(spacing: 14) {
-            CardTitle(text: lib.thread.nut ? L("Add nut") : L("Add bolt"))
-                .contentTransition(.interpolate)
-            ThreadControls(f: lib.thread) { lib.thread = $0 }
-            HStack(spacing: 10) {
-                Button(L("Cancel")) { lib.show(nil) }.buttonStyle(PillStyle(tint: Ink.text))
-                Button(L("Add")) {
-                    lib.show(nil)
-                    lib.addFastener(lib.thread)
-                }
-                .buttonStyle(PillStyle(tint: lib.accent))
-            }
-        }
-        .animation(.spring(response: 0.42, dampingFraction: 0.78), value: lib.thread.nut)
-    }
-}
-
 // MARK: - Settings
 
 struct SettingsPane: View {
@@ -1392,7 +1635,7 @@ struct SettingsPane: View {
          (L("Views: iso, front, back, left, right, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("Round all edges"), "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
          (L("Apply · Cancel"), "Enter  Esc"), (L("Add to selection"), "⇧/⌘ click"), (L("Orbit"), L("drag empty space")),
          (L("Pan"), L("two-finger scroll · ⇧ drag")), (L("Zoom"), L("pinch · ⌥ scroll")), (L("Move freely"), L("hold ⌘ while dragging")),
-         (L("Keep proportions"), L("hold ⇧ while resizing"))]
+         (L("Keep proportions"), L("hold ⇧ while resizing")), (L("Symmetric resizing"), L("hold ⌥ while resizing"))]
     }
 
     var body: some View {
@@ -1415,7 +1658,7 @@ struct SettingsPane: View {
                     NeonToggle(state: s.autoLink) { lib.updateSettings { $0.autoLink.toggle() } }
                         .accessibilityLabel(L("Automatic linking"))
                 }
-                SettingLine(title: L("Drop onto the bed"), detail: L("New, rotated and resized shapes rest on the bed")) {
+                SettingLine(title: L("Drop onto the bed"), detail: L("New and rotated shapes rest on the bed")) {
                     NeonToggle(state: s.dropToBed) { lib.updateSettings { $0.dropToBed.toggle() } }
                         .accessibilityLabel(L("Drop onto the bed"))
                 }
