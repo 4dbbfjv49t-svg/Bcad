@@ -271,6 +271,8 @@ jobs:
           $U view -130 10; sleep 1
           $U press "Work with angles"; sleep 4
           shot ui-07-angles
+          sleep 12
+          shot ui-07b-angles-later
           $U press Apply; sleep 8
           shot ui-08-angled
           $U tree | grep -iE "layers|rounding|hollow|bevel|cube" | head -20

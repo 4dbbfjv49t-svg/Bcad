@@ -382,6 +382,20 @@ enum SelfTest {
         let bevelled = lib.body(upstanding.id).map { if case .bevel = $0.node { true } else { false } } == true
         check("an Angles bevel beside a rounding goes in", bevelled && lib.angleEdit == nil && lib.note == nil, lib.note ?? "")
 
+        // The angle editor opens on a side face of a rounded, hollowed cup.
+        let cupBody = Solid(name: "Cup", color: Palette.colors[4], node: .hollow(of: .round(of: box, picks: [top], radius: 2), open: [top], walls: [], thickness: 2),
+                        place: Placement(move: SIMD3(0, 0, 10)))
+        use([cupBody])
+        lib.selection = [cupBody.id]
+        lib.choose(.angles)
+        lib.edgePicks = [Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(-1, 0, 0), b: SIMD3(-10, 0, -1))]
+        let opening = Date()
+        lib.workWithAngles()
+        while lib.angleEdit == nil && Date().timeIntervalSince(opening) < 60 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        check("the angle editor opens on a rounded, hollowed cup", lib.angleEdit != nil, String(format: "%.1f s · %@", Date().timeIntervalSince(opening), lib.note ?? ""))
+        lib.closeAngles()
+        lib.cancelMode()
+
         // Problems left by other work (a save, a cut) aren't said at the next rebuild.
         _ = k.queue.sync { k.mesh(.hollow(of: box, open: [top], walls: [], thickness: 13)) }
         lib.note = nil
