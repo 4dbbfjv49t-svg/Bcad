@@ -192,7 +192,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     nonisolated func draw(in view: MTKView) {
         MainActor.assumeIsolated {
             let t0 = CFAbsoluteTimeGetCurrent() // probe
-            defer { let t = CFAbsoluteTimeGetCurrent() - t0; if t > 0.03 { NSLog("probe draw %.0f ms", t * 1000) } } // probe
+            defer { let t = CFAbsoluteTimeGetCurrent() - t0; if t > 0.03 { probe(String(format: "draw %.0f ms", t * 1000)) } } // probe
             withObservationTracking { render(view) } onChange: { [weak view] in
                 DispatchQueue.main.async { MainActor.assumeIsolated { (view as? CadView)?.redraw() } }
             }

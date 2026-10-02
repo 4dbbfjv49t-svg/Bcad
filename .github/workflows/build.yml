@@ -240,6 +240,7 @@ jobs:
           sleep 2
           rm -rf "$HOME/Library/Application Support/Bcad"
           defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
+          rm -f /tmp/bcad-probe.txt
           echo "— cold start with a saved rounded cup, ring and torus"
           open -a "$APP" "$D/kept.3mf"
           shot ui-00-kept 14
@@ -277,10 +278,9 @@ jobs:
           $U press Apply; sleep 8
           shot ui-08-angled
           $U tree | grep -iE "layers|rounding|hollow|bevel|cube" | head -20
-          log show --last 20m --style compact --predicate 'process == "Bcad" AND eventMessage CONTAINS "probe"' > "$RUNNER_TEMP/probe.txt" || true
-          echo "probe lines: $(wc -l < "$RUNNER_TEMP/probe.txt"), slow draws: $(grep -c 'probe draw' "$RUNNER_TEMP/probe.txt")"
-          grep -v 'probe draw' "$RUNNER_TEMP/probe.txt" | grep -v 'fly step [2-9]$\|fly step [12][0-9]$' | tail -120
-          sed -n '/angles pressed/,$p' "$RUNNER_TEMP/probe.txt" | head -300
+          echo "slow draws: $(grep -c ' draw ' /tmp/bcad-probe.txt)"
+          grep -v ' draw \| fly step [2-9]$\| fly step [12][0-9]$' /tmp/bcad-probe.txt | tail -150
+          sed -n '/angles pressed/,$p' /tmp/bcad-probe.txt | head -300
           $U key 12 cmd; shot ui-09-quit 2
           $U press "Don't Save"; sleep 3
           pkill -x Bcad || true
