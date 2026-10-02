@@ -179,6 +179,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The bed's lines, made again only when the bed, the theme, the accent or the brightness changes.
     private var bedLines: (key: [Float], buffer: MTLBuffer, count: Int)?
     private let start = CACurrentMediaTime()
+    // Frames in a row that found no drawable.
+    private var missed = 0
     weak var view: CadView?
     let lib = Workbench.shared
 
@@ -292,7 +294,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Read before anything can bail out, so a frame without a drawable still waits for the next change.
         _ = lib.sceneVersion
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
-              let cmd = queue.makeCommandBuffer(), let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+              let cmd = queue.makeCommandBuffer(), let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else {
+            // No drawable free yet (the GPU is still on earlier frames): this frame is tried again shortly, or a change made
+            // now (a ruler's end, a hover) would wait undrawn for the next change of the scene.
+            if missed < 40 {
+                missed += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in MainActor.assumeIsolated { self?.view?.redraw() } }
+            }
+            return
+        }
+        missed = 0
         if lib.requestFit, fit() { lib.requestFit = false }
         var f = frame(view.bounds.size)
         enc.setVertexBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
