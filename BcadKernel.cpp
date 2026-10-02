@@ -5,7 +5,6 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
-#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -1147,112 +1146,54 @@ static TopoDS_Shape hollowWith(const TopoDS_Shape &shape, const std::vector<Topo
   return TopoDS_Shape();
 }
 
-// Rounded faces that bulge outward with a radius of at most r and meet a neighbour smoothly (roundings, not a whole
-// cylinder): an inward offset of r or more has nothing left of them to shrink.
-static TopTools_ListOfShape convexRoundings(const TopoDS_Shape &shape, double r) {
-  TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
-  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
-  TopTools_IndexedMapOfShape faces;
-  TopExp::MapShapes(shape, TopAbs_FACE, faces);
-  TopTools_ListOfShape out;
-  for (int k = 1; k <= faces.Extent(); k++) {
-    TopoDS_Face f = TopoDS::Face(faces(k));
-    if (BRep_Tool::Surface(f).IsNull()) continue;
-    BRepAdaptor_Surface surf(f);
-    if (surf.GetType() == GeomAbs_Plane) continue;
-    BRepLProp_SLProps lp(surf, (surf.FirstUParameter() + surf.LastUParameter()) / 2, (surf.FirstVParameter() + surf.LastVParameter()) / 2, 2,
-                         1e-6);
-    if (!lp.IsCurvatureDefined()) continue;
-    double k1 = lp.MaxCurvature(), k2 = lp.MinCurvature(), bend = fabs(k1) > fabs(k2) ? k1 : k2;
-    // Curvature counts positive when the face bends towards its surface's normal; outward-bulging bends away from the
-    // outward normal.
-    double outward = f.Orientation() == TopAbs_REVERSED ? -1 : 1;
-    if (fabs(bend) < 1 / (r + 1e-6) || outward * bend >= 0) continue;
-    bool smooth = false;
-    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More() && !smooth; ex.Next()) {
-      int i = edgeFaces.FindIndex(ex.Current());
-      if (!i) continue;
-      for (TopTools_ListOfShape::Iterator it(edgeFaces(i)); it.More() && !smooth; it.Next()) {
-        TopoDS_Face g = TopoDS::Face(it.Value());
-        smooth = !g.IsSame(f) && BRepLib::ContinuityOfFaces(TopoDS::Edge(ex.Current()), f, g, 0.0175) >= GeomAbs_G1;
-      }
-    }
-    if (smooth) out.Append(f);
-  }
-  return out;
-}
-
-BKShape *bk_hollow(const BKShape *s, const double *open, int openCount, const double *walls, const double *wallThickness, int wallCount,
-                   double thickness, int *missing) {
+BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount, const double *open, int openCount, const double *walls,
+                   const double *wallThickness, int wallCount, double thickness, int *missing) {
   if (missing) *missing = 0;
   if (!s) return nullptr;
   return guarded("hollow", [&]() -> TopoDS_Shape {
     need(std::isfinite(thickness) && finite(open, openCount * 6) && finite(walls, wallCount * 6) && finite(wallThickness, wallCount),
          "walls must be numbers");
+    // The picked faces on a shape; false when one isn't there.
+    auto picked = [&](const TopoDS_Shape &x, std::vector<TopoDS_Face> &openings, std::vector<std::pair<TopoDS_Face, double>> &own, int &lost) {
+      TopTools_IndexedMapOfShape faces;
+      TopExp::MapShapes(x, TopAbs_FACE, faces);
+      double tol = pickTolerance(x);
+      auto face = [&](const double *q) { return findFace(faces, gp_Vec(q[0], q[1], q[2]), gp_Pnt(q[3], q[4], q[5]), tol); };
+      for (int i = 0; i < openCount; i++) {
+        TopoDS_Face f = face(open + i * 6);
+        if (f.IsNull()) lost++;
+        else openings.push_back(f);
+      }
+      for (int i = 0; i < wallCount; i++) {
+        TopoDS_Face f = face(walls + i * 6);
+        if (f.IsNull()) lost++;
+        else own.emplace_back(f, std::max(wallThickness[i], 0.01));
+      }
+    };
     const TopoDS_Shape &shape = s->shape;
-    TopTools_IndexedMapOfShape faces;
-    TopExp::MapShapes(shape, TopAbs_FACE, faces);
-    double tol = pickTolerance(shape);
-    int miss = 0;
-    auto face = [&](const double *q) { return findFace(faces, gp_Vec(q[0], q[1], q[2]), gp_Pnt(q[3], q[4], q[5]), tol); };
     std::vector<TopoDS_Face> openings;
     std::vector<std::pair<TopoDS_Face, double>> own;
-    for (int i = 0; i < openCount; i++) {
-      TopoDS_Face f = face(open + i * 6);
-      if (f.IsNull()) miss++;
-      else openings.push_back(f);
-    }
-    for (int i = 0; i < wallCount; i++) {
-      TopoDS_Face f = face(walls + i * 6);
-      if (f.IsNull()) miss++;
-      else own.emplace_back(f, std::max(wallThickness[i], 0.01));
-    }
+    int miss = 0;
+    picked(shape, openings, own, miss);
     if (missing) *missing = miss;
     TopoDS_Shape out = hollowWith(shape, openings, own, thickness);
     if (!out.IsNull()) return out;
-    // Roundings no larger than the walls leave nothing to shrink inward, and an opening edged by roundings doesn't offset
-    // at all: the shape is hollowed with roundings taken off (sharp), and only what lies inside the rounded shape is
-    // kept, so the outside stays rounded. As few roundings as possible come off: those that are too small, then those
-    // around the openings too, then all.
-    double deepest = thickness;
-    for (auto &[f, t] : own) deepest = std::max(deepest, t);
-    TopTools_ListOfShape small = convexRoundings(shape, deepest), all = convexRoundings(shape, 1e9), rim = small;
-    TopTools_IndexedMapOfShape openEdges, taken;
-    for (auto &f : openings) TopExp::MapShapes(f, TopAbs_EDGE, openEdges);
-    for (TopTools_ListOfShape::Iterator it(small); it.More(); it.Next()) taken.Add(it.Value());
-    for (TopTools_ListOfShape::Iterator it(all); it.More(); it.Next()) {
-      bool borders = false;
-      for (TopExp_Explorer ex(it.Value(), TopAbs_EDGE); ex.More() && !borders; ex.Next()) borders = openEdges.Contains(ex.Current());
-      if (borders && !taken.Contains(it.Value())) rim.Append(it.Value());
-    }
-    int tried = 0;
-    for (const TopTools_ListOfShape *off : {&small, &rim, &all}) {
-      if (off->Extent() <= tried) continue;
-      tried = off->Extent();
+    // Roundings no thicker than the walls leave nothing to shrink inward, and an opening edged by roundings doesn't
+    // offset at all: the shape without them is hollowed instead, and only what lies inside the rounded shape is kept,
+    // so the outside stays rounded.
+    double full = volumeOf(shape);
+    for (int k = 0; k < sharpCount; k++) {
+      if (!sharp[k]) continue;
+      std::vector<TopoDS_Face> sharpOpenings;
+      std::vector<std::pair<TopoDS_Face, double>> sharpOwn;
+      int lost = 0;
+      picked(sharp[k]->shape, sharpOpenings, sharpOwn, lost);
+      if (lost > miss) continue;
       try {
-        BRepAlgoAPI_Defeaturing sharpen;
-        sharpen.SetShape(shape);
-        sharpen.AddFacesToRemove(*off);
-        sharpen.SetToFillHistory(true);
-        sharpen.Build();
-        if (!sharpen.IsDone() || sharpen.HasErrors()) continue;
-        // Faces of the shape as they are in the sharp one (null when taken off: then this way doesn't do what was asked).
-        auto moved = [&](const TopoDS_Face &f) -> TopoDS_Face {
-          if (sharpen.IsDeleted(f)) return TopoDS_Face();
-          const TopTools_ListOfShape &m = sharpen.Modified(f);
-          return m.IsEmpty() ? f : TopoDS::Face(m.First());
-        };
-        std::vector<TopoDS_Face> sharpOpenings;
-        std::vector<std::pair<TopoDS_Face, double>> sharpOwn;
-        for (auto &f : openings)
-          if (TopoDS_Face g = moved(f); !g.IsNull()) sharpOpenings.push_back(g);
-        for (auto &[f, t] : own)
-          if (TopoDS_Face g = moved(f); !g.IsNull()) sharpOwn.emplace_back(g, t);
-        if (sharpOpenings.size() != openings.size() || sharpOwn.size() != own.size()) continue;
-        TopoDS_Shape hollowed = hollowWith(sharpen.Shape(), sharpOpenings, sharpOwn, thickness);
+        TopoDS_Shape hollowed = hollowWith(sharp[k]->shape, sharpOpenings, sharpOwn, thickness);
         if (hollowed.IsNull()) continue;
         out = common(shape, hollowed);
-        double v = volumeOf(out), full = volumeOf(shape);
+        double v = volumeOf(out);
         if (v > 0 && v < full * 0.999 && BRepCheck_Analyzer(out).IsValid()) return out;
       } catch (Standard_Failure &) {
       }

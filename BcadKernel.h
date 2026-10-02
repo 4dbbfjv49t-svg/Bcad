@@ -68,8 +68,10 @@ BKSection *bk_section(const BKShape *s, int kind, const double *pick, double rad
 void bk_section_free(BKSection *section);
 // Hollows a solid inward, keeping its outside. open: faces removed as openings; walls: faces with their own thickness.
 // Faces are given as 6 numbers each (normal, centroid). Without openings the result is closed with an inner void.
-BKShape *bk_hollow(const BKShape *s, const double *open, int openCount, const double *walls, const double *wallThickness, int wallCount,
-                   double thickness, int *missing);
+// sharp: the same solid with roundings left out, tried in turn when the solid itself doesn't offset (its roundings are
+// no thicker than the walls): that one is hollowed, and only what lies inside the solid is kept.
+BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount, const double *open, int openCount, const double *walls,
+                   const double *wallThickness, int wallCount, double thickness, int *missing);
 // Separate solids in a shape: a merge of parts that don't touch stays in pieces.
 int bk_piece_count(const BKShape *s);
 BKShape *bk_copy(const BKShape *s);

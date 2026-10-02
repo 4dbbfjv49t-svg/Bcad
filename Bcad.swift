@@ -371,6 +371,15 @@ indirect enum Node: Codable, Equatable, Sendable {
         }
     }
 
+    // The same shape with its roundings up to radius r left out, inside merged parts too.
+    func sharp(upTo r: Double) -> Node {
+        switch self {
+        case .round(let n, _, let radius) where radius <= r: n.sharp(upTo: r)
+        case .group(let op, let parts): .group(op: op, parts: parts.map { var p = $0; p.node = p.node.sharp(upTo: r); return p })
+        default: inner.map { wrapping($0.sharp(upTo: r)) } ?? self
+        }
+    }
+
     func replacingBase(_ f: (Node) -> Node) -> Node {
         if let n = inner { return wrapping(n.replacingBase(f)) }
         return f(self)
@@ -461,6 +470,10 @@ final class ShapeRef: @unchecked Sendable {
     deinit { bk_free(ptr) }
     // The pointer is valid only inside the closure: ARC may free a shape right after its last use, not at the end of scope.
     func with<T>(_ body: (OpaquePointer) -> T) -> T { withExtendedLifetime(self) { body(ptr) } }
+    // Several shapes' pointers at once, as a C array.
+    static func with<T>(_ refs: [ShapeRef], _ body: (UnsafePointer<OpaquePointer?>?) -> T) -> T {
+        withExtendedLifetime(refs) { refs.map { Optional($0.ptr) }.withUnsafeBufferPointer { body($0.baseAddress) } }
+    }
 }
 
 // A circle on a shape: a hole's or a peg's rim, the round edge of a cylinder or a ring.
@@ -699,8 +712,18 @@ final class Kernel: @unchecked Sendable {
             let faces = open.flatMap { [$0.a.x, $0.a.y, $0.a.z, $0.b.x, $0.b.y, $0.b.z] }
             let own = walls.flatMap { [$0.face.a.x, $0.face.a.y, $0.face.a.z, $0.face.b.x, $0.face.b.y, $0.face.b.z] }
             let values = walls.map(\.thickness)
+            // Kept for when the shape itself doesn't offset: the shape without the roundings no thicker than the walls,
+            // then without any (each only when it builds as asked). What building them says isn't said of this hollow.
+            var sharp: [ShapeRef] = []
+            for n in [of.sharp(upTo: values.reduce(thickness, max)), of.sharp(upTo: .infinity)] where n != of {
+                let mark = problems.count
+                if let r = shape(n), !problems[mark...].contains(where: Self.failure), !sharp.contains(where: { $0 === r }) { sharp.append(r) }
+                problems.removeSubrange(mark...)
+            }
             var missing: Int32 = 0
-            let out = s.with { bk_hollow($0, faces, Int32(open.count), own, values, Int32(walls.count), thickness, &missing) }
+            let out = s.with { sp in
+                ShapeRef.with(sharp) { bk_hollow(sp, $0, Int32(sharp.count), faces, Int32(open.count), own, values, Int32(walls.count), thickness, &missing) }
+            }
             if missing > 0 { problems.append("missing") }
             if let out { return out }
             problems.append("hollow")
@@ -746,7 +769,6 @@ final class Kernel: @unchecked Sendable {
 
     // The shape cut across a picked edge, for the 2D angle editor.
     func section(_ node: Node, _ pick: Pick) -> Section? {
-        probe(String(format: "section cached %d", cache[key(node)] != nil ? 1 : 0)) // probe
         guard let s = shape(node) else { return nil }
         let data = [pick.a.x, pick.a.y, pick.a.z, pick.b.x, pick.b.y, pick.b.z]
         guard let c = s.with({ bk_section($0, pick.kind, data, 20) }) else { return nil }
@@ -1262,7 +1284,6 @@ final class Workbench: DesignHost {
     }
 
     func flash(_ text: String) {
-        probe("flash " + text) // probe
         flashTask?.cancel()
         withAnimation(Neon.spring) { note = text }
         flashTask = Task { [weak self] in
@@ -1316,9 +1337,7 @@ final class Workbench: DesignHost {
             guard !Task.isCancelled, let self, self.trying else { return }
             withAnimation(Neon.spring) { self.busy = note }
         }
-        probe("try start") // probe
         Kernel.shared.queue.async {
-            probe("try queue start") // probe
             Kernel.shared.clearance = clearance
             var problems: [String] = [], ok = true
             for n in nodes {
@@ -1329,7 +1348,6 @@ final class Workbench: DesignHost {
             if !ok && !problems.contains(where: Kernel.failure) { problems.append("failed") }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    probe("try main") // probe
                     shown.cancel()
                     self.trying = false
                     self.ended(note)
@@ -1870,17 +1888,12 @@ final class Workbench: DesignHost {
     func workWithAngles() {
         guard let id = editBody, let b = body(id), let first = edgePicks.first, !angleOpening else { return }
         angleOpening = true
-        probe("angles pressed") // probe
-        Task { for _ in 0..<400 { let t0 = CFAbsoluteTimeGetCurrent(); try? await Task.sleep(for: .milliseconds(50)); let gap = CFAbsoluteTimeGetCurrent() - t0; if gap > 0.2 { probe(String(format: "main stalled %.0f ms", gap * 1000)) } } } // probe
         let node = b.node, picks = edgePicks, clearance = settings.clearance
         Kernel.shared.queue.async {
-            probe("angles queue start") // probe
             Kernel.shared.clearance = clearance
             let section = Kernel.shared.section(node, first)
-            probe("angles section done") // probe
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    probe("angles main") // probe
                     guard let section, self.mode == .angles, let b = self.body(id) else {
                         self.angleOpening = false
                         if section == nil { self.flash(L("This edge can't be shown in a cut")) }
@@ -1891,7 +1904,6 @@ final class Workbench: DesignHost {
                     let along = simd_normalize((m * SIMD4(section.direction, 0)).xyz)
                     self.cameraBeforeAngles = self.camera
                     self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
-                        probe("angles flown") // probe
                         withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) {
                             self.angleEdit = AngleEdit(body: id, picks: picks, section: section)
                         }
@@ -1951,7 +1963,6 @@ final class Workbench: DesignHost {
             for i in 1...steps {
                 try? await Task.sleep(for: .milliseconds(16))
                 guard let self, !Task.isCancelled else { return }
-                probe(String(format: "fly step %d", i)) // probe
                 let t = Float(i) / Float(steps), k = t * t * (3 - 2 * t)
                 self.camera.target = from.target + (target - from.target) * k
                 self.camera.yaw = from.yaw + turn * k
@@ -2011,9 +2022,7 @@ final class Workbench: DesignHost {
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
         let note = L("Building…")
         if slow { busy = note }
-        probe(String(format: "rebuild %d", todo.count)) // probe
         Kernel.shared.queue.async {
-            probe("rebuild queue start") // probe
             Kernel.shared.clearance = clearance
             // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
             _ = Kernel.shared.takeProblems()
@@ -2033,7 +2042,6 @@ final class Workbench: DesignHost {
                 }
             }
             let found = trouble
-            probe("rebuild queue done") // probe
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.building = false
@@ -2378,8 +2386,3 @@ enum Edits {
         return NSApp.sendAction(action, to: nil, from: nil)
     }
 }
-
-func probe(_ s: String) { // probe
-    let line = ISO8601DateFormatter.string(from: Date(), timeZone: .gmt, formatOptions: [.withInternetDateTime, .withFractionalSeconds]) + " " + s + "\n" // probe
-    if let h = FileHandle(forWritingAtPath: "/tmp/bcad-probe.txt") { h.seekToEndOfFile(); h.write(Data(line.utf8)); h.closeFile() } else { FileManager.default.createFile(atPath: "/tmp/bcad-probe.txt", contents: Data(line.utf8)) } // probe
-} // probe

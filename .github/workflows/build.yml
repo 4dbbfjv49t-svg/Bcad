@@ -240,7 +240,6 @@ jobs:
           sleep 2
           rm -rf "$HOME/Library/Application Support/Bcad"
           defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
-          rm -f /tmp/bcad-probe.txt
           echo "— cold start with a saved rounded cup, ring and torus"
           open -a "$APP" "$D/kept.3mf"
           shot ui-00-kept 14
@@ -271,17 +270,10 @@ jobs:
           $U press Angles; sleep 1
           $U view -130 10; sleep 1
           $U press "Work with angles"
-          sudo sample Bcad 8 -file "$RUNNER_TEMP/sample.txt" >/dev/null 2>&1 || echo "sample failed"
-          shot ui-07a-angles-8s 0
-          awk '/com.apple.main-thread/{on=1; print; next} on && /^ *[0-9]+ Thread_/{exit} on' "$RUNNER_TEMP/sample.txt" | awk '{ n=$0; gsub(/^[ +!:|]*/,"",n); split(n,a," "); if (a[1]+0 >= 300) print substr($0,1,230) }' | head -220
-          sed -n '/Sort by top of stack/,/Binary Images/p' "$RUNNER_TEMP/sample.txt" | head -45
-          shot ui-07-angles 40
-          $U press Apply; sleep 8
+          shot ui-07-angles 75
+          $U press Apply; sleep 30
           shot ui-08-angled
           $U tree | grep -iE "layers|rounding|hollow|bevel|cube" | head -20
-          echo "slow draws: $(grep -c ' draw ' /tmp/bcad-probe.txt)"
-          grep -v ' draw \| fly step [2-9]$\| fly step [12][0-9]$' /tmp/bcad-probe.txt | tail -150
-          sed -n '/angles pressed/,$p' /tmp/bcad-probe.txt | head -300
           $U key 12 cmd; shot ui-09-quit 2
           $U press "Don't Save"; sleep 3
           pkill -x Bcad || true

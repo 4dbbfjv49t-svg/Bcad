@@ -151,7 +151,7 @@ enum SelfTest {
         check("too thick walls reported", k.takeProblems().contains("hollow"))
 
         // Rounded shapes: hollowed with walls as thick as the rounding (the defaults), closed and with the top open; a
-        // bevel and a rounding beside an earlier rounding.
+        // bevel and a rounding beside an earlier rounding; different roundings hollowed.
         let roundAll = Node.round(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 2)
         let roundAllVolume = mesh(roundAll)?.volume ?? 0
         let roundShell = mesh(.hollow(of: roundAll, open: [], walls: [], thickness: 2))
@@ -170,6 +170,12 @@ enum SelfTest {
               String(format: "%.2f mm³", bevelBeside?.volume ?? 0))
         let roundBeside = mesh(.round(of: upright, picks: [face], radius: 2))
         check("rounding beside a rounding", roundBeside?.valid == true && (roundBeside?.volume ?? 8000) < uprightVolume - 30 && k.takeProblems().isEmpty)
+        // Different roundings meeting at the corners (1 mm up the sides, 2 mm round the top) hollow in moments, not minutes.
+        let started = Date()
+        let mixedCup = mesh(.hollow(of: .round(of: .round(of: box, picks: uprights, radius: 1), picks: [top], radius: 2), open: [top], walls: [], thickness: 2))
+        let took = Date().timeIntervalSince(started)
+        check("a cube rounded 1 mm up its sides and 2 mm round its top is hollowed", mixedCup?.valid == true && abs((mixedCup?.volume ?? 0) - 3309.6) < 1
+              && !k.takeProblems().contains("hollow") && took < 30, String(format: "%.2f mm³ · %.1f s", mixedCup?.volume ?? 0, took))
 
         let oval = mesh(.primitive(Primitive(kind: .oval, size: [20, 12, 90, 20])))
         check("oval cylinder", oval?.valid == true && abs((oval?.volume ?? 0) - .pi * 10 * 6 * 20) < 1, String(format: "%.2f mm³", oval?.volume ?? 0))
