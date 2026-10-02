@@ -387,6 +387,7 @@ enum SelfTest {
                         place: Placement(move: SIMD3(0, 0, 10)))
         use([cupBody])
         lib.selection = [cupBody.id]
+        lib.choose(.move)
         lib.choose(.angles)
         lib.edgePicks = [Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(-1, 0, 0), b: SIMD3(-10, 0, -1))]
         let opening = Date()
