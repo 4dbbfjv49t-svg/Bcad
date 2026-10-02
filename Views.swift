@@ -2027,7 +2027,10 @@ struct SettingsPane: View {
                 Button(L("Restore defaults")) { lib.restoreDefaults() }
                     .buttonStyle(PillStyle(tint: lib.accent2))
                     .padding(.top, 10)
-                Acknowledgements().padding(.top, 14)
+                // Only while Bcad is built on OpenCascade (its own engine reports no OpenCascade version).
+                if !String(cString: bk_occt_version()).isEmpty {
+                    Acknowledgements().padding(.top, 14)
+                }
             }
             .padding(.bottom, 12)
         }
