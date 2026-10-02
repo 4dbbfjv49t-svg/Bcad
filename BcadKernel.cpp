@@ -20,6 +20,7 @@
 #include <BRepFill.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
@@ -592,17 +593,28 @@ static double pickTolerance(const TopoDS_Shape &shape) {
   return std::max(0.3, diag * 0.02);
 }
 
-// The face whose centroid is nearest to c with a normal facing along n; null when none is within tol.
+// The face whose centroid is nearest to c with a normal facing along n; failing that, the face c lies on (one made larger
+// or smaller by a rounding or bevel at its edge has its middle elsewhere); null when none is within tol.
 static TopoDS_Face findFace(const TopTools_IndexedMapOfShape &faces, const gp_Vec &n, const gp_Pnt &c, double tol) {
   double best = tol;
   int hit = 0;
+  std::vector<bool> facing(faces.Extent() + 1, true);
   for (int k = 1; k <= faces.Extent(); k++) {
     gp_Pnt fc;
     gp_Vec fn;
     faceInfo(TopoDS::Face(faces(k)), fc, fn);
-    double dist = fc.Distance(c);
-    if (n.Magnitude() > 1e-9 && fn.Dot(n.Normalized()) < 0.7) dist += tol;
+    facing[k] = n.Magnitude() < 1e-9 || fn.Dot(n.Normalized()) >= 0.7;
+    double dist = fc.Distance(c) + (facing[k] ? 0 : tol);
     if (dist < best) best = dist, hit = k;
+  }
+  if (!hit) {
+    TopoDS_Vertex at = BRepBuilderAPI_MakeVertex(c).Vertex();
+    best = std::min(tol, 0.05);
+    for (int k = 1; k <= faces.Extent(); k++) {
+      if (!facing[k]) continue;
+      BRepExtrema_DistShapeShape d(at, faces(k));
+      if (d.IsDone() && d.Value() < best) best = d.Value(), hit = k;
+    }
   }
   return hit ? TopoDS::Face(faces(hit)) : TopoDS_Face();
 }

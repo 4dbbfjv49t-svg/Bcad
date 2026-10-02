@@ -256,23 +256,24 @@ jobs:
           $U hold Cube 0.5 0.5 60; sleep 2; $U key 3; sleep 2
           shot ui-02-cube
           $U press "Round edges"; sleep 1
-          $U view 0 -10; sleep 1
+          $U view 10 -110; sleep 1
           shot ui-03-round-pick
           $U press Apply; sleep 5
           shot ui-04-rounded
           $U press Hollow; sleep 1
-          $U view 0 -10; sleep 1
+          $U view 10 -110; sleep 1
           shot ui-05-hollow-pick
-          $U press Apply; sleep 10
+          $U press Apply; sleep 12
           shot ui-06-hollowed
-          $U tree | grep -iE "cube|walls|hollow|round" | head -20
-          echo "— Angles on the rounded, hollowed cube"
+          $U tree | grep -iE "cube|walls|hollow|round|opening" | head -20
+          echo "— Angles beside the rounding, on the hollowed cube"
           $U press Angles; sleep 1
-          $U view 0 -10; sleep 1
+          $U view -130 10; sleep 1
           $U press "Work with angles"; sleep 4
           shot ui-07-angles
-          $U press Apply; sleep 6
+          $U press Apply; sleep 8
           shot ui-08-angled
+          $U tree | grep -iE "layers|rounding|hollow|bevel|cube" | head -20
           $U key 12 cmd; shot ui-09-quit 2
           $U press "Don't Save"; sleep 3
           pkill -x Bcad || true
