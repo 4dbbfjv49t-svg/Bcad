@@ -271,10 +271,11 @@ jobs:
           $U press Angles; sleep 1
           $U view -130 10; sleep 1
           $U press "Work with angles"
-          shot ui-07a-angles-1s 1
-          shot ui-07b-angles-3s 1
-          $U tree | grep -iE "angle|corner|apply|cancel|radius" | head -20
-          shot ui-07-angles 6
+          sudo sample Bcad 8 -file "$RUNNER_TEMP/sample.txt" >/dev/null 2>&1 || echo "sample failed"
+          shot ui-07a-angles-8s 0
+          awk '/com.apple.main-thread/{on=1; print; next} on && /^ *[0-9]+ Thread_/{exit} on' "$RUNNER_TEMP/sample.txt" | awk '{ n=$0; gsub(/^[ +!:|]*/,"",n); split(n,a," "); if (a[1]+0 >= 300) print substr($0,1,230) }' | head -220
+          sed -n '/Sort by top of stack/,/Binary Images/p' "$RUNNER_TEMP/sample.txt" | head -45
+          shot ui-07-angles 40
           $U press Apply; sleep 8
           shot ui-08-angled
           $U tree | grep -iE "layers|rounding|hollow|bevel|cube" | head -20
