@@ -1055,9 +1055,11 @@ struct ScreenSwitch: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        // Read here rather than in each segment, so the switch follows a screen chosen as the inspector appears (⌘B).
+        let current = lib.screen
         HStack(spacing: 2) {
             ForEach(Screen.allCases, id: \.self) { sc in
-                let on = sc == lib.screen
+                let on = sc == current
                 VStack(spacing: 2) {
                     Group {
                         if let icon = sc.icon {

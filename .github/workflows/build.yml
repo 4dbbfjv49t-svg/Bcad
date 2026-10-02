@@ -299,13 +299,12 @@ jobs:
           shot ui-02-renamed 0
           $U tree | grep -iE "bracket|untitled" | head -5
           echo "— a raised cube turned with a ring stays up"
-          $U hold Cube 0.5 0.5 60; sleep 3; $U key 3; sleep 2
+          $U hold Cube 0.5 0.5 60; sleep 3
           for i in 1 2 3; do $U key 116 shift; sleep 0.5; done
-          sleep 1
-          $U tree | grep -iE "^ *(x|y|z)$|position|size  " | head -8
+          sleep 1; $U key 3; sleep 2
           $U key 17; sleep 1
           shot ui-03-rings 1
-          for r in 0.15 0.16 0.17 0.14 0.18; do $U viewarc $r 40; sleep 1; done
+          for r in 0.15 0.16 0.17 0.14 0.18; do $U viewarc $r 40; sleep 1; $U tree | grep -E "Size  " | head -1; done
           sleep 2
           shot ui-04-turned 0
           $U key 5; sleep 1
@@ -319,6 +318,8 @@ jobs:
           $U key 51; sleep 1
           $U key 11 cmd; sleep 8
           shot ui-07-bolt 0
+          $U pressr Move; sleep 1; $U pressr Thread; sleep 1
+          shot ui-07-tabs 0
           $U pressr Head; sleep 1
           shot ui-08-heads 0
           $U pressr Head; sleep 1
