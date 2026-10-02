@@ -733,6 +733,8 @@ final class Kernel: @unchecked Sendable {
     func attempt(_ node: Node) -> (mesh: Mesh?, problems: [String]) {
         if let inner = node.inner { _ = shape(inner) }
         if case .group(_, let parts) = node { for p in parts { _ = shape(p.node) } }
+        // Built afresh: a failed try keeps the unchanged shape in the cache, which mustn't pass for a success next time.
+        cache[key(node)] = nil
         problems = []
         let m = mesh(node)
         return (m, takeProblems())
