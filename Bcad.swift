@@ -27,7 +27,7 @@ enum PrimKind: Int, Codable, CaseIterable, Sendable {
     case box, cylinder, cone, sphere, prism, torus, wedge, pyramid, hemisphere, bowl, ring, glass, oval, ovalTorus
 }
 
-struct Primitive: Codable, Equatable, Sendable {
+struct Primitive: Codable, Hashable, Sendable {
     var kind: PrimKind
     // Corners of a prism or pyramid; a torus's tube: 0 round, 3 a triangle with its point up, 6 a hexagon lying flat.
     var sides = 0
@@ -202,10 +202,18 @@ struct Primitive: Codable, Equatable, Sendable {
         }
     }
 
-    // Applies a scale to the sizes, keeping round shapes round (the axis changed most wins) and walls as they are; a torus's
-    // tube is its height, and stays thin enough for its ring.
+    // Applies a scale to the sizes. Stretched unevenly across, a cylinder becomes an oval cylinder and a torus an oval
+    // torus, just as the stretch shows; other round shapes stay round (the axis changed most wins). Walls stay as they are;
+    // a torus's tube is its height, and stays thin enough for its ring.
     mutating func scale(by s: SIMD3<Double>) {
         func most(_ v: [Double]) -> Double { v.max { abs($0 - 1) < abs($1 - 1) } ?? 1 }
+        if abs(s.x - s.y) > 1e-9 * max(abs(s.x), abs(s.y)) {
+            switch kind {
+            case .cylinder: kind = .oval; size = [size[0], size[0], 90, size[1]]
+            case .torus: kind = .ovalTorus; size = [size[0], size[0], 90, size[1]]
+            default: break
+            }
+        }
         let k = most([s.x, s.y])
         var next = size
         switch kind {
@@ -226,7 +234,7 @@ struct Primitive: Codable, Equatable, Sendable {
 }
 
 // A bolt or nut on an ISO metric coarse thread; the kernel knows every kind's sizes and what they may be (BcadKernel.h).
-struct Fastener: Codable, Equatable, Sendable {
+struct Fastener: Codable, Hashable, Sendable {
     // In the kernel's order (BK_ROD … BK_CONE_NUT).
     enum Kind: String, Codable, CaseIterable, Sendable {
         case rod, hex, hexCone, socket, socketCone, twelve, twelveCone, torx, torxCone, phHex, phHexCone, phCone
@@ -386,7 +394,7 @@ extension Fastener {
     }
 }
 
-struct Placement: Codable, Equatable, Sendable {
+struct Placement: Codable, Hashable, Sendable {
     var move = SIMD3<Double>(0, 0, 0)
     var turn = SIMD3<Double>(0, 0, 0)
     var scale = SIMD3<Double>(1, 1, 1)
@@ -443,12 +451,12 @@ extension SIMD4 {
     var xyz: SIMD3<Scalar> { SIMD3(x, y, z) }
 }
 
-struct Plane: Codable, Equatable, Sendable {
+struct Plane: Codable, Hashable, Sendable {
     var point: SIMD3<Double>
     var normal: SIMD3<Double>
 }
 
-struct Pick: Codable, Equatable, Sendable {
+struct Pick: Codable, Hashable, Sendable {
     var kind: Int32
     var a: SIMD3<Double>
     var b: SIMD3<Double>
@@ -468,7 +476,7 @@ func unit(_ v: SIMD3<Double>) -> SIMD3<Double> {
     return l > 1e-12 ? v / l : v
 }
 
-struct Part: Codable, Equatable, Sendable {
+struct Part: Codable, Hashable, Sendable {
     var node: Node
     var place: Placement
     var name: String?
@@ -476,12 +484,12 @@ struct Part: Codable, Equatable, Sendable {
 }
 
 // A face of a hollowed shape with its own wall thickness.
-struct Wall: Codable, Equatable, Sendable {
+struct Wall: Codable, Hashable, Sendable {
     var face: Pick
     var thickness: Double
 }
 
-indirect enum Node: Codable, Equatable, Sendable {
+indirect enum Node: Codable, Hashable, Sendable {
     case primitive(Primitive)
     case fastener(Fastener)
     case group(op: Int32, parts: [Part])
@@ -750,20 +758,22 @@ final class Worker: @unchecked Sendable {
 final class Kernel: @unchecked Sendable {
     static let shared = Kernel()
     let queue = Worker()
-    private var cache: [String: ShapeRef] = [:]
+    private var cache: [Key: ShapeRef] = [:]
     private(set) var problems: [String] = []
     var clearance = 0.2
 
-    private func key(_ node: Node) -> String {
-        let e = JSONEncoder()
-        e.outputFormatting = .sortedKeys
-        let data = (try? e.encode(node)) ?? Data()
-        return String(format: "%.3f|", clearance) + data.base64EncodedString()
+    // A shape as built for a clearance (to the thousandth of a millimetre): hashed as it is, nothing encoded.
+    private struct Key: Hashable {
+        let node: Node
+        let clearance: Double
     }
+
+    private func key(_ node: Node) -> Key { Key(node: node, clearance: (clearance * 1000).rounded() / 1000) }
 
     func takeProblems() -> [String] { defer { problems = [] }; return problems }
 
-    func shape(_ node: Node) -> ShapeRef? {
+    // keep: false for a shape shown only for a moment (a step of a live resize), so it doesn't crowd out the others.
+    func shape(_ node: Node, keep: Bool = true) -> ShapeRef? {
         let k = key(node)
         if let s = cache[k] { return s }
         guard let p = build(node) else { return nil }
@@ -773,8 +783,9 @@ final class Kernel: @unchecked Sendable {
             problems.append("empty")
             return nil
         }
-        if cache.count > 400 { cache.removeAll() }
         let ref = ShapeRef(p)
+        guard keep else { return ref }
+        if cache.count > 400 { cache.removeAll() }
         cache[k] = ref
         return ref
     }
@@ -924,8 +935,8 @@ final class Kernel: @unchecked Sendable {
         return Section(loops: loops, angle: sec.angle, point: point, direction: direction)
     }
 
-    func mesh(_ node: Node, deflection: Double = 0.05) -> Mesh? {
-        guard let s = shape(node), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
+    func mesh(_ node: Node, deflection: Double = 0.05, keep: Bool = true) -> Mesh? {
+        guard let s = shape(node, keep: keep), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
         defer { bk_mesh_free(m) }
         let mesh = Mesh(m)
         // A shape reaching past 100 m (or nowhere) is broken geometry; shown, it would throw the view out.
@@ -934,6 +945,17 @@ final class Kernel: @unchecked Sendable {
             return nil
         }
         return mesh
+    }
+
+    // The box a shape fills placed as given (turned or stretched any way); `exact` false where it's only as close as its
+    // mesh.
+    func bounds(_ node: Node, _ place: Placement) -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? {
+        guard let s = shape(node) else { return nil }
+        var out = [Double](repeating: 0, count: 6)
+        let m = place.kernel
+        let r = s.with { sp in m.withUnsafeBufferPointer { bk_bounds(sp, $0.baseAddress, &out) } }
+        guard r >= 0, out.allSatisfy(\.isFinite) else { return nil }
+        return (SIMD3(out[0], out[1], out[2]), SIMD3(out[3], out[4], out[5]), r == 1)
     }
 
     // World-space shape of a body (for export).
@@ -1626,10 +1648,15 @@ final class Workbench: DesignHost {
     }
 
     func add(_ node: Node, name: String) {
-        let body = Solid(name: name, color: nextColor(), node: node, place: Placement(move: spawnPoint()))
+        var place = Placement(move: spawnPoint())
+        // A shape whose size is known before it's built (a primitive, a bolt, centred on its own origin) goes straight down
+        // onto the bed: nothing waits for its build, and a copy made at once sits where it does.
+        let known = settings.dropToBed ? node.extent(clearance: settings.clearance) : nil
+        if let e = known { place.move.z = e.z / 2 }
+        let body = Solid(name: name, color: nextColor(), node: node, place: place)
         commit { $0.bodies.append(body) }
         selection = [body.id]
-        dropSoon([body.id])
+        if known == nil { dropSoon([body.id]) }
     }
 
     func addShape(_ k: ShapeKind) {
@@ -1685,36 +1712,125 @@ final class Workbench: DesignHost {
     // The whole bed in view, for an empty scene.
     var bedFraming: (target: SIMD3<Float>, distance: Float) { (.zero, Float(max(settings.bed.x, settings.bed.y)) * 2.4) }
 
-    // World boxes of turned shapes over all their vertices, kept per mesh and placement: each frame and drag step asks
-    // for them several times.
-    @ObservationIgnored private var turnedBoxes: [UUID: (stamp: Int, place: Placement, lo: SIMD3<Double>, hi: SIMD3<Double>)] = [:]
+    // A turned shape's box as it stands before it's moved: per mesh, turn and stretch (a move only shifts it, so a drag
+    // costs nothing). First from every point of its mesh (never past the shape, short of a curved one by the chord error
+    // at most), then exactly, from the kernel, asked in the background so a turn never waits for it.
+    private struct Stance: Equatable {
+        var stamp: Int
+        var turn: SIMD3<Double>
+        var scale: SIMD3<Double>
+    }
+    @ObservationIgnored private var turnedBoxes: [UUID: (stance: Stance, lo: SIMD3<Double>, hi: SIMD3<Double>, exact: Bool)] = [:]
+    // Boxes asked of the kernel and not yet answered, and the stance wanted next for each (the latest turn).
+    @ObservationIgnored private var boxesAsked: Set<UUID> = []
+    @ObservationIgnored private var boxesWanted: [UUID: Stance] = [:]
 
-    // World bounding box of a body: exact from the shape's box when unrotated, from every vertex of the mesh otherwise.
+    // World bounding box of a body: the shape's own box when unturned (exact, from the kernel), the turned box otherwise.
     func worldBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
         guard let m = meshes[b.id], !m.vertices.isEmpty else { return nil }
         if b.place.turn == SIMD3(0, 0, 0) {
             let a = m.low * b.place.scale + b.place.move, c = m.high * b.place.scale + b.place.move
             return (simd_min(a, c), simd_max(a, c))
         }
-        if let k = turnedBoxes[b.id], k.stamp == m.stamp, k.place == b.place { return (k.lo, k.hi) }
-        let mat = b.place.matrix
+        let stance = Stance(stamp: m.stamp, turn: b.place.turn, scale: b.place.scale)
+        if let k = turnedBoxes[b.id], k.stance == stance { return (k.lo + b.place.move, k.hi + b.place.move) }
+        var still = b.place
+        still.move = .zero
+        let mat = still.matrix
         var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
         for v in m.vertices {
             let w = mat * SIMD4<Double>(Double(v.x), Double(v.y), Double(v.z), 1)
-            lo = simd_min(lo, SIMD3(w.x, w.y, w.z))
-            hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
+            lo = simd_min(lo, w.xyz)
+            hi = simd_max(hi, w.xyz)
         }
-        turnedBoxes[b.id] = (m.stamp, b.place, lo, hi)
-        return (lo, hi)
+        turnedBoxes[b.id] = (stance, lo, hi, false)
+        askBox(b.id, stance)
+        return (lo + b.place.move, hi + b.place.move)
+    }
+
+    // The exact box of a turned shape, from the kernel in the background, one at a time per shape (the latest turn next).
+    private func askBox(_ id: UUID, _ stance: Stance) {
+        guard !boxesAsked.contains(id) else { boxesWanted[id] = stance; return }
+        guard let b = body(id) else { return }
+        boxesAsked.insert(id)
+        let node = b.node, clearance = settings.clearance
+        var still = b.place
+        still.move = .zero
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            let box = Kernel.shared.bounds(node, still)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.boxesAsked.remove(id)
+                    if let box, let k = self.turnedBoxes[id], k.stance == stance {
+                        self.turnedBoxes[id] = (stance, box.low, box.high, true)
+                        self.sceneVersion += 1
+                    }
+                    if let next = self.boxesWanted.removeValue(forKey: id), next != stance, self.turnedBoxes[id]?.stance == next {
+                        self.askBox(id, next)
+                    }
+                }
+            }
+        }
+    }
+
+    // A shape's box exactly, waiting for the kernel when it hasn't said yet: for putting shapes down on the bed.
+    func exactBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
+        guard let box = worldBounds(b) else { return nil }
+        if b.place.turn == SIMD3(0, 0, 0) { return box }
+        if let k = turnedBoxes[b.id], k.exact, k.stance.turn == b.place.turn, k.stance.scale == b.place.scale { return box }
+        let node = b.node, clearance = settings.clearance
+        var still = b.place
+        still.move = .zero
+        let exact = Kernel.shared.queue.sync { () -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? in
+            Kernel.shared.clearance = clearance
+            return Kernel.shared.bounds(node, still)
+        }
+        guard let exact else { return box }
+        return (exact.low + b.place.move, exact.high + b.place.move)
     }
 
     private func applyDrops() {
         guard !dropQueue.isEmpty else { return }
         for id in dropQueue {
-            guard let b = body(id), let (lo, _) = worldBounds(b) else { continue }
+            guard let b = body(id), let (lo, _) = exactBounds(b) else { continue }
             mutate(id) { $0.place.move.z -= lo.z }
         }
         dropQueue.removeAll()
+    }
+
+    // MARK: middles
+
+    // A shape's middle: the middle of its own box (as made, before it's turned), where it's placed. It stays put as the
+    // shape turns, and it's the shape's Position (for a primitive, simply where it's placed; for a merged or split shape,
+    // the middle of what there is).
+    func middle(_ b: Solid) -> SIMD3<Double> {
+        guard let m = meshes[b.id], !m.vertices.isEmpty else { return b.place.move }
+        return (b.place.matrix * SIMD4((m.low + m.high) / 2, 1)).xyz
+    }
+
+    // Where the selection turns about: the middle of its shapes' middles, which a turn about it leaves where it is (a box
+    // round them would move as uneven shapes turn).
+    var turnPivot: SIMD3<Double> {
+        let ms = selected.map(middle)
+        return ms.isEmpty ? .zero : ms.reduce(.zero, +) / Double(ms.count)
+    }
+
+    // A Position typed in: the shape moves so its middle is there.
+    func placeMiddle(_ id: UUID, axis i: Int, at v: Double) {
+        guard let b = body(id), v.isFinite else { return }
+        let d = v - middle(b)[i]
+        setPlace(id) { $0.move[i] += d }
+    }
+
+    // A turn typed in: the shape turns about its middle, which stays where it is.
+    func turn(_ id: UUID, to t: SIMD3<Double>) {
+        guard let b = body(id), t.finite else { return }
+        let c = middle(b), m = meshes[id].map { ($0.low + $0.high) / 2 } ?? .zero
+        setPlace(id) { p in
+            p.turn = t
+            p.move = c - p.rotation * (p.scale * m)
+        }
     }
 
     func deleteSelection() {
@@ -1725,7 +1841,8 @@ final class Workbench: DesignHost {
     }
 
     func duplicate() {
-        let copies = selected.map { b -> Solid in
+        let originals = selected
+        let copies = originals.map { b -> Solid in
             var c = b
             c.id = UUID()
             c.name = b.name
@@ -1733,6 +1850,12 @@ final class Workbench: DesignHost {
             return c
         }
         guard !copies.isEmpty else { return }
+        // A copy is the same shape: shown at once from its original's mesh (nothing to build), and still to go down onto
+        // the bed if its original is.
+        for (b, c) in zip(originals, copies) {
+            if let m = meshes[b.id], built[b.id] == b.node { meshes[c.id] = m; built[c.id] = c.node }
+            if dropQueue.contains(b.id) { dropQueue.insert(c.id) }
+        }
         commit { $0.bodies.append(contentsOf: copies) }
         selection = copies.map(\.id)
     }
@@ -1978,31 +2101,61 @@ final class Workbench: DesignHost {
         sceneVersion += 1
     }
 
+    // A resize under way: each shape as it began (its node and its own box, which a live resize changes as it goes) and the
+    // point of it that stays put (in those coordinates; for several shapes, each one's own origin), and the box round all
+    // of them as they began.
+    private struct Resize {
+        var node: Node
+        var low: SIMD3<Double>
+        var high: SIMD3<Double>
+        var keep = SIMD3<Double>(0, 0, 0)
+    }
+    @ObservationIgnored private var resizing: [UUID: Resize] = [:]
+    @ObservationIgnored private var resizeBox: (lo: SIMD3<Double>, hi: SIMD3<Double>)?
+
+    // Bcad's own engine builds a primitive in far less than a frame: a resize shows the very shape it makes as it goes (a
+    // cylinder grown oval, a sphere kept round), not a stretched picture of the old one. On OpenCascade, the stretched
+    // picture, the sizes taken in at the end.
+    static let liveResize = String(cString: bk_occt_version()).isEmpty
+
+    // A new resize begins (a handle pressed, a size typed in).
+    func beginResize() {
+        resizing = [:]
+        resizeBox = nil
+    }
+
     // A resize drag: the shapes in `starts` stretched by f along axis i (all axes when uniform), a lone shape along its own
     // axis, several along the world's, spreading from their shared box as one. The left, front and bottom sides stay put,
     // or the middle when symmetric.
     // low: the low side along axis i moves and the high one stays (a handle on the low side).
     func stretch(_ starts: [UUID: Placement], axis i: Int, by f: Double, uniform: Bool, symmetric: Bool, low: Bool = false) {
         let axes = uniform ? [0, 1, 2] : [i]
-        if starts.count == 1, let (id, s) = starts.first {
-            var keep = SIMD3<Double>(0, 0, 0)
-            if let m = meshes[id] {
-                keep = (m.low + m.high) / 2
-                if !symmetric { for k in axes { keep[k] = low && k == i ? m.high[k] : m.low[k] } }
-            }
-            var scale = s.scale
-            for k in axes { scale[k] *= f }
-            mutate(id) { $0.place.scale = scale; $0.place.move = s.move + s.rotation * ((s.scale - scale) * keep) }
-        } else {
+        if Set(starts.keys) != Set(resizing.keys) {
+            // As it begins: each shape's node and box before the resize changes them, and the box round all of them.
+            beginResize()
             var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
             for (id, s) in starts {
                 guard var b = body(id) else { continue }
+                let m = meshes[id]
+                resizing[id] = Resize(node: b.node, low: m?.low ?? .zero, high: m?.high ?? .zero)
                 b.place = s
                 if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
             }
-            guard lo.x.isFinite else { return }
-            var pivot = symmetric ? (lo + hi) / 2 : lo
-            if low, !symmetric { pivot[i] = hi[i] }
+            resizeBox = lo.x.isFinite ? (lo, hi) : nil
+        }
+        // Each shape's new stretch, and where in the world the point of it that stays put is.
+        var plan: [(id: UUID, start: Placement, scale: SIMD3<Double>, at: SIMD3<Double>)] = []
+        if starts.count == 1, let (id, s) = starts.first, var r = resizing[id] {
+            var keep = (r.low + r.high) / 2
+            if !symmetric { for k in axes { keep[k] = low && k == i ? r.high[k] : r.low[k] } }
+            r.keep = keep
+            resizing[id] = r
+            var scale = s.scale
+            for k in axes { scale[k] *= f }
+            plan.append((id, s, scale, s.move + s.rotation * (s.scale * keep)))
+        } else if let box = resizeBox {
+            var pivot = symmetric ? (box.lo + box.hi) / 2 : box.lo
+            if low, !symmetric { pivot[i] = box.hi[i] }
             var d = SIMD3<Double>(1, 1, 1)
             for k in axes { d[k] = f }
             for (id, s) in starts {
@@ -2014,30 +2167,76 @@ final class Workbench: DesignHost {
                     let r = s.rotation
                     scale[(0..<3).max { abs(r[$0][i]) < abs(r[$1][i]) } ?? i] *= f
                 }
-                mutate(id) { $0.place.scale = scale; $0.place.move = pivot + d * (s.move - pivot) }
+                // Each one's own origin goes where the shared stretch takes it.
+                plan.append((id, s, scale, pivot + d * (s.move - pivot)))
             }
         }
+        var live: [(UUID, Node)] = []
+        for p in plan {
+            guard let r = resizing[p.id] else { continue }
+            if Self.liveResize, case .primitive = r.node.base, let next = baked(r.node, by: p.scale) {
+                // Its sizes taken in at once; the kept point where it was, on the base as it really grew.
+                let node = followed(r.node, to: next), k = grown(r.node, to: next)
+                mutate(p.id) { $0.node = node; $0.place.scale = SIMD3(1, 1, 1); $0.place.move = p.at - p.start.rotation * (r.keep * k) }
+                live.append((p.id, node))
+            } else {
+                mutate(p.id) { $0.node = r.node; $0.place.scale = p.scale; $0.place.move = p.at - p.start.rotation * (p.scale * r.keep) }
+            }
+        }
+        if !live.isEmpty { buildNow(live) }
         sceneVersion += 1
     }
 
+    // Shapes built at once and shown, waiting for the kernel: a resize on Bcad's own engine, where that takes far less
+    // than a frame. What building them says is said when the resize ends, if it still holds.
+    private func buildNow(_ shapes: [(UUID, Node)]) {
+        let clearance = settings.clearance
+        let made = Kernel.shared.queue.sync { () -> [(UUID, Node, Mesh?)] in
+            Kernel.shared.clearance = clearance
+            let out = shapes.map { ($0.0, $0.1, Kernel.shared.mesh($0.1, keep: false)) }
+            _ = Kernel.shared.takeProblems()
+            return out
+        }
+        for (id, node, mesh) in made {
+            guard let mesh else { continue }
+            meshes[id] = mesh
+            built[id] = node
+        }
+    }
+
+    // A body's base with a stretch taken into its sizes: a primitive's (kept round or made oval, see Primitive.scale) or a
+    // bolt's length; nil for a shape that keeps its stretch (a merged one).
+    private func baked(_ node: Node, by s: SIMD3<Double>) -> Node? {
+        switch node.base {
+        case .primitive(var p):
+            p.scale(by: s)
+            return .primitive(p)
+        case .fastener(let f):
+            return .fastener(f.setting(.length, max(1, (f.length * s.z * 100).rounded() / 100)))
+        default:
+            return nil
+        }
+    }
+
+    // How much a base grew along each of its own axes taking new sizes (1 where that can't be told).
+    private func grown(_ node: Node, to next: Node) -> SIMD3<Double> {
+        let c = settings.clearance
+        guard let e0 = node.base.extent(clearance: c), let e1 = next.extent(clearance: c), e0.min() > 0 else { return SIMD3(1, 1, 1) }
+        return e1 / e0
+    }
+
     // After a resize: a primitive or a fastener (rounded, split or hollowed too) takes the stretch into its sizes, so roundings
-    // keep their radius and threads never distort. Nothing drops to the bed: shapes stay where the resize left them.
+    // keep their radius and threads never distort. The point that stayed put in the resize stays put however the sizes came
+    // out (rounded to 0.01 mm, a sphere kept round): where the stretch left it, on the base as it really grew. Nothing
+    // drops to the bed.
     func finishScale() {
         for id in selection {
-            guard let b = body(id), b.place.scale != SIMD3(1, 1, 1) else { continue }
-            let s = b.place.scale
-            let next: Node
-            switch b.node.base {
-            case .primitive(var p):
-                p.scale(by: s)
-                next = .primitive(p)
-            case .fastener(let f):
-                next = .fastener(f.setting(.length, max(1, (f.length * s.z * 100).rounded() / 100)))
-            default:
-                continue
-            }
-            mutate(id) { $0.node = followed($0.node, to: next); $0.place.scale = SIMD3(1, 1, 1) }
+            guard let b = body(id), b.place.scale != SIMD3(1, 1, 1), let next = baked(b.node, by: b.place.scale) else { continue }
+            let keep = resizing[id]?.keep ?? (meshes[id].map { ($0.low + $0.high) / 2 } ?? .zero)
+            let at = b.place.move + b.place.rotation * (b.place.scale * keep), k = grown(b.node, to: next)
+            mutate(id) { $0.node = followed($0.node, to: next); $0.place.scale = SIMD3(1, 1, 1); $0.place.move = at - $0.place.rotation * (keep * k) }
         }
+        beginResize()
         rebuildScene()
     }
 
@@ -2156,7 +2355,7 @@ final class Workbench: DesignHost {
     func dropToBed() {
         let ids = selection.isEmpty ? doc.bodies.filter { !$0.hidden }.map(\.id) : selection
         let moves = ids.compactMap { id -> (UUID, Double)? in
-            guard let b = body(id), let (lo, _) = worldBounds(b), abs(lo.z) > 0.000_1 else { return nil }
+            guard let b = body(id), let (lo, _) = exactBounds(b), abs(lo.z) > 0.000_1 else { return nil }
             return (id, lo.z)
         }
         guard !moves.isEmpty else { return }
@@ -2205,6 +2404,7 @@ final class Workbench: DesignHost {
     func rescale(_ id: UUID, axis i: Int, by f: Double) {
         guard let b = body(id), f.isFinite, f > 0, abs(f - 1) > 1e-9 else { return }
         begin()
+        beginResize()
         stretch([id: b.place], axis: i, by: f, uniform: settings.uniform, symmetric: settings.symmetric)
         finishScale()
     }

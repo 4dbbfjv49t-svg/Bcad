@@ -108,6 +108,9 @@ double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, co
                    const double *mb, int kindB, int indexB, const double *pointB, double *out);
 // Separate solids in a shape: a merge of parts that don't touch stays in pieces.
 int bk_piece_count(const BKShape *s);
+// The box the shape fills placed by m (row-major 3x4, turned or stretched any way): out = min xyz, max xyz. 1 when it's
+// exact, 0 when part of it is only as close as the shape's display mesh, -1 when it fails (bk_last_error says why).
+int bk_bounds(const BKShape *s, const double *m, double *out);
 BKShape *bk_copy(const BKShape *s);
 void bk_free(BKShape *s);
 

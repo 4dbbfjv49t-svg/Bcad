@@ -1153,8 +1153,9 @@ struct ScreenContent: View {
             switch lib.screen {
             case .move:
                 if let b = one {
+                    // Where its middle is (a primitive's is where it's placed; a merged or split shape's is the middle of it).
                     SettingsTitle(text: L("Position") + " · " + L("mm"))
-                    AxisRow(values: b.place.move) { i, v in lib.setPlace(b.id) { $0.move[i] = v } }
+                    AxisRow(values: lib.middle(b)) { i, v in lib.placeMiddle(b.id, axis: i, at: v) }
                     Rectangle().fill(Ink.text.opacity(0.12)).frame(height: 1).padding(.horizontal, 6).padding(.top, 6)
                     ColourLine(item: b).id(b.id)
                 } else {
@@ -1185,7 +1186,12 @@ struct ScreenContent: View {
             case .rotate:
                 if let b = one {
                     SettingsTitle(text: L("Rotation") + " · °")
-                    AxisRow(values: b.place.turn, range: -360...360) { i, v in lib.setPlace(b.id) { $0.turn[i] = v } }
+                    // Turned about its middle, which stays where it is.
+                    AxisRow(values: b.place.turn, range: -360...360) { i, v in
+                        var t = b.place.turn
+                        t[i] = v
+                        lib.turn(b.id, to: t)
+                    }
                 } else {
                     Hint(text: L("Drag the rings to turn all selected shapes"))
                 }

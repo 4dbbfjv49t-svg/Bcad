@@ -173,6 +173,7 @@ struct Node {
   V3 p, n;
   int side = 0;
   mutable std::vector<std::pair<double, std::shared_ptr<const Solid>>> made;
+  mutable std::vector<std::pair<double, int>> counted;  // its pieces at a detail, once counted
 };
 
 // The model for a primitive (kinds and sizes as in BcadKernel.h) and the placement that centres it; empty with `why` set
@@ -191,12 +192,19 @@ struct Reach {
   V3 point;
   bool exact;
 };
-Reach support(const Shape &s, V3 d);
+// prove: where only a test against the other part's mesh could tell (a subtract's or intersect's farthest point inside
+// the other part or not), make that test; otherwise the reach counts as inexact.
+Reach support(const Shape &s, V3 d, bool prove = true);
 
 // The bounding box and volume of a placed shape: exact for primitives and wherever it can be told exactly; otherwise from
 // `meshed` (the shape's mesh, if at hand) or a mesh made for it.
 void bounds(const Shape &s, V3 &lo, V3 &hi, const Solid *meshed = nullptr);
 double volume(const Shape &s, const Solid *meshed = nullptr);
+// The box of a shape turned or stretched any way, quickly (asked as it turns): exact wherever that's quick to tell (a
+// primitive's always), otherwise from the points of its display mesh. True when all of it is exact.
+bool placedBounds(const Shape &s, V3 &lo, V3 &hi);
+// Separate pieces of a placed shape (as shown), counted once per detail.
+int pieceCount(const Shape &s);
 
 // Whether a point is inside a closed mesh (by its winding number).
 bool inside(const Solid &s, V3 q);

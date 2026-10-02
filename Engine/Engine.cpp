@@ -55,12 +55,19 @@ BKShape *bk_transform(const BKShape *s, const double *m) {
   return new BKShape{{s->shape.node, s->shape.place.then(a)}};
 }
 
-int bk_piece_count(const BKShape *s) {
-  if (!s) return 0;
-  if (s->shape.node->kind == Node::Prim) return 1;
-  Solid m;
-  mesh(s->shape, 0.05, m);
-  return pieces(m);
+int bk_piece_count(const BKShape *s) { return s ? pieceCount(s->shape) : 0; }
+
+int bk_bounds(const BKShape *s, const double *m, double *out) {
+  if (!s || !out) return -1;
+  if (!m || !finite(m, 12)) {
+    lastError = "bounds: placement must be numbers";
+    return -1;
+  }
+  V3 lo, hi;
+  bool exact = placedBounds({s->shape.node, s->shape.place.then(Affine::from(m))}, lo, hi);
+  double v[6] = {lo.x, lo.y, lo.z, hi.x, hi.y, hi.z};
+  memcpy(out, v, sizeof v);
+  return exact ? 1 : 0;
 }
 BKShape *bk_copy(const BKShape *s) { return s ? new BKShape{s->shape} : nullptr; }
 void bk_free(BKShape *s) { delete s; }

@@ -585,6 +585,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: gizmo
 
     var gizmoCenter: SIMD3<Double> {
+        // Turning: about the selection's middle, which stays put as it turns (the middle of a box round it would move as
+        // an uneven shape turns, and turn after turn the shape would wander).
+        if lib.gizmo == .rotate { return lib.turnPivot }
         var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
         for b in lib.selected { if let (l, h) = lib.worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) } }
         return lo.x.isFinite ? (lo + hi) / 2 : .zero
@@ -792,6 +795,8 @@ final class CadView: MTKView {
     private var last = CGPoint.zero
     private var moved = false
     private var starts: [UUID: Placement] = [:]
+    // A lone shape's size as a resize began, along its own axes (a live resize changes its mesh as it goes).
+    private var startSize: SIMD3<Double>?
     private var startPlane = SIMD3<Double>(0, 0, 0)
     private var startOffset = 0.0
     private var startTilt = SIMD2<Double>(0, 0)
@@ -1186,6 +1191,11 @@ final class CadView: MTKView {
         if let axis = gizmoHit(p) {
             lib.begin()
             starts = Dictionary(uniqueKeysWithValues: lib.selected.map { ($0.id, $0.place) })
+            startSize = nil
+            if lib.gizmo == .scale {
+                lib.beginResize()
+                if lib.selection.count == 1, let b = lib.primary, let m = lib.meshes[b.id] { startSize = m.size * b.place.scale }
+            }
             startPlane = renderer.gizmoCenter
             captureBoxes()
             dragAxis = axis
@@ -1259,7 +1269,7 @@ final class CadView: MTKView {
             let symmetric = lib.settings.symmetric || e.modifierFlags.contains(.option)
             // The dragged side follows the pointer; symmetric, the other side comes along the other way.
             var s0 = startBox.map { $0.hi[i] - $0.lo[i] } ?? renderer.gizmoLength
-            if lib.selection.count == 1, let b = lib.primary, let m = lib.meshes[b.id], let st = starts[b.id] { s0 = m.size[i] * st.scale[i] }
+            if let size = startSize { s0 = size[i] }
             guard s0 > 0 else { return }
             var f = max(0.02, 1 + accum * (symmetric ? 2 : 1) / s0)
             if !free, lib.selection.count == 1, let b = lib.primary, let st = starts[b.id] {

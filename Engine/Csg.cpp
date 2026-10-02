@@ -535,7 +535,7 @@ namespace {
 
 // How far a node reaches along d (its own coordinates), exactly where that can be told; otherwise a bound, not exact
 // (the box then comes from the mesh at hand).
-Reach reach(const Node &node, V3 d) {
+Reach reach(const Node &node, V3 d, bool prove) {
   if (node.kind == Node::Prim) {
     V3 at;
     double v = node.model->support(d, &at);
@@ -546,24 +546,24 @@ Reach reach(const Node &node, V3 d) {
     double grow = s.place.stretch();
     return inside(*evaluate(*s.node, grow > 0 ? 0.05 / grow : 0.05), s.place.inverse().point(q));
   };
-  Reach a = support(node.a, d);
+  Reach a = support(node.a, d, prove);
   if (node.kind == Node::Split) {
     // Exact while the farthest point stays on the kept side (or on the plane, the edge of it).
     a.exact = a.exact && planeSide(a.point, node.p, node.n) * (node.side == 0 ? 1 : -1) >= 0;
     return a;
   }
-  Reach b = support(node.b, d);
+  Reach b = support(node.b, d, prove);
   if (node.op == BK_UNION) {
     Reach r = a.value >= b.value ? a : b;
     r.exact = a.exact && b.exact;
     return r;
   }
   if (node.op == BK_SUBTRACT) {
-    a.exact = a.exact && !within(node.b, a.point);
+    a.exact = a.exact && prove && !within(node.b, a.point);
     return a;
   }
-  if (a.exact && within(node.b, a.point)) return a;
-  if (b.exact && within(node.a, b.point)) return b;
+  if (prove && a.exact && within(node.b, a.point)) return a;
+  if (prove && b.exact && within(node.a, b.point)) return b;
   Reach r = a.value <= b.value ? a : b;
   r.exact = false;
   return r;
@@ -571,11 +571,50 @@ Reach reach(const Node &node, V3 d) {
 
 }  // namespace
 
-Reach support(const Shape &s, V3 d) {
+Reach support(const Shape &s, V3 d, bool prove) {
   V3 local{dot(s.place.column(0), d), dot(s.place.column(1), d), dot(s.place.column(2), d)};
-  Reach r = reach(*s.node, local);
+  Reach r = reach(*s.node, local, prove);
   V3 t{s.place.m[3], s.place.m[7], s.place.m[11]};
   return {r.value + dot(t, d), s.place.point(r.point), r.exact};
+}
+
+bool placedBounds(const Shape &s, V3 &lo, V3 &hi) {
+  bool exact[6], all = true;
+  for (int i = 0; i < 3; i++) {
+    V3 e{i == 0 ? 1.0 : 0, i == 1 ? 1.0 : 0, i == 2 ? 1.0 : 0};
+    Reach up = support(s, e, false), down = support(s, -e, false);
+    hi[i] = up.value, lo[i] = -down.value;
+    exact[i] = down.exact, exact[3 + i] = up.exact;
+    all = all && up.exact && down.exact;
+  }
+  if (all) return true;
+  // The rest from the points of the shape's display mesh (kept from when it was shown), placed: short of the shape by no
+  // more than its chord error.
+  double grow = s.place.stretch();
+  auto shown = evaluate(*s.node, grow > 0 ? 0.05 / grow : 0.05);
+  V3 a{INFINITY, INFINITY, INFINITY}, b{-INFINITY, -INFINITY, -INFINITY};
+  for (V3 p : shown->p) {
+    V3 q = s.place.point(p);
+    a = vmin(a, q), b = vmax(b, q);
+  }
+  if (shown->p.empty()) a = b = V3{s.place.m[3], s.place.m[7], s.place.m[11]};
+  for (int i = 0; i < 3; i++) {
+    if (!exact[i]) lo[i] = a[i];
+    if (!exact[3 + i]) hi[i] = b[i];
+  }
+  return false;
+}
+
+int pieceCount(const Shape &s) {
+  if (s.node->kind == Node::Prim) return 1;
+  double grow = s.place.stretch(), d = grow > 0 ? 0.05 / grow : 0.05;
+  for (const auto &c : s.node->counted)
+    if (std::fabs(c.first - d) <= 1e-12 * d) return c.second;
+  // Pieces don't change with a placement: counted on the node's own mesh, no copy.
+  int n = pieces(*evaluate(*s.node, d));
+  s.node->counted.push_back({d, n});
+  if (s.node->counted.size() > 4) s.node->counted.erase(s.node->counted.begin());
+  return n;
 }
 
 void bounds(const Shape &s, V3 &lo, V3 &hi, const Solid *meshed) {

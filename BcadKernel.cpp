@@ -729,6 +729,37 @@ BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) 
 
 int bk_piece_count(const BKShape *s) { return s ? solidCount(s->shape) : 0; }
 
+int bk_bounds(const BKShape *s, const double *m, double *out) {
+  if (!s || !out) return -1;
+  try {
+    need(m && finite(m, 12), "placement must be numbers");
+    gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
+    double l0 = c0.Magnitude(), l1 = c1.Magnitude(), l2 = c2.Magnitude();
+    bool similar = fabs(l0 - l1) < 1e-9 * l0 + 1e-12 && fabs(l0 - l2) < 1e-9 * l0 + 1e-12 && fabs(c0.Dot(c1)) < 1e-9 &&
+                   fabs(c0.Dot(c2)) < 1e-9 && fabs(c1.Dot(c2)) < 1e-9 && c0.Dot(c1.Crossed(c2)) > 0;
+    // Turned and moved (and grown evenly): the shape with a location, nothing copied; stretched or mirrored, a placed copy.
+    TopoDS_Shape placed;
+    if (similar) {
+      gp_Trsf t;
+      t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+      placed = s->shape.Moved(TopLoc_Location(t));
+    } else {
+      placed = place(s->shape, m);
+    }
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(placed, box, false, false);
+    need(!box.IsVoid(), "the shape is empty");
+    box.Get(out[0], out[1], out[2], out[3], out[4], out[5]);
+    return 1;
+  } catch (const Standard_Failure &e) {
+    lastError = std::string("bounds: ") + (e.GetMessageString() ? e.GetMessageString() : "failed");
+    return -1;
+  } catch (...) {
+    lastError = "bounds: failed";
+    return -1;
+  }
+}
+
 BKShape *bk_copy(const BKShape *s) { return s ? new BKShape{s->shape} : nullptr; }
 void bk_free(BKShape *s) { delete s; }
 

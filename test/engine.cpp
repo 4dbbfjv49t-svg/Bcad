@@ -228,6 +228,99 @@ int main() {
     bk_free(km2), bk_free(ks), bk_free(k), bk_free(t), bk_free(s);
   }
 
+  // MARK: boxes of turned and stretched shapes (where a turned shape settles, what it lines up with)
+  {
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> U(0, 1);
+    auto randomPlace = [&](bool stretch) {
+      double a = U(rng) * 2 * PI, b = U(rng) * PI, c = U(rng) * 2 * PI;
+      double ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b), cc = std::cos(c), sc = std::sin(c);
+      double R[9] = {ca * cc - sa * cb * sc, -ca * sc - sa * cb * cc, sa * sb, sa * cc + ca * cb * sc, -sa * sc + ca * cb * cc, -ca * sb, sb * sc, sb * cc, cb};
+      double k[3] = {1, 1, 1};
+      if (stretch)
+        for (auto &v : k) v = 0.5 + 1.5 * U(rng);
+      std::vector<double> m(12);
+      for (int r = 0; r < 3; r++) {
+        for (int col = 0; col < 3; col++) m[4 * r + col] = R[3 * r + col] * k[col];
+        m[4 * r + 3] = (U(rng) - 0.5) * 40;
+      }
+      return m;
+    };
+    // The box from a far finer mesh of the placed shape: inside the true box by no more than its chord error.
+    auto meshBox = [](BKShape *s, const double *m, double out[6]) {
+      BKShape *t = bk_transform(s, m);
+      BKMesh *f = bk_mesh(t, 0.002);
+      for (int k = 0; k < 3; k++) out[k] = INFINITY, out[3 + k] = -INFINITY;
+      for (int i = 0; i < f->vertexCount; i++)
+        for (int k = 0; k < 3; k++) out[k] = std::min(out[k], (double)f->positions[3 * i + k]), out[3 + k] = std::max(out[3 + k], (double)f->positions[3 * i + k]);
+      bk_mesh_free(f);
+      bk_free(t);
+    };
+    int wrong = 0, tried = 0;
+    double worst = 0;
+    std::string where;
+    for (const auto &c : cases) {
+      BKShape *s = bk_primitive(c.kind, c.p.data());
+      for (int it = 0; it < 6; it++) {
+        auto m = randomPlace(it % 2 == 1);
+        double box[6], fine[6];
+        int exact = bk_bounds(s, m.data(), box);
+        meshBox(s, m.data(), fine);
+        tried++;
+        bool ok = exact == 1;
+        for (int k = 0; k < 3; k++) {
+          // Floats on the fine mesh: a hair outside is rounding.
+          ok = ok && fine[k] >= box[k] - 1e-4 && fine[3 + k] <= box[3 + k] + 1e-4 && fine[k] - box[k] < 0.01 && box[3 + k] - fine[3 + k] < 0.01;
+          worst = std::max({worst, fine[k] - box[k], box[3 + k] - fine[3 + k]});
+        }
+        if (!ok) wrong++, where += std::string(c.name) + " ";
+      }
+      bk_free(s);
+    }
+    check("every shape's box, turned and stretched any way, is exact", wrong == 0, fmt("%.0f of %.0f wrong; the finer mesh within %.4f mm", wrong, tried, worst) + " " + where);
+    // Merged and split shapes: never smaller than they are, and close.
+    double b20[3] = {20, 20, 20}, cyl[2] = {10, 40}, sph[1] = {24}, p0[3] = {0, 0, 0}, tilt[3] = {1, 2, 3};
+    double shift[12] = {1, 0, 0, 8, 0, 1, 0, 4, 0, 0, 1, 2};
+    BKShape *box = bk_primitive(BK_BOX, b20), *c = bk_primitive(BK_CYLINDER, cyl), *ball = bk_primitive(BK_SPHERE, sph);
+    BKShape *moved = bk_transform(ball, shift);
+    BKShape *trees[4] = {bk_boolean(BK_UNION, box, moved), bk_boolean(BK_SUBTRACT, ball, c), bk_boolean(BK_INTERSECT, box, moved), bk_split(ball, p0, tilt, 0)};
+    wrong = 0, tried = 0, worst = 0;
+    for (BKShape *t : trees)
+      for (int it = 0; it < 6; it++) {
+        auto m = randomPlace(it % 3 == 2);
+        double bx[6], fine[6];
+        int exact = bk_bounds(t, m.data(), bx);
+        meshBox(t, m.data(), fine);
+        tried++;
+        // Sides that can't be told exactly come from the display mesh's points (0.05 mm chords; where two curved surfaces
+        // cross, the crossing's chords too).
+        bool ok = exact >= 0;
+        for (int k = 0; k < 3; k++) {
+          ok = ok && std::fabs(fine[k] - bx[k]) < 0.1 && std::fabs(bx[3 + k] - fine[3 + k]) < 0.1;
+          if (exact == 1) ok = ok && fine[k] >= bx[k] - 1e-4 && fine[3 + k] <= bx[3 + k] + 1e-4 && fine[k] - bx[k] < 0.01 && bx[3 + k] - fine[3 + k] < 0.01;
+          worst = std::max({worst, std::fabs(fine[k] - bx[k]), std::fabs(bx[3 + k] - fine[3 + k])});
+        }
+        if (!ok) wrong++;
+      }
+    check("merged and split shapes' boxes, turned and stretched: exact where told, otherwise as close as their meshes", wrong == 0,
+          fmt("%.0f of %.0f wrong; within %.4f mm", wrong, tried, worst));
+    // Asked as a shape turns under a drag: quick.
+    std::vector<double> m = randomPlace(false);
+    double bx[6];
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 1000; i++) bk_bounds(box, m.data(), bx);
+    double prim = ms(t0) / 1000;
+    for (BKShape *t : trees) bk_bounds(t, m.data(), bx);  // their display meshes made once
+    t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 100; i++)
+      for (BKShape *t : trees) bk_bounds(t, m.data(), bx);
+    double tree = ms(t0) / 400;
+    printf("  a turned shape's box in %.4f ms, a merged or split one's in %.3f ms\n", prim, tree);
+    check("turned shapes' boxes are quick", prim < 0.05 && tree < 2);
+    for (BKShape *t : trees) bk_free(t);
+    bk_free(moved), bk_free(ball), bk_free(c), bk_free(box);
+  }
+
   // MARK: distances (as the ruler measures)
   {
     double box[3] = {10, 10, 10}, cyl[2] = {10, 20}, sph[1] = {10};
