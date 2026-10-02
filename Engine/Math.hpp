@@ -115,5 +115,9 @@ struct Affine {
 // The sign of the volume of tetrahedron (a, b, c, d) — positive when d lies below the plane through a, b, c seen
 // counter-clockwise from above — exactly, whatever the rounding of the inputs' differences.
 int orient3d(V3 a, V3 b, V3 c, V3 d);
+// The sign of the turn a → b → c in the plane (positive counter-clockwise), exactly.
+int orient2d(double ax, double ay, double bx, double by, double cx, double cy);
+// Which side of the plane through p with normal n the point v lies on (+1 where n points, -1 the other, 0 on it), exactly.
+int planeSide(V3 v, V3 p, V3 n);
 
 }  // namespace bce

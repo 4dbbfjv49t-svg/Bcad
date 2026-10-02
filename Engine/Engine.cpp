@@ -52,10 +52,16 @@ BKShape *bk_transform(const BKShape *s, const double *m) {
     lastError = "transform: placement flattens the shape";
     return nullptr;
   }
-  return new BKShape{{s->shape.model, s->shape.place.then(a)}};
+  return new BKShape{{s->shape.node, s->shape.place.then(a)}};
 }
 
-int bk_piece_count(const BKShape *s) { return s ? 1 : 0; }
+int bk_piece_count(const BKShape *s) {
+  if (!s) return 0;
+  if (s->shape.node->kind == Node::Prim) return 1;
+  Solid m;
+  mesh(s->shape, 0.05, m);
+  return pieces(m);
+}
 BKShape *bk_copy(const BKShape *s) { return s ? new BKShape{s->shape} : nullptr; }
 void bk_free(BKShape *s) { delete s; }
 
@@ -109,9 +115,10 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
   m->cornerCount = (int)solid.corners.size();
   m->corners = mallocCopy(cs);
   V3 lo, hi;
-  bounds(s->shape, lo, hi);
+  bounds(s->shape, lo, hi, &solid);
+  if (solid.p.empty()) lo = hi = V3{0, 0, 0};
   m->bbox[0] = lo.x, m->bbox[1] = lo.y, m->bbox[2] = lo.z, m->bbox[3] = hi.x, m->bbox[4] = hi.y, m->bbox[5] = hi.z;
-  m->volume = volume(s->shape);
+  m->volume = volume(s->shape, &solid);
   m->valid = 1;
   return m;
 }
@@ -183,8 +190,35 @@ BKShape *bk_fastener(const BKFastener *f, double clearance) {
   return later("bolt");
 }
 
-BKShape *bk_boolean(int, const BKShape *, const BKShape *) { return later("combine"); }
-BKShape *bk_split(const BKShape *, const double *, const double *, int) { return later("split"); }
+// MARK: - merging and splitting
+
+BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b) {
+  if (!a || !b) return a ? bk_copy(a) : (b && op == BK_UNION ? bk_copy(b) : nullptr);
+  if (op != BK_UNION && op != BK_SUBTRACT && op != BK_INTERSECT) {
+    lastError = "combine: unknown operation";
+    return nullptr;
+  }
+  // The parts keep their own placements; the result sits where they are.
+  auto node = std::make_shared<Node>();
+  node->kind = Node::Bool, node->op = op, node->a = a->shape, node->b = b->shape;
+  return new BKShape{{node, Affine()}};
+}
+
+BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) {
+  if (!s) return nullptr;
+  if (!p || !n || !finite(p, 3) || !finite(n, 3)) {
+    lastError = "split: plane must be numbers";
+    return nullptr;
+  }
+  V3 nv{n[0], n[1], n[2]};
+  if (norm(nv) < 1e-12) {
+    lastError = "split: plane must be numbers";
+    return nullptr;
+  }
+  auto node = std::make_shared<Node>();
+  node->kind = Node::Split, node->a = s->shape, node->p = {p[0], p[1], p[2]}, node->n = unit(nv), node->side = side == 0 ? 0 : 1;
+  return new BKShape{{node, Affine()}};
+}
 
 BKShape *bk_fillet(const BKShape *, const int *, const double *, int, double, double *maxRadius, int *missing) {
   if (maxRadius) *maxRadius = 0;

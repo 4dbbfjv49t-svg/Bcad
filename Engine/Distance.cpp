@@ -103,6 +103,9 @@ struct Set {
   Elem elem{};
   double r = 0, z = 0;
   Affine toLocal, toWorld;
+  // How far its exact form may lie from its mesh. A merged or split shape's faces and edges are only parts of their exact
+  // forms: a point put on the form farther than this from the mesh is past where the part ends.
+  double trim = 0;
   int count() const { return (int)v.size() / (dim + 1); }
   const V3 *piece(int i) const { return &v[(size_t)i * (dim + 1)]; }
 };
@@ -243,18 +246,35 @@ V3 project(const Set &s, const Tree &t, V3 x) {
     nearest(s, t, one, t1, p, q);
     return p;
   }
-  V3 y = s.toLocal.point(x);
-  double rho = std::hypot(y.x, y.y), c = rho > 0 ? y.x / rho : 1, sn = rho > 0 ? y.y / rho : 0, r, z;
-  if (s.exact == Set::Circle) {
-    r = s.r, z = s.z;
-  } else if (s.exact == Set::Turned) {
-    s.elem.at(s.elem.nearest(rho, y.z), r, z);
-  } else {
-    // A profile piece in the half-plane y = 0 (its seam).
-    s.elem.at(s.elem.nearest(y.x, y.z), r, z);
-    return s.toWorld.point({r, 0, z});
+  auto onto = [&](V3 x) {
+    V3 y = s.toLocal.point(x);
+    double rho = std::hypot(y.x, y.y), c = rho > 0 ? y.x / rho : 1, sn = rho > 0 ? y.y / rho : 0, r, z;
+    if (s.exact == Set::Circle) {
+      r = s.r, z = s.z;
+    } else if (s.exact == Set::Turned) {
+      s.elem.at(s.elem.nearest(rho, y.z), r, z);
+    } else {
+      // A profile piece in the half-plane y = 0 (its seam).
+      s.elem.at(s.elem.nearest(y.x, y.z), r, z);
+      return s.toWorld.point({r, 0, z});
+    }
+    return s.toWorld.point({r * c, r * sn, z});
+  };
+  V3 y = onto(x);
+  if (s.trim > 0) {
+    // Past where the part ends: its nearest point on the mesh, put onto the form there.
+    Set one;
+    one.v = {y};
+    Tree t1(one);
+    V3 p, q;
+    if (nearest(s, t, one, t1, p, q) > s.trim * s.trim) {
+      one.v = {x};
+      Tree t2(one);
+      nearest(s, t, one, t2, p, q);
+      return onto(p);
+    }
   }
-  return s.toWorld.point({r * c, r * sn, z});
+  return y;
 }
 
 // The set an end stands for; a curved face or edge comes as a finer mesh where it can't be put exactly.
@@ -263,11 +283,11 @@ bool gather(const End &e, Set &s, std::string &why) {
     s.dim = 0, s.v = {e.point};
     return true;
   }
-  if (!e.shape || !e.shape->model) {
+  if (!e.shape || !e.shape->node) {
     why = "distance: no shape to measure";
     return false;
   }
-  Shape placed{e.shape->model, e.shape->place.then(e.place)};
+  Shape placed{e.shape->node, e.shape->place.then(e.place)};
   V3 lo, hi;
   bounds(placed, lo, hi);
   double diag = norm(hi - lo);
@@ -284,21 +304,23 @@ bool gather(const End &e, Set &s, std::string &why) {
         if ((int)solid.triFace[k] == e.index)
           for (int c = 0; c < 3; c++) s.v.push_back(solid.p[solid.tri[3 * k + c]]);
       const FaceGeom &g = solid.faces[e.index].geom;
-      if (solid.exact && g.kind == FaceGeom::Turned) s.exact = Set::Turned, s.elem = g.elem, exact = true;
+      if (g.kind == FaceGeom::Turned && g.exact) s.exact = Set::Turned, s.elem = g.elem, s.toWorld = g.place, exact = true;
+      // A flat face is exact as meshed.
+      if (g.kind == FaceGeom::Flat) exact = true;
     } else {
       if (e.index < 0 || e.index >= (int)solid.edges.size() || solid.edges[e.index].pts.size() < 2) break;
       const auto &edge = solid.edges[e.index];
       s.dim = 1;
       for (size_t k = 0; k + 1 < edge.pts.size(); k++) s.v.push_back(edge.pts[k]), s.v.push_back(edge.pts[k + 1]);
       const EdgeGeom &g = edge.geom;
-      if (solid.exact && g.kind == EdgeGeom::Circle) s.exact = Set::Circle, s.r = g.r, s.z = g.z, exact = true;
-      if (solid.exact && g.kind == EdgeGeom::Profile) s.exact = Set::Profile, s.elem = g.elem, exact = true;
+      if (g.exact && g.kind == EdgeGeom::Circle) s.exact = Set::Circle, s.r = g.r, s.z = g.z, s.toWorld = g.place, exact = true;
+      if (g.exact && g.kind == EdgeGeom::Profile) s.exact = Set::Profile, s.elem = g.elem, s.toWorld = g.place, exact = true;
+      if (g.kind == EdgeGeom::Line) exact = true;
     }
     if (s.v.empty()) break;
-    // Flat faces and straight edges are exact as meshed, whatever the placement.
-    if (placed.model->kind == Model::Poly) exact = true;
     if (exact) {
-      s.toWorld = solid.place, s.toLocal = solid.place.inverse();
+      if (s.exact != Set::Mesh) s.toLocal = s.toWorld.inverse();
+      if (placed.node->kind != Node::Prim) s.trim = 2 * d + 1e-9 * (1 + diag);
       return true;
     }
     if (pass == 1) return true;
@@ -314,7 +336,8 @@ bool distance(const End &a, const End &b, double &d, V3 &pa, V3 &pb, std::string
   if (!gather(a, sa, why) || !gather(b, sb, why)) return false;
   Tree ta(sa), tb(sb);
   double best = nearest(sa, ta, sb, tb, pa, pb);
-  // Onto the exact surfaces: each point in turn to the nearest of its own set to the other, which never moves them apart.
+  // Onto the exact surfaces: each point in turn to the nearest of its own set to the other, from the meshes' nearest
+  // points to where they settle (farther than the meshes' where a surface curves in, as round a hole).
   if (sa.exact != Set::Mesh || sb.exact != Set::Mesh) {
     V3 p = pa, q = pb;
     for (int it = 0; it < 200; it++) {
@@ -322,9 +345,9 @@ bool distance(const End &a, const End &b, double &d, V3 &pa, V3 &pb, std::string
       V3 nq = sb.dim == 0 ? q : project(sb, tb, np);
       double moved = norm(np - p) + norm(nq - q);
       p = np, q = nq;
-      if (norm2(p - q) < best) best = norm2(p - q), pa = p, pb = q;
       if (moved <= 1e-13 * (1 + norm(p))) break;
     }
+    best = norm2(p - q), pa = p, pb = q;
   }
   d = std::sqrt(best);
   return std::isfinite(d);

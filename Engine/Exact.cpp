@@ -96,4 +96,37 @@ int orient3d(V3 a, V3 b, V3 c, V3 d) {
   return e.sign();
 }
 
+int orient2d(double ax, double ay, double bx, double by, double cx, double cy) {
+  double l = (ax - cx) * (by - cy), r = (ay - cy) * (bx - cx), det = l - r;
+  double bound = 1e-15 * (std::fabs(l) + std::fabs(r));
+  if (det > bound) return 1;
+  if (det < -bound) return -1;
+  if (l == 0 && r == 0) return 0;
+  double x[2][2], y[2][2];
+  twoDiff(ax, cx, x[0][0], x[0][1]);
+  twoDiff(bx, cx, x[1][0], x[1][1]);
+  twoDiff(ay, cy, y[0][0], y[0][1]);
+  twoDiff(by, cy, y[1][0], y[1][1]);
+  Expansion e;
+  for (int u = 0; u < 2; u++)
+    for (int v = 0; v < 2; v++) e.addProduct(x[0][u], y[1][v], 1), e.addProduct(-y[0][u], x[1][v], 1);
+  return e.sign();
+}
+
+int planeSide(V3 v, V3 p, V3 n) {
+  double dx = v.x - p.x, dy = v.y - p.y, dz = v.z - p.z;
+  double s = dx * n.x + dy * n.y + dz * n.z;
+  double bound = 1e-15 * (std::fabs(dx * n.x) + std::fabs(dy * n.y) + std::fabs(dz * n.z));
+  if (s > bound) return 1;
+  if (s < -bound) return -1;
+  Expansion e;
+  const double a[3] = {v.x, v.y, v.z}, b[3] = {p.x, p.y, p.z}, m[3] = {n.x, n.y, n.z};
+  for (int i = 0; i < 3; i++) {
+    double h, l;
+    twoDiff(a[i], b[i], h, l);
+    e.addProduct(h, m[i], 1), e.addProduct(l, m[i], 1);
+  }
+  return e.sign();
+}
+
 }  // namespace bce

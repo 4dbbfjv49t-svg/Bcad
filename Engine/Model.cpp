@@ -87,28 +87,95 @@ void Solid::centroids() {
     if (area[f] > 0) faces[f].centroid = sum[f] / area[f];
 }
 
+double Solid::meshVolume() const {
+  double v = 0;
+  for (size_t k = 0; k < tri.size(); k += 3) v += dot(p[tri[k]], cross(p[tri[k + 1]], p[tri[k + 2]]));
+  return v / 6;
+}
+
+void Solid::slivers() {
+  size_t nt = triFace.size();
+  gap.assign(6 * nt, 0);
+  std::vector<double> total(faces.size(), 0), area(faces.size(), 0);
+  for (size_t t = 0; t < nt; t++) {
+    uint32_t v[3] = {tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]};
+    for (int k = 0; k < 3; k++) {
+      uint32_t i = v[k], j = v[(k + 1) % 3];
+      gap[6 * t + 3 + k] = dot(n[j] - n[i], p[j] - p[i]) / 8;
+    }
+    total[triFace[t]] += sliver(t);
+    area[triFace[t]] += norm(cross(p[v[1]] - p[v[0]], p[v[2]] - p[v[0]])) / 2;
+  }
+  // Scaled so each face's slivers add up to its deficit exactly; spread by area where the normals don't say (a face
+  // flat in its mesh, though not in fact).
+  for (size_t t = 0; t < nt; t++) {
+    const Face &f = faces[triFace[t]];
+    double sum = total[triFace[t]];
+    for (int k = 3; k < 6; k++) {
+      double &g = gap[6 * t + k];
+      if (f.deficit == 0) g = 0;
+      else if (sum * f.deficit > 0 && std::fabs(sum) > 1e-6 * std::fabs(f.deficit)) g *= f.deficit / sum;
+      else g = area[triFace[t]] > 0 ? f.deficit / area[triFace[t]] : 0;
+    }
+  }
+}
+
+double Solid::sliver(size_t t) const {
+  if (gap.empty()) return 0;
+  V3 a = p[tri[3 * t]], b = p[tri[3 * t + 1]], c = p[tri[3 * t + 2]];
+  return norm(cross(b - a, c - a)) / 6 * (gap[6 * t + 3] + gap[6 * t + 4] + gap[6 * t + 5]);
+}
+
 void Solid::transform(const Affine &a) {
+  // A triangle's slivers grow with volume while its area grows its own way: the gap between grows by the difference.
+  std::vector<double> before;
+  if (!gap.empty()) {
+    before.resize(triFace.size());
+    for (size_t t = 0; t < triFace.size(); t++) before[t] = norm(cross(p[tri[3 * t + 1]] - p[tri[3 * t]], p[tri[3 * t + 2]] - p[tri[3 * t]]));
+  }
   for (auto &q : p) q = a.point(q);
   for (auto &q : n) q = a.normal(q);
-  for (auto &e : edges)
+  for (auto &e : edges) {
     for (auto &q : e.pts) q = a.point(q);
+    e.geom.place = e.geom.place.then(a);
+  }
   for (auto &q : corners) q = a.point(q);
-  double s;
-  if (a.similarity(&s)) {
+  double s, grow = std::fabs(a.det());
+  bool similar = a.similarity(&s);
+  if (similar) {
     for (auto &c : circles) c.centre = a.point(c.centre), c.axis = unit(a.vector(c.axis)), c.radius *= s;
   } else {
-    // A circle stretched unevenly is a circle no longer.
+    // A circle stretched unevenly is a circle no longer, nor a turned surface turned.
     circles.clear();
-    exact = false;
+    for (auto &e : edges) e.geom.exact = false;
   }
-  if (a.det() < 0)
+  if (a.det() < 0) {
     for (size_t k = 0; k < tri.size(); k += 3) std::swap(tri[k + 1], tri[k + 2]);
-  for (auto &f : faces) f.normal = a.normal(f.normal);
+    // Corners 0, 2, 1: the midpoints 0–2, 2–1, 1–0.
+    for (size_t k = 0; k < gap.size(); k += 6) std::swap(gap[k + 1], gap[k + 2]), std::swap(gap[k + 3], gap[k + 5]);
+  }
+  for (size_t t = 0; t < before.size(); t++) {
+    double after = norm(cross(p[tri[3 * t + 1]] - p[tri[3 * t]], p[tri[3 * t + 2]] - p[tri[3 * t]]));
+    double f = after > 0 ? grow * before[t] / after : 0;
+    for (int k = 0; k < 6; k++) gap[6 * t + k] *= f;
+  }
+  for (auto &f : faces) {
+    f.normal = a.normal(f.normal);
+    f.deficit *= grow;
+    f.geom.place = f.geom.place.then(a);
+    if (!similar) f.geom.exact = false;
+    if (f.geom.flat) {
+      V3 on = a.point(f.geom.pn * f.geom.pd);
+      f.geom.pn = a.normal(f.geom.pn);
+      f.geom.pd = dot(f.geom.pn, on);
+    }
+  }
   centroids();
-  place = place.then(a);
 }
 
 namespace {
+
+double moment(const Elem &e);
 
 // Two face numbers for an edge, without the same face twice.
 void sides(Solid::Edge &e, int a, int b) {
@@ -129,7 +196,9 @@ void buildPoly(const Model &m, Solid &out) {
       nrm += V3{(a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y)};
     }
     nrm = unit(nrm);
-    out.faces.push_back({nrm, {}, {}});
+    Solid::Face face{nrm, {}, {}};
+    face.geom.kind = FaceGeom::Flat, face.geom.flat = true, face.geom.pn = nrm, face.geom.pd = dot(nrm, m.verts[loop[0]]);
+    out.faces.push_back(face);
     uint32_t base = (uint32_t)out.p.size();
     for (int v : loop) out.vertex(m.verts[v], nrm);
     for (size_t i = 1; i + 1 < loop.size(); i++) out.triangle(base, base + (uint32_t)i, base + (uint32_t)i + 1, (int)f);
@@ -142,6 +211,7 @@ void buildPoly(const Model &m, Solid &out) {
         Solid::Edge e;
         e.pts = {m.verts[a], m.verts[b]};
         e.f0 = (int)f;
+        e.geom.kind = EdgeGeom::Line;
         out.edges.push_back(e);
       } else if (out.edges[it->second].f0 != (int)f) {
         out.edges[it->second].f1 = (int)f;
@@ -174,9 +244,19 @@ void buildTurned(const Model &m, Solid &out, double d) {
     e.normalAt(0.5, nr, nz);
     Solid::Face face{{-nr, 0, nz}, {}, {}};
     face.geom.kind = FaceGeom::Turned, face.geom.elem = e;
+    if (e.flat()) face.geom.flat = true, face.geom.pn = {0, 0, nz > 0 ? 1.0 : -1.0}, face.geom.pd = nz > 0 ? e.z0 : -e.z0;
+    int pieces = e.pieces(d);
+    // What the mesh misses: the exact volume this piece turns round, less the polygon-sided one its chords turn round.
+    double meshed = 0;
+    for (int i = 0; i < pieces; i++) {
+      double r0, z0, r1, z1;
+      e.at((double)i / pieces, r0, z0);
+      e.at((double)(i + 1) / pieces, r1, z1);
+      meshed += moment(Elem::line(r0, z0, r1, z1));
+    }
+    face.deficit = 2 * pi * (moment(e) - meshed * count * std::sin(2 * pi / count) / (2 * pi));
     out.faces.push_back(face);
 
-    int pieces = e.pieces(d);
     // Each ring's first vertex (a pole has one, or one per column where the surface comes to a point at an angle).
     std::vector<uint32_t> ring(pieces + 1);
     std::vector<char> pole(pieces + 1), fan(pieces + 1);
@@ -350,70 +430,74 @@ void Model::build(Solid &out, double deflection) const {
   double d = std::isfinite(deflection) ? std::max(deflection, 1e-4) : 0.05;
   if (kind == Poly) buildPoly(*this, out);
   if (kind == Turned) buildTurned(*this, out, d);
-  if (kind == Swept) buildSwept(*this, out, d);
+  if (kind == Swept) {
+    buildSwept(*this, out, d);
+    // What the mesh misses, shared out by area (a tube's every face curves alike).
+    std::vector<double> area(out.faces.size(), 0);
+    double total = 0;
+    for (size_t k = 0; k < out.triFace.size(); k++) {
+      double w = norm(cross(out.p[out.tri[3 * k + 1]] - out.p[out.tri[3 * k]], out.p[out.tri[3 * k + 2]] - out.p[out.tri[3 * k]]));
+      area[out.triFace[k]] += w, total += w;
+    }
+    double miss = volume - out.meshVolume();
+    for (size_t f = 0; f < out.faces.size(); f++) out.faces[f].deficit = total > 0 ? miss * area[f] / total : 0;
+  }
 }
 
 // MARK: - exact sizes
 
-double Model::support(V3 d) const {
+double Model::support(V3 d, V3 *at) const {
   double best = -INFINITY;
+  V3 where;
   if (kind == Poly) {
-    for (const auto &v : verts) best = std::max(best, dot(v, d));
-    return best;
-  }
-  if (kind == Turned) {
-    double D = std::hypot(d.x, d.y), dz = d.z;
+    for (const auto &v : verts)
+      if (dot(v, d) > best) best = dot(v, d), where = v;
+  } else if (kind == Turned) {
+    double D = std::hypot(d.x, d.y), dz = d.z, c = D > 0 ? d.x / D : 1, sn = D > 0 ? d.y / D : 0, br = 0, bz = 0;
+    auto take = [&](double r, double z) {
+      if (r * D + z * dz > best) best = r * D + z * dz, br = r, bz = z;
+    };
     for (const auto &e : profile) {
-      best = std::max({best, e.r0 * D + e.z0 * dz, e.r1 * D + e.z1 * dz});
+      take(e.r0, e.z0), take(e.r1, e.z1);
       if (e.arc) {
         double a = std::atan2(dz, D), lo = std::min(e.a0, e.a1), hi = std::max(e.a0, e.a1);
         while (a < lo) a += 2 * pi;
         while (a >= lo + 2 * pi) a -= 2 * pi;
-        if (a <= hi) best = std::max(best, e.cr * D + e.cz * dz + e.rad * std::hypot(D, dz));
+        if (a <= hi) take(e.cr + e.rad * std::cos(a), e.cz + e.rad * std::sin(a));
       }
     }
-    return best;
-  }
-  // Swept: the best along the oval, sampled and then narrowed down.
-  Oval o{a, b, std::cos(phi), std::sin(phi)};
-  auto value = [&](double t) {
-    V3 c = o.at(t), nm = o.normal(t);
-    double s = dot(nm, d), m = -INFINITY;
-    for (const auto &e : section) {
-      m = std::max({m, e.r0 * s + e.z0 * d.z, e.r1 * s + e.z1 * d.z});
-      if (e.arc) m = std::max(m, e.cr * s + e.cz * d.z + e.rad * std::hypot(s, d.z));
+    where = {br * c, br * sn, bz};
+  } else {
+    // Swept: the best along the oval, sampled and then narrowed down.
+    Oval o{a, b, std::cos(phi), std::sin(phi)};
+    auto value = [&](double t, V3 *pt) {
+      V3 c = o.at(t), nm = o.normal(t);
+      double s = dot(nm, d), m = -INFINITY, bu = 0, bz = 0;
+      for (const auto &e : section) {
+        if (e.r0 * s + e.z0 * d.z > m) m = e.r0 * s + e.z0 * d.z, bu = e.r0, bz = e.z0;
+        if (e.r1 * s + e.z1 * d.z > m) m = e.r1 * s + e.z1 * d.z, bu = e.r1, bz = e.z1;
+        double h = std::hypot(s, d.z);
+        if (e.arc && h > 0 && e.cr * s + e.cz * d.z + e.rad * h > m)
+          m = e.cr * s + e.cz * d.z + e.rad * h, bu = e.cr + e.rad * s / h, bz = e.cz + e.rad * d.z / h;
+      }
+      if (pt) *pt = c + nm * bu + V3{0, 0, bz};
+      return dot(c, d) + m;
+    };
+    const int n = 720;
+    int k = 0;
+    for (int i = 0; i < n; i++)
+      if (value(2 * pi * i / n, nullptr) > value(2 * pi * k / n, nullptr)) k = i;
+    double lo = 2 * pi * (k - 1) / n, hi = 2 * pi * (k + 1) / n;
+    const double g = (std::sqrt(5.0) - 1) / 2;
+    for (int i = 0; i < 80; i++) {
+      double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
+      if (value(x1, nullptr) < value(x2, nullptr)) lo = x1; else hi = x2;
     }
-    return dot(c, d) + m;
-  };
-  const int n = 720;
-  int k = 0;
-  for (int i = 0; i < n; i++)
-    if (value(2 * pi * i / n) > value(2 * pi * k / n)) k = i;
-  double lo = 2 * pi * (k - 1) / n, hi = 2 * pi * (k + 1) / n;
-  const double g = (std::sqrt(5.0) - 1) / 2;
-  for (int i = 0; i < 80; i++) {
-    double x1 = hi - g * (hi - lo), x2 = lo + g * (hi - lo);
-    if (value(x1) < value(x2)) lo = x1; else hi = x2;
+    double tm = (lo + hi) / 2, tk = 2 * pi * k / n;
+    best = value(tm, nullptr) >= value(tk, nullptr) ? value(tm, &where) : value(tk, &where);
   }
-  return std::max(value((lo + hi) / 2), value(2 * pi * k / n));
-}
-
-void bounds(const Shape &s, V3 &lo, V3 &hi) {
-  for (int i = 0; i < 3; i++) {
-    V3 r = s.place.row(i);
-    double t = s.place.m[4 * i + 3];
-    hi[i] = s.model->support(r) + t;
-    lo[i] = -s.model->support(-r) + t;
-  }
-}
-
-double volume(const Shape &s) { return s.model->volume * std::fabs(s.place.det()); }
-
-void mesh(const Shape &s, double deflection, Solid &out) {
-  double grow = s.place.stretch();
-  s.model->build(out, grow > 0 ? deflection / grow : deflection);
-  out.transform(s.place);
-  out.exact = s.place.similarity();
+  if (at) *at = where;
+  return best;
 }
 
 // MARK: - primitives
@@ -677,7 +761,9 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
     break;
   }
   }
-  out.model = m;
+  auto node = std::make_shared<Node>();
+  node->model = m;
+  out.node = node;
   out.place = pre;
   // Centred on its bounding box, as all Bcad's shapes are.
   V3 lo, hi;

@@ -1,5 +1,6 @@
 // Bcad's own geometry engine against exact maths: volumes and boxes from formulas, closed outward meshes, the faces,
-// edges, corners and circles the app works with, placements, distances, exact orientation, and how fast it all is.
+// edges, corners and circles the app works with, placements, merging and splitting (again and again), distances, exact
+// orientation, and how fast it all is.
 // c++ -std=c++17 -O2 -I. test/engine.cpp Engine/*.cpp -o engine-test && ./engine-test
 #include "BcadKernel.h"
 #include "Engine/Math.hpp"
@@ -41,7 +42,9 @@ static double perimeter(double a, double b) {
 }
 
 // A mesh's closedness: every edge between two triangles, run opposite ways (welded by position), and its signed volume.
-static bool closed(const BKMesh *m, double &signedVolume, std::string &why) {
+// `touching`: a shape may touch itself along a line (a merge of shapes meeting there), so an edge may have four
+// triangles, two each way.
+static bool closed(const BKMesh *m, double &signedVolume, std::string &why, bool touching = false) {
   std::map<std::tuple<float, float, float>, int> weld;
   std::vector<int> id(m->vertexCount);
   for (int i = 0; i < m->vertexCount; i++) {
@@ -67,11 +70,12 @@ static bool closed(const BKMesh *m, double &signedVolume, std::string &why) {
     for (int k = 0; k < 3; k++) directed[{v[k], v[(k + 1) % 3]}]++;
   }
   for (auto &[e, n] : directed) {
-    if (n != 1) {
+    auto back = directed.find({e.second, e.first});
+    if (n != 1 && !(touching && back != directed.end() && back->second == n)) {
       why = "an edge run the same way twice";
       return false;
     }
-    if (!directed.count({e.second, e.first})) {
+    if (back == directed.end()) {
       why = "an open edge";
       return false;
     }
@@ -316,6 +320,284 @@ int main() {
       tested++;
     }
     check("exact orientation of nearly flat tetrahedra", wrong == 0, fmt("%.0f wrong of %.0f", wrong, tested));
+  }
+
+  // MARK: merging and splitting
+  {
+    auto at = [](BKShape *s, double x, double y = 0, double z = 0) {
+      double m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+      return bk_transform(s, m);
+    };
+    struct Got {
+      double volume, sv;
+      bool shut;
+      std::string why;
+      int faces, edges, corners, circles, pieces;
+      double lo[3], hi[3];
+    };
+    auto look = [&](BKShape *s, double deflection = 0.05, bool touching = false) {
+      Got g{};
+      BKMesh *m = bk_mesh(s, deflection);
+      g.volume = m->volume, g.shut = closed(m, g.sv, g.why, touching);
+      g.faces = m->faceCount, g.edges = m->edgeCount, g.corners = m->cornerCount, g.circles = m->circleCount, g.pieces = bk_piece_count(s);
+      for (int k = 0; k < 3; k++) g.lo[k] = m->bbox[k], g.hi[k] = m->bbox[3 + k];
+      bk_mesh_free(m);
+      return g;
+    };
+    auto says = [](const Got &g) {
+      char s[300];
+      snprintf(s, sizeof s, "volume %.6f · faces %d edges %d corners %d circles %d pieces %d %s", g.volume, g.faces, g.edges, g.corners, g.circles, g.pieces,
+               g.shut ? "" : g.why.c_str());
+      return std::string(s);
+    };
+    auto boxIs = [](const Got &g, std::vector<double> lo, std::vector<double> hi) {
+      bool ok = true;
+      for (int k = 0; k < 3; k++) ok = ok && near(g.lo[k], lo[k], 1e-9) && near(g.hi[k], hi[k], 1e-9);
+      return ok;
+    };
+    double b20[3] = {20, 20, 20}, hole[2] = {10, 40}, flush[2] = {10, 20}, ball[1] = {20}, small[1] = {10}, slab[3] = {10, 10, 40};
+    BKShape *box = bk_primitive(BK_BOX, b20), *box2 = at(box, 10, 10, 10), *cyl = bk_primitive(BK_CYLINDER, hole);
+    double p0[3] = {0, 0, 0}, nx[3] = {1, 0, 0}, ny[3] = {0, 1, 0}, nz[3] = {0, 0, 1}, tilt[3] = {1, 1, 1};
+    std::vector<BKShape *> made;
+    auto keep = [&](BKShape *s) { return made.push_back(s), s; };
+
+    // Merging: two cubes overlapping corner to corner, face to face, touching, apart.
+    Got g = look(keep(bk_boolean(BK_UNION, box, box2)));
+    check("merge: overlapping cubes", g.shut && near(g.volume, 15000, 1e-9) && g.faces == 12 && g.edges == 30 && g.corners == 20 && g.pieces == 1 &&
+                                          boxIs(g, {-10, -10, -10}, {20, 20, 20}), says(g));
+    g = look(keep(bk_boolean(BK_UNION, box, keep(at(box, 10)))));
+    check("merge: side by side, faces on one plane joined", g.shut && near(g.volume, 12000, 1e-9) && g.faces == 6 && g.edges == 12 && g.corners == 8, says(g));
+    g = look(keep(bk_boolean(BK_UNION, box, keep(at(box, 20)))));
+    check("merge: touching cubes are one piece", g.shut && near(g.volume, 16000, 1e-9) && g.faces == 6 && g.pieces == 1, says(g));
+    g = look(keep(bk_boolean(BK_UNION, box, keep(at(box, 30)))));
+    check("merge: cubes apart are two pieces", g.shut && near(g.volume, 16000, 1e-9) && g.pieces == 2, says(g));
+    g = look(keep(bk_boolean(BK_SUBTRACT, box, box2)));
+    check("subtract: a corner taken out", g.shut && near(g.volume, 7000, 1e-9) && g.faces == 9 && g.pieces == 1 && boxIs(g, {-10, -10, -10}, {10, 10, 10}), says(g));
+    g = look(keep(bk_boolean(BK_INTERSECT, box, box2)));
+    check("intersect: the shared corner", g.shut && near(g.volume, 1000, 1e-9) && g.faces == 6 && boxIs(g, {0, 0, 0}, {10, 10, 10}), says(g));
+
+    // Holes: through, flush with both faces; a hidden hollow; a sphere cut by a face.
+    BKShape *drilled = keep(bk_boolean(BK_SUBTRACT, box, cyl));
+    g = look(drilled);
+    {
+      BKMesh *m = bk_mesh(drilled, 0.05);
+      bool rims = m->circleCount == 2;
+      for (int i = 0; i < m->circleCount; i++) {
+        double *c = m->circles + 7 * i;
+        rims = rims && near(c[0], 0, 1e-9) && near(c[1], 0, 1e-9) && near(std::fabs(c[2]), 10, 1e-9) && near(std::fabs(c[5]), 1, 1e-9) && near(c[6], 5, 1e-9);
+      }
+      check("subtract: a hole through, its rims circles of its radius", g.shut && near(g.volume, 8000 - PI * 25 * 20, 1e-9 * 8000) && g.faces == 7 && g.edges == 14 &&
+                                                                              g.corners == 8 && rims && boxIs(g, {-10, -10, -10}, {10, 10, 10}), says(g));
+      bk_mesh_free(m);
+    }
+    g = look(keep(bk_boolean(BK_SUBTRACT, box, keep(bk_primitive(BK_CYLINDER, flush)))));
+    check("subtract: a hole flush with both faces leaves no skin", g.shut && near(g.volume, 8000 - PI * 25 * 20, 1e-9 * 8000) && g.faces == 7 && g.circles == 2, says(g));
+    g = look(keep(bk_boolean(BK_SUBTRACT, box, keep(bk_primitive(BK_SPHERE, small)))));
+    check("subtract: a hollow inside is still one piece", g.shut && near(g.volume, 8000 - 4 * PI * 125 / 3, 1e-9 * 8000) && g.pieces == 1 && g.faces == 7, says(g));
+    BKShape *dome = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_SPHERE, ball)), keep(at(box, 10))));
+    g = look(dome);
+    check("intersect: a sphere cut by a face is half a sphere, its rim a circle", g.shut && near(g.volume, 2 * PI * 1000 / 3, 1e-6 * 2094) && g.faces == 2 && g.circles == 1 &&
+                                                                                       boxIs(g, {0, -10, -10}, {10, 10, 10}), says(g));
+    // A merge, then a subtract: a 30 × 20 × 20 block with a 10 × 10 slot through it.
+    g = look(keep(bk_boolean(BK_SUBTRACT, keep(bk_boolean(BK_UNION, box, keep(at(box, 10)))), keep(at(keep(bk_primitive(BK_BOX, slab)), 5)))));
+    check("merge, then subtract: one more level down the tree", g.shut && near(g.volume, 12000 - 2000, 1e-9) && g.pieces == 1, says(g));
+    // Two equal cylinders crossing at right angles (their sides touch where they cross): 16 r³ / 3.
+    {
+      double c[2] = {20, 60}, turn[12] = {1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0};
+      BKShape *a = keep(bk_primitive(BK_CYLINDER, c)), *b = keep(bk_transform(a, turn));
+      bool ok = true;
+      std::string note;
+      for (double d : {0.2, 0.1, 0.05, 0.02}) {
+        g = look(keep(bk_boolean(BK_INTERSECT, a, b)), d);
+        ok = ok && g.shut && near(g.volume, 16000.0 / 3, 2e-4 * 5333);
+        note += fmt("%.4f ", g.volume);
+      }
+      check("intersect: crossing cylinders (sides touching), at every detail", ok, note);
+    }
+
+    // Splitting: straight, tilted, across a cylinder, through a ring's hole, beside the shape.
+    g = look(keep(bk_split(box, p0, nz, 0)));
+    Got other = look(keep(bk_split(box, p0, nz, 1)));
+    check("split: a cube in two halves", g.shut && other.shut && near(g.volume, 4000, 1e-9) && near(other.volume, 4000, 1e-9) && g.faces == 6 &&
+                                            boxIs(g, {-10, -10, 0}, {10, 10, 10}) && boxIs(other, {-10, -10, -10}, {10, 10, 0}),
+          says(g));
+    g = look(keep(bk_split(box, p0, tilt, 0)));
+    other = look(keep(bk_split(box, p0, tilt, 1)));
+    check("split: tilted through the middle, a six-sided cut", g.shut && near(g.volume, 4000, 1e-9) && near(other.volume, 4000, 1e-9) && g.faces == 7 && g.corners == 10,
+          says(g));
+    double c20[2] = {20, 20};
+    BKShape *round = keep(bk_primitive(BK_CYLINDER, c20));
+    g = look(keep(bk_split(round, p0, nz, 0)));
+    check("split: a cylinder across its axis, the cut's rim a circle", g.shut && near(g.volume, PI * 100 * 10, 1e-9 * 3142) && g.faces == 3 && g.circles == 2, says(g));
+    double ringSize[3] = {30, 20, 5};
+    BKShape *ring = keep(bk_primitive(BK_RING, ringSize));
+    g = look(keep(bk_split(ring, p0, nx, 0)));
+    other = look(keep(bk_split(ring, p0, nx, 1)));
+    double half = PI * (225 - 100) * 5 / 2;
+    check("split: a ring through its hole, two separate cut faces", g.shut && other.shut && near(g.volume, half, 1e-4 * half) && near(g.volume + other.volume, 2 * half, 1e-9 * half) &&
+                                                                      g.faces == 6 && g.pieces == 1 && boxIs(g, {0, -15, -2.5}, {15, 15, 2.5}),
+          says(g));
+    double far[3] = {50, 0, 0};
+    BKShape *beside = keep(bk_split(box, far, nx, 0));
+    g = look(beside);
+    check("split: beside the shape leaves nothing", g.pieces == 0 && g.volume == 0 && g.faces == 0, says(g));
+
+    // Splitting again and again: a split piece split, a merge split, a drilled block split, each time on what's left.
+    {
+      BKShape *s = box;
+      double planes[5][6] = {{-5, 0, 0, 1, 0, 0}, {5, 0, 0, -1, 0, 0}, {0, 0, 0, 0, 1, 0}, {0, 0, 3, 0, 0, -1}, {0, 7, 0, 0, -1, 0}};
+      bool ok = true;
+      std::string note;
+      for (auto &q : planes) {
+        s = keep(bk_split(s, q, q + 3, 0));
+        g = look(s);
+        ok = ok && g.shut && g.pieces == 1 && g.faces == 6;
+        note += fmt("%.1f ", g.volume);
+      }
+      check("split five times over, each piece split again", ok && near(g.volume, 10 * 7 * 13, 1e-9) && boxIs(g, {-5, 0, -10}, {5, 7, 3}), note);
+    }
+    g = look(keep(bk_split(keep(bk_boolean(BK_UNION, box, box2)), p0, tilt, 0)));
+    other = look(keep(bk_split(keep(bk_boolean(BK_UNION, box, box2)), p0, tilt, 1)));
+    check("split: a merged shape, both sides adding up", g.shut && other.shut && near(g.volume + other.volume, 15000, 1e-9 * 15000), says(g));
+    {
+      BKShape *top = keep(bk_split(drilled, p0, nz, 0)), *quarter = keep(bk_split(top, p0, nx, 0)), *other2 = keep(bk_split(top, p0, nx, 1));
+      Got t = look(top), q = look(quarter), o = look(other2);
+      double whole = 8000 - PI * 25 * 20;
+      check("split: a drilled block, then its half again", t.shut && q.shut && o.shut && near(t.volume, whole / 2, 1e-9 * whole) && near(q.volume, whole / 4, 1e-6 * whole) &&
+                                                            near(q.volume + o.volume, t.volume, 1e-9 * whole) && q.circles == 2,
+            says(q));
+    }
+    {
+      // A split sphere split across, and across again: an eighth of the sphere.
+      BKShape *s = keep(bk_primitive(BK_SPHERE, ball));
+      BKShape *e = keep(bk_split(keep(bk_split(keep(bk_split(s, p0, nz, 0)), p0, nx, 0)), p0, ny, 0));
+      g = look(e);
+      double eighth = 4 * PI * 1000 / 3 / 8;
+      check("split: a sphere split three times, an eighth left", g.shut && near(g.volume, eighth, 1e-6 * eighth) && g.faces == 4 && boxIs(g, {0, 0, 0}, {10, 10, 10}),
+            says(g));
+    }
+
+    // Measuring on what's left: the drilled hole's side and the split cylinder's cut face, exactly.
+    {
+      BKMesh *m = bk_mesh(drilled, 0.05);
+      double out[6], q[3] = {0, 0, 0}, best = 1e9;
+      for (int f = 0; f < m->faceCount; f++) best = std::min(best, bk_distance(nullptr, nullptr, BK_END_POINT, 0, q, drilled, I, BK_END_FACE, f, nullptr, out));
+      check("distance: a point on the axis to the drilled hole's side", near(best, 5, 1e-9), fmt("%.12f", best));
+      bk_mesh_free(m);
+      BKShape *cut = keep(bk_split(round, p0, nz, 1));
+      m = bk_mesh(cut, 0.05);
+      double above[3] = {3, 4, 100};
+      best = 1e9;
+      for (int f = 0; f < m->faceCount; f++) best = std::min(best, bk_distance(nullptr, nullptr, BK_END_POINT, 0, above, cut, I, BK_END_FACE, f, nullptr, out));
+      check("distance: a point above to a split cylinder's cut", near(best, 100, 1e-9), fmt("%.12f", best));
+      bk_mesh_free(m);
+    }
+
+    // Many shapes at random, each pair merged, subtracted and intersected: always closed and facing out, and the volumes
+    // agreeing with one another (A ∪ B and A ∩ B add up to A and B; A − B is A less A ∩ B) and with a far finer mesh.
+    {
+      std::mt19937 rng(11);
+      std::uniform_real_distribution<double> U(0, 1);
+      auto shape = [&]() -> BKShape * {
+        double s = 8 + 14 * U(rng);
+        switch (rng() % 6) {
+          case 0: {
+            double p[3] = {s, s * (0.6 + U(rng)), s * (0.6 + U(rng))};
+            return bk_primitive(BK_BOX, p);
+          }
+          case 1: {
+            double p[2] = {s, s};
+            return bk_primitive(BK_CYLINDER, p);
+          }
+          case 2: {
+            double p[1] = {s};
+            return bk_primitive(BK_SPHERE, p);
+          }
+          case 3: {
+            double p[3] = {s, s * 0.3, s};
+            return bk_primitive(BK_CONE, p);
+          }
+          case 4: {
+            double p[3] = {0, s * 1.5, s * 0.4};
+            return bk_primitive(BK_TORUS, p);
+          }
+          default: {
+            double p[3] = {(double)(3 + rng() % 5), s, s};
+            return bk_primitive(BK_PRISM, p);
+          }
+        }
+      };
+      // Half turned any way, half lined up on whole millimetres (faces lying on faces, edges along edges).
+      auto place = [&](BKShape *s, bool square) {
+        double a = U(rng) * 2 * PI, b = U(rng) * PI, c = U(rng) * 2 * PI;
+        if (square) a = (rng() % 4) * PI / 2, b = (rng() % 2) * PI / 2, c = 0;
+        double ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b), cc = std::cos(c), sc = std::sin(c);
+        double t[3] = {(U(rng) - 0.5) * 16, (U(rng) - 0.5) * 16, (U(rng) - 0.5) * 16};
+        if (square)
+          for (auto &v : t) v = std::round(v);
+        double m[12] = {ca * cc - sa * cb * sc, -ca * sc - sa * cb * cc, sa * sb, t[0], sa * cc + ca * cb * sc, -sa * sc + ca * cb * cc, -ca * sb, t[1], sb * sc, sb * cc, cb, t[2]};
+        BKShape *r = bk_transform(s, m);
+        bk_free(s);
+        return r;
+      };
+      int pairs = 120, open = 0, unequal = 0, off = 0;
+      double worst = 0, worstFine = 0, took = 0, slowest = 0;
+      for (int i = 0; i < pairs; i++) {
+        bool square = i % 2 == 1;
+        BKShape *a = place(shape(), square), *b = place(shape(), square);
+        double va = look(a).volume, vb = look(b).volume, v[3];
+        for (int op = 0; op < 3; op++) {
+          auto t0 = std::chrono::steady_clock::now();
+          BKShape *r = bk_boolean(op, a, b);
+          // Lined-up shapes may touch along a line (a torus resting on a face): closed all the same.
+          Got q = look(r, 0.05, square);
+          double t = ms(t0);
+          took += t, slowest = std::max(slowest, t);
+          if (!q.shut) open++;
+          v[op] = q.volume;
+          // Against a far finer mesh's.
+          if (i % 4 == 0) {
+            Got fine = look(r, 0.003, square);
+            double e = std::fabs(q.volume - fine.volume) / std::min(va, vb);
+            worstFine = std::max(worstFine, e);
+            if (e > 1e-3) off++;
+          }
+          bk_free(r);
+        }
+        double e1 = std::fabs(v[0] + v[2] - va - vb) / std::min(va, vb), e2 = std::fabs(v[1] - (va - v[2])) / std::min(va, vb);
+        worst = std::max({worst, e1, e2});
+        if (e1 > 1e-6 || e2 > 1e-6) unequal++;
+        bk_free(a), bk_free(b);
+      }
+      check("random merges, subtracts and intersects: all closed", open == 0, fmt("%.0f open of %.0f", open, 3 * pairs));
+      check("random: volumes add up", unequal == 0, fmt("worst %.2g (%.0f off)", worst, unequal));
+      check("random: volumes as a far finer mesh's", off == 0, fmt("worst %.2g of the smaller shape", worstFine));
+      printf("  %d merges, subtracts and intersects in %.2f ms each (slowest %.1f ms)\n", 3 * pairs, took / (3 * pairs), slowest);
+    }
+
+    // Speed: the same merge again is kept (no work), a new one is quick.
+    {
+      double sph[1] = {40};
+      BKShape *s = keep(bk_primitive(BK_SPHERE, sph)), *u = keep(bk_boolean(BK_UNION, s, keep(at(s, 25, 5, 3))));
+      auto t0 = std::chrono::steady_clock::now();
+      BKMesh *m = bk_mesh(u, 0.05);
+      double first = ms(t0);
+      int tris = m->triangleCount;
+      bk_mesh_free(m);
+      t0 = std::chrono::steady_clock::now();
+      m = bk_mesh(u, 0.05);
+      double again = ms(t0);
+      bk_mesh_free(m);
+      t0 = std::chrono::steady_clock::now();
+      BKShape *sp = keep(bk_split(u, p0, tilt, 0));
+      m = bk_mesh(sp, 0.05);
+      double split = ms(t0);
+      bk_mesh_free(m);
+      printf("  two 40 mm spheres merged in %.2f ms (%d triangles), again in %.3f ms; that split in %.2f ms\n", first, tris, again, split);
+      check("merging and splitting are quick", first < 50 && again < first / 5 && split < 50);
+    }
+    for (BKShape *s : made) bk_free(s);
+    bk_free(box), bk_free(box2), bk_free(cyl);
   }
 
   // MARK: speed
