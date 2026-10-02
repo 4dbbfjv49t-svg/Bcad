@@ -1161,10 +1161,16 @@ struct ScreenContent: View {
                     case .fastener(let f): FastenerLength(id: b.id, f: f)
                     default: EmptyView()
                     }
-                    if !plain(b) || b.place.scale != SIMD3(1, 1, 1) {
-                        SettingsTitle(text: L("Scale") + " · %")
-                        AxisRow(values: b.place.scale * 100, range: 1...100000) { i, v in lib.rescale(b.id, axis: i, by: v / 100 / b.place.scale[i]) }
+                    // Any shape, however it was made or edited, resizes by its size in mm or by percent, along its own axes.
+                    if !plain(b), let m = lib.meshes[b.id], !m.vertices.isEmpty {
+                        let size = m.size * b.place.scale
+                        SettingsTitle(text: L("Size") + " · " + L("mm"))
+                        AxisRow(values: size, range: 0.01...100000) { i, v in
+                            if size[i] > 0 { lib.rescale(b.id, axis: i, by: v / size[i]) }
+                        }
                     }
+                    SettingsTitle(text: L("Scale") + " · %")
+                    AxisRow(values: b.place.scale * 100, range: 1...100000) { i, v in lib.rescale(b.id, axis: i, by: v / 100 / b.place.scale[i]) }
                 } else {
                     Hint(text: L("Drag the handles to resize all selected shapes"))
                 }

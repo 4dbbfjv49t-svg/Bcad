@@ -706,6 +706,31 @@ enum SelfTest {
         let picked = lib.edgePicks.first
         let lit = picked.flatMap { pk in lib.meshes[cube.id].map { Picking.faceEdges($0, pk).count } } ?? 0
         check("a face clicked in Angles is picked with its edges", lib.edgePicks.count == 1 && picked?.kind == Int32(BK_PICK_FACE) && lit == 4, "\(lit) edges")
+        // Sizes in mm and in percent on shapes that were edited after they were made: a rounded, hollowed box and a merge.
+        let edited = Solid(name: "Edited", color: Palette.colors[3], node: .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: [edge], radius: 1),
+                           place: Placement(move: SIMD3(0, 0, 10)))
+        let merged = Solid(name: "Merged", color: Palette.colors[4], node: .group(op: Int32(BK_UNION), parts: [
+            Part(node: box, place: Placement()), Part(node: .primitive(.make(.cylinder)), place: Placement(move: SIMD3(15, 0, 0)))
+        ]), place: Placement(move: SIMD3(60, 0, 10)))
+        use([edited, merged])
+        lib.settings = Settings()
+        var resized: [String] = []
+        for s in [edited, merged] {
+            // As the Size row does: the size shown is the mesh's along the shape's axes, times its scale.
+            guard let b = lib.body(s.id), let m = lib.meshes[s.id] else { resized.append("\(s.name): no mesh"); continue }
+            lib.rescale(s.id, axis: 0, by: 40 / (m.size.x * b.place.scale.x))
+            settle()
+            let (lo1, hi1) = bounds(s.id)
+            let before = hi1.y - lo1.y
+            // As the Scale row does: 50 % of the shape as it is now (its y scale is still 100 %).
+            if let b2 = lib.body(s.id) { lib.rescale(s.id, axis: 1, by: 50 / 100 / b2.place.scale.y) }
+            settle()
+            let (lo2, hi2) = bounds(s.id)
+            if abs(hi1.x - lo1.x - 40) > 0.05 || abs(hi2.y - lo2.y - before / 2) > 0.05 || abs(hi2.x - lo2.x - 40) > 0.05 {
+                resized.append(String(format: "%@: %.2f × %.2f (from %.2f)", s.name, hi2.x - lo2.x, hi2.y - lo2.y, before))
+            }
+        }
+        check("an edited shape and a merge resize to a size in mm and by percent", resized.isEmpty, resized.joined(separator: " · "))
         // The ruler, through the pointer: it snaps to what can be seen, two corners give their distance, two faces the gap
         // between them as well, Esc clears and then leaves.
         func click(_ w: SIMD3<Double>, _ mods: NSEvent.ModifierFlags = []) {
