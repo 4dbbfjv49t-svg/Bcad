@@ -746,6 +746,7 @@ final class Kernel: @unchecked Sendable {
 
     // The shape cut across a picked edge, for the 2D angle editor.
     func section(_ node: Node, _ pick: Pick) -> Section? {
+        NSLog("probe section cached %d", cache[key(node)] != nil ? 1 : 0) // probe
         guard let s = shape(node) else { return nil }
         let data = [pick.a.x, pick.a.y, pick.a.z, pick.b.x, pick.b.y, pick.b.z]
         guard let c = s.with({ bk_section($0, pick.kind, data, 20) }) else { return nil }
@@ -1314,7 +1315,9 @@ final class Workbench: DesignHost {
             guard !Task.isCancelled, let self, self.trying else { return }
             withAnimation(Neon.spring) { self.busy = note }
         }
+        NSLog("probe try start") // probe
         Kernel.shared.queue.async {
+            NSLog("probe try queue start") // probe
             Kernel.shared.clearance = clearance
             var problems: [String] = [], ok = true
             for n in nodes {
@@ -1325,6 +1328,7 @@ final class Workbench: DesignHost {
             if !ok && !problems.contains(where: Kernel.failure) { problems.append("failed") }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    NSLog("probe try main") // probe
                     shown.cancel()
                     self.trying = false
                     self.ended(note)
@@ -1865,12 +1869,17 @@ final class Workbench: DesignHost {
     func workWithAngles() {
         guard let id = editBody, let b = body(id), let first = edgePicks.first, !angleOpening else { return }
         angleOpening = true
+        NSLog("probe angles pressed") // probe
+        Task { for _ in 0..<400 { let t0 = CFAbsoluteTimeGetCurrent(); try? await Task.sleep(for: .milliseconds(50)); let gap = CFAbsoluteTimeGetCurrent() - t0; if gap > 0.2 { NSLog("probe main stalled %.0f ms", gap * 1000) } } } // probe
         let node = b.node, picks = edgePicks, clearance = settings.clearance
         Kernel.shared.queue.async {
+            NSLog("probe angles queue start") // probe
             Kernel.shared.clearance = clearance
             let section = Kernel.shared.section(node, first)
+            NSLog("probe angles section done") // probe
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    NSLog("probe angles main") // probe
                     guard let section, self.mode == .angles, let b = self.body(id) else {
                         self.angleOpening = false
                         if section == nil { self.flash(L("This edge can't be shown in a cut")) }
@@ -1881,6 +1890,7 @@ final class Workbench: DesignHost {
                     let along = simd_normalize((m * SIMD4(section.direction, 0)).xyz)
                     self.cameraBeforeAngles = self.camera
                     self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
+                        NSLog("probe angles flown") // probe
                         withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) {
                             self.angleEdit = AngleEdit(body: id, picks: picks, section: section)
                         }
@@ -1940,6 +1950,7 @@ final class Workbench: DesignHost {
             for i in 1...steps {
                 try? await Task.sleep(for: .milliseconds(16))
                 guard let self, !Task.isCancelled else { return }
+                NSLog("probe fly step %d", i) // probe
                 let t = Float(i) / Float(steps), k = t * t * (3 - 2 * t)
                 self.camera.target = from.target + (target - from.target) * k
                 self.camera.yaw = from.yaw + turn * k
@@ -1999,7 +2010,9 @@ final class Workbench: DesignHost {
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
         let note = L("Building…")
         if slow { busy = note }
+        NSLog("probe rebuild %d", todo.count) // probe
         Kernel.shared.queue.async {
+            NSLog("probe rebuild queue start") // probe
             Kernel.shared.clearance = clearance
             // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
             _ = Kernel.shared.takeProblems()
@@ -2019,6 +2032,7 @@ final class Workbench: DesignHost {
                 }
             }
             let found = trouble
+            NSLog("probe rebuild queue done") // probe
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.building = false
