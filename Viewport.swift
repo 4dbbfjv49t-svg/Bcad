@@ -373,8 +373,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         if lib.mode == .measure { drawMeasure(enc, accent: accent, accent2: accent2) }
         self.view?.placeTags()
         enc.endEncoding()
-        cmd.present(drawable)
+        // Shown with the window's own changes in one go (the tags over the view among them), rather than on its own, which
+        // a window doesn't always put on screen until something else in it changes.
         cmd.commit()
+        cmd.waitUntilScheduled()
+        drawable.present()
     }
 
     private func drawBed(_ enc: MTLRenderCommandEncoder, accent: SIMD4<Float>) {
@@ -818,6 +821,7 @@ final class CadView: MTKView {
         layer?.isOpaque = false
         isPaused = true
         enableSetNeedsDisplay = false
+        presentsWithTransaction = true
         addSubview(lengthTag)
         addSubview(snapTag)
     }
