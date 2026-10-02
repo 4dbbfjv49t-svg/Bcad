@@ -262,7 +262,7 @@ jobs:
           open -a "$APP"
           shot ui-00-cold 12
           $U trusted
-          echo "— the side panel hidden, then shown"
+          echo "— the side panel hidden, then shown (system Reduce motion: $(defaults read com.apple.universalaccess reduceMotion 2>/dev/null || echo unset))"
           screencapture -x -v -V 3 "$R/hide.mov" & rec=$!; sleep 1; $U click 292 87; wait $rec || true
           "$RUNNER_TEMP/frames" "$R/hide.mov" "$R/shots/ui-01-hide" || true
           shot ui-02-hidden 3
@@ -286,16 +286,17 @@ jobs:
           $U view -130 10; sleep 2
           shot ui-08-angles
           $U tree | grep -iE "work with angles|all edges|pick" | head -8
-          echo "— straight views: Top of the selection, North of everything"
+          echo "— straight views: the panel beside the rail, then Top and North of everything"
           $U press Views; sleep 1
           shot ui-09-views
-          $U press Top
-          shot ui-10-top-3s 3
-          shot ui-10b-top-15s 12
+          $U press Views; sleep 1
           $U key 53; sleep 1; $U key 53; sleep 1
           $U press Views; sleep 1
-          $U press North; sleep 5
-          shot ui-11-north
+          $U press Top
+          shot ui-10-top 10
+          $U press Views; sleep 1
+          $U press North
+          shot ui-11-north 10
           echo "— the split plane"
           $U key 29; sleep 1; $U key 3; sleep 2
           $U view 0 0; sleep 1
