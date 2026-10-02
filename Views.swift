@@ -13,7 +13,7 @@ struct RootView: View {
             Backdrop()
             // The 3D view keeps full resolution and never mirrors: it sits outside the scaled interface, beside the drawer.
             Viewport()
-                .padding(look.rtl ? .trailing : .leading, lib.drawerOpen ? 320 * look.scale : 0)
+                .padding(look.rtl ? .trailing : .leading, lib.drawerInset * look.scale)
             ScaledUI {
                 ZStack {
                     HStack(spacing: 0) {

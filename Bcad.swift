@@ -1123,7 +1123,10 @@ final class Workbench: DesignHost {
     var splitOffset = 0.0
     var splitTilt = SIMD2<Double>(0, 0)
     var showSettings = false
-    var drawerOpen = true
+    var drawerOpen = true { didSet { glideInset() } }
+    // How far the 3D view sits in from the side panel's edge. It follows the panel as it slides (the 3D view itself can't
+    // be animated), rather than jumping while the panel is still on its way.
+    private(set) var drawerInset: CGFloat = 320
     // Work under way (with a spinner), and a short message that goes by itself.
     var busy: String?
     var note: String?
@@ -1156,6 +1159,7 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var swiped = false
     @ObservationIgnored private var cameraBeforeAngles: Camera?
     @ObservationIgnored private var flight: Task<Void, Never>?
+    @ObservationIgnored private var insetGlide: Task<Void, Never>?
 
     var accent: Color { Skin.shared.accent }
     var accent2: Color { Skin.shared.accent2 }
@@ -1964,6 +1968,21 @@ final class Workbench: DesignHost {
                         self.angleOpening = false
                     }
                 }
+            }
+        }
+    }
+
+    private func glideInset() {
+        insetGlide?.cancel()
+        let from = drawerInset, to: CGFloat = drawerOpen ? 320 : 0
+        guard from != to else { return }
+        guard !Neon.calm else { drawerInset = to; return }
+        insetGlide = Task { [weak self] in
+            for i in 1...32 {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard let self, !Task.isCancelled else { return }
+                let t = CGFloat(i) / 32
+                self.drawerInset = from + (to - from) * (1 - pow(1 - t, 3))
             }
         }
     }
