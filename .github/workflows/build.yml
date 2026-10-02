@@ -316,30 +316,32 @@ jobs:
           $U viewdrag -250 170 50 170; sleep 2
           shot ui-02-gizmo-behind 1
           $U viewdrag 50 170 -250 170; sleep 2
+          $U key 3; sleep 2
+          shot ui-02b-gizmo-back 1
           echo "— the ruler"
           $U key 46; sleep 2
           shot ui-03-ruler 1
-          $U tree | grep -iE "ruler|click a corner" | head -3
-          for p in "-60 -60" "0 -40" "40 30" "90 -10"; do $U hover $p; sleep 1; done
-          shot ui-04-hover 1
-          $U view -60 -60; sleep 1
-          $U hover 70 50; sleep 1
+          $U tree | grep -iE "ruler|click a corner" | head -3 || true
+          $U hover -58 -4; sleep 1
+          shot ui-04-corner 1
+          $U view -58 -4; sleep 1
+          $U hover 101 30; sleep 1
           shot ui-05-live 1
-          $U view 70 50; sleep 2
+          $U view 101 30; sleep 3
           shot ui-06-measured 1
-          $U tree | grep -iE "distance|gap|mm|Δ" | head -12
-          echo "— a second shape and the gap between faces"
-          $U key 53; sleep 1; $U key 53; sleep 1
-          $U press Sphere; sleep 3; $U key 3; sleep 2
-          $U key 46; sleep 1
-          $U view -120 0; sleep 1
-          $U view 120 0; sleep 3
-          shot ui-07-gap 1
-          $U tree | grep -iE "distance|gap|mm|Δ" | head -12
+          $U tree | grep -iE "distance|gap|mm|Δ" | head -12 || true
+          $U view -137 64; sleep 1
+          $U view 101 30; sleep 3
+          shot ui-07-faces 1
+          $U tree | grep -iE "distance|gap|mm|Δ" | head -12 || true
           $U key 53; sleep 1
           shot ui-08-cleared 1
           $U key 53; sleep 1
-          shot ui-09-left 1
+          echo "— copy and paste"
+          $U view -137 64; sleep 1
+          $U key 8 cmd; sleep 1; $U key 9 cmd; sleep 4
+          shot ui-09-pasted 1
+          $U tree | grep -cE "^ *Cube" || true
           $U key 12 cmd; shot ui-10-quit 2
           $U press "Don't Save"; sleep 3
           pkill -x Bcad || true

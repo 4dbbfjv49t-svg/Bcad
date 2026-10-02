@@ -679,23 +679,27 @@ enum SelfTest {
         let pair = [cube.id, other.id].map { lib.body($0)?.node.base }
         let widened = pair.allSatisfy { if case .primitive(let p) = $0 { p.size[0] > 20.5 && p.size[1] == 20 && p.size[2] == 20 } else { false } }
         check("dragging the side handle of two shapes changes that side only", widened, pair.map { "\($0.map { "\($0)" } ?? "none")" }.joined(separator: " · "))
-        // Seen from behind, the side handles turn round with the view: x's points to -x, and pulling it grows that side.
+        // A handle a panel over the view covers turns round to the free side, and pulling it there grows that side.
         use([cube])
         lib.selection = [cube.id]
         lib.choose(.move)
         lib.choose(.resize)
-        lib.camera.yaw = .pi - 0.6
         let r = view.renderer!
+        r.gizmoSides = SIMD3(1, 1, 1)
+        if let tip = view.project(r.gizmoCenter + SIMD3(1, 0, 0) * r.gizmoLength * 0.9) {
+            lib.inspectorFrame = CGRect(x: tip.x - 25, y: view.bounds.height - tip.y - 25, width: 50, height: 50)
+        }
         r.turnGizmo()
+        let sides = r.gizmoSides
         let (behindLo, behindHi) = bounds(cube.id)
         pull(0, 10)
         let (turnLo, turnHi) = bounds(cube.id)
-        check("from behind the handles face the view, and the near side grows", r.gizmoSides.x < 0 && r.gizmoSides.y < 0 && r.gizmoSides.z > 0
-              && abs(turnHi.x - behindHi.x) < 0.01 && abs(turnLo.x - (behindLo.x - 10)) < 0.6,
-              String(format: "sides %.0f %.0f %.0f · x %.2f … %.2f", r.gizmoSides.x, r.gizmoSides.y, r.gizmoSides.z, turnLo.x, turnHi.x))
-        lib.camera = Camera()
-        lib.camera.distance = 150
-        r.turnGizmo()
+        let turned: Bool = sides.x < 0 && sides.y > 0 && sides.z > 0
+        let grown: Bool = abs(turnHi.x - behindHi.x) < 0.01 && abs(turnLo.x - (behindLo.x - 10)) < 0.6
+        check("a handle under a panel turns to the free side, and pulling it grows that side", turned && grown,
+              String(format: "sides %.0f %.0f %.0f · x %.2f … %.2f", sides.x, sides.y, sides.z, turnLo.x, turnHi.x))
+        lib.inspectorFrame = .zero
+        r.gizmoSides = SIMD3(1, 1, 1)
         use([cube])
         lib.selection = [cube.id]
         lib.choose(.angles)

@@ -249,6 +249,7 @@ struct ToolButton: View {
 // MARK: - Toolbars
 
 struct ShapeBar: View {
+    @Environment(Workbench.self) private var lib
     @State private var open: ShapeGroup?
 
     var body: some View {
@@ -258,6 +259,7 @@ struct ShapeBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .glassBar(22)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { lib.shapeBarFrame = $0 }
     }
 }
 
@@ -486,6 +488,7 @@ struct ToolRail: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 7)
         .glassBar(22)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { lib.railFrame = $0 }
     }
 
     private var divider: some View { Rectangle().fill(Ink.text.opacity(0.12)).frame(width: 22, height: 1) }
@@ -972,6 +975,7 @@ struct Inspector: View {
         .glassBar(20)
         .shadow(color: lib.accent.opacity(0.12 * Skin.shared.glow), radius: 24)
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { lib.inspectorFrame = $0 }
+        .onDisappear { lib.inspectorFrame = .zero }
     }
 
     private var slide: AnyTransition {

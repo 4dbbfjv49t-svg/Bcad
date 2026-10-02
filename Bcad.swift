@@ -1373,6 +1373,9 @@ final class Workbench: DesignHost {
     // Where the inspector and its row of names sit in the window (for two-finger swipes between its screens).
     @ObservationIgnored var inspectorFrame = CGRect.zero
     @ObservationIgnored var namesFrame = CGRect.zero
+    // The other panels over the 3D view, which the gizmo's handles keep clear of (window points, from the top left).
+    @ObservationIgnored var railFrame = CGRect.zero
+    @ObservationIgnored var shapeBarFrame = CGRect.zero
     @ObservationIgnored private var swipe = 0.0
     @ObservationIgnored private var swiped = false
     @ObservationIgnored private var cameraBeforeAngles: Camera?

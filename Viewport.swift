@@ -586,18 +586,22 @@ final class Renderer: NSObject, MTKViewDelegate {
         return [SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)]
     }
 
-    // Which way each move or scale handle points: up the screen and away into the scene, as from the starting view, from
-    // whichever side the shape is seen, so the handles keep their place on screen. An axis lying almost across that keeps
-    // its side, and nothing turns while a handle is held.
+    // Which way each move or scale handle points from the gizmo's centre: the way it last pointed, unless the panels over
+    // the view (the tool rail, the inspector, the shape bar) or the view's edge cover more of it there than they would on
+    // the other side; then it turns round, so it can always be reached. Nothing turns while a handle is held.
     var gizmoSides = SIMD3<Double>(1, 1, 1)
 
     func turnGizmo() {
-        guard view?.dragAxis == nil else { return }
-        let yaw = Double(lib.camera.yaw)
-        let ahead = unit(SIMD3(-sin(yaw), cos(yaw), 1))
-        for (i, a) in gizmoAxes().enumerated() {
-            let d = dot(unit(a), ahead)
-            if abs(d) > 0.12 { gizmoSides[i] = d < 0 ? -1 : 1 }
+        guard let v = view, v.dragAxis == nil else { return }
+        let c = gizmoCenter, L = gizmoLength, covers = v.covers(), open = v.bounds.insetBy(dx: 10, dy: 10)
+        func hidden(_ a: SIMD3<Double>) -> Int {
+            [0.4, 0.6, 0.8, 1.0].filter { t in
+                guard let p = v.project(c + a * L * t) else { return true }
+                return !open.contains(p) || covers.contains { $0.contains(p) }
+            }.count
+        }
+        for (i, a) in gizmoAxes().enumerated() where hidden(-a * gizmoSides[i]) < hidden(a * gizmoSides[i]) {
+            gizmoSides[i] = -gizmoSides[i]
         }
     }
 
@@ -989,6 +993,14 @@ final class CadView: MTKView {
         let den = uu - ud * ud
         guard den > 1e-12 else { return 0 }
         return max(0, min(1, (ud * dot(d, w) - dot(u, w)) / den))
+    }
+
+    // The panels floating over the 3D view (the tool rail, the inspector, the shape bar), in this view's coordinates.
+    func covers() -> [CGRect] {
+        let height = window?.contentView?.bounds.height ?? bounds.height
+        return [lib.railFrame, lib.inspectorFrame, lib.shapeBarFrame].filter { !$0.isEmpty }.map { r in
+            convert(CGRect(x: r.minX, y: height - r.maxY, width: r.width, height: r.height), from: nil).insetBy(dx: -8, dy: -8)
+        }
     }
 
     // The tags follow their points every frame.
