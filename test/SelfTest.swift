@@ -150,6 +150,27 @@ enum SelfTest {
         _ = mesh(.hollow(of: box, open: [top], walls: [], thickness: 12))
         check("too thick walls reported", k.takeProblems().contains("hollow"))
 
+        // Rounded shapes: hollowed with walls as thick as the rounding (the defaults), closed and with the top open; a
+        // bevel and a rounding beside an earlier rounding.
+        let roundAll = Node.round(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 2)
+        let roundAllVolume = mesh(roundAll)?.volume ?? 0
+        let roundShell = mesh(.hollow(of: roundAll, open: [], walls: [], thickness: 2))
+        check("rounded cube hollowed", roundShell?.valid == true && abs((roundShell?.volume ?? 0) - (roundAllVolume - 4096)) < 1 && !k.takeProblems().contains("hollow"),
+              String(format: "%.2f / %.2f mm³", roundShell?.volume ?? 0, roundAllVolume - 4096))
+        let roundCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 2))
+        check("rounded cube hollowed with its top open", roundCup?.valid == true && (roundCup?.volume ?? 0) > 0 && (roundCup?.volume ?? 0) < (roundShell?.volume ?? 0)
+              && !k.takeProblems().contains("hollow"), String(format: "%.2f mm³", roundCup?.volume ?? 0))
+        let thinCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 1))
+        check("rounded cube hollowed with thinner walls than its rounding", thinCup?.valid == true && (thinCup?.volume ?? 0) > 0 && !k.takeProblems().contains("hollow"))
+        let uprights = [(-10.0, -10.0), (-10, 10), (10, -10), (10, 10)].map { Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3($0.0, $0.1, 0), b: SIMD3(0, 0, 1)) }
+        let upright = Node.round(of: box, picks: uprights, radius: 2)
+        let uprightVolume = mesh(upright)?.volume ?? 0
+        let bevelBeside = mesh(.bevel(of: upright, picks: [edge], legs: SIMD2(2, 2), corner: 0))
+        check("bevel beside a rounding", bevelBeside?.valid == true && (bevelBeside?.volume ?? 8000) < uprightVolume - 30 && !k.takeProblems().contains("bevel"),
+              String(format: "%.2f mm³", bevelBeside?.volume ?? 0))
+        let roundBeside = mesh(.round(of: upright, picks: [face], radius: 2))
+        check("rounding beside a rounding", roundBeside?.valid == true && (roundBeside?.volume ?? 8000) < uprightVolume - 30 && k.takeProblems().isEmpty)
+
         let oval = mesh(.primitive(Primitive(kind: .oval, size: [20, 12, 90, 20])))
         check("oval cylinder", oval?.valid == true && abs((oval?.volume ?? 0) - .pi * 10 * 6 * 20) < 1, String(format: "%.2f mm³", oval?.volume ?? 0))
         let skew = mesh(.primitive(Primitive(kind: .oval, size: [20, 12, 60, 20])))
@@ -266,7 +287,7 @@ enum SelfTest {
         // side, several shapes stretch along one axis only, and nothing drops to the bed.
         func settle() {
             let t = Date()
-            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } while lib.building && Date().timeIntervalSince(t) < 120
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } while (lib.building || lib.trying) && Date().timeIntervalSince(t) < 120
         }
         func bounds(_ id: UUID) -> (SIMD3<Double>, SIMD3<Double>) { lib.body(id).flatMap { lib.worldBounds($0) } ?? (.zero, .zero) }
         func near(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ tolerance: Double = 0.01) -> Bool { simd_reduce_max(simd_abs(a - b)) < tolerance }
@@ -316,6 +337,83 @@ enum SelfTest {
         lib.addThread()
         settle()
         check("⌘B adds a bolt and opens Thread", lib.primary.map { if case .fastener = $0.node { true } else { false } } == true && lib.screen == .thread)
+
+        // A treatment that doesn't fit never enters the document (it's said once); one that fits goes in.
+        let plain = Solid(name: "Plain", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
+        use([plain])
+        lib.selection = [plain.id]
+        lib.enter(.hollow)
+        lib.hollowOpen = [top]
+        lib.hollowThickness = 12
+        lib.note = nil
+        let unchanged = lib.doc
+        lib.commitHollow()
+        settle()
+        check("walls that don't fit change nothing and say so", lib.doc == unchanged && lib.mode == .hollow
+              && lib.note == L("These walls don't fit this shape — try thinner walls"), lib.note ?? "no message")
+        lib.cancelMode()
+        let softCube = Solid(name: "Soft", color: Palette.colors[1], node: roundAll, place: Placement(move: SIMD3(0, 0, 10)))
+        use([softCube])
+        lib.selection = [softCube.id]
+        lib.enter(.hollow)
+        lib.hollowOpen = [top]
+        lib.hollowThickness = 2
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        let cupped = lib.body(softCube.id).map { if case .hollow = $0.node { true } else { false } } == true
+        check("a rounded cube is hollowed with its top open", cupped && lib.mode == .select && lib.note == nil
+              && (lib.meshes[softCube.id]?.volume ?? 0) < roundAllVolume - 1000, lib.note ?? "")
+
+        // Angles on a shape with rounded edges: a 2 mm bevel beside the rounding goes in.
+        let upstanding = Solid(name: "Upright", color: Palette.colors[3], node: upright, place: Placement(move: SIMD3(0, 0, 10)))
+        use([upstanding])
+        lib.selection = [upstanding.id]
+        lib.choose(.angles)
+        if let section = k.queue.sync({ k.section(upright, edge) }) {
+            var a = AngleEdit(body: upstanding.id, picks: [edge], section: section)
+            a.treatment = .angled
+            a.legs = SIMD2(2, 2)
+            lib.angleEdit = a
+            lib.note = nil
+            lib.applyAngles()
+            settle()
+        }
+        let bevelled = lib.body(upstanding.id).map { if case .bevel = $0.node { true } else { false } } == true
+        check("an Angles bevel beside a rounding goes in", bevelled && lib.angleEdit == nil && lib.note == nil, lib.note ?? "")
+
+        // Problems left by other work (a save, a cut) aren't said at the next rebuild.
+        _ = k.queue.sync { k.mesh(.hollow(of: box, open: [top], walls: [], thickness: 13)) }
+        lib.note = nil
+        use([Solid(name: "Fresh", color: Palette.colors[2], node: box, place: Placement(move: SIMD3(0, 0, 10)))])
+        check("nothing left over from other work is said later", lib.note == nil, lib.note ?? "")
+
+        // A file from an earlier version keeps colours as palette numbers: it opens, with those colours.
+        let earlier = Document(bodies: [Solid(name: "Old", color: Palette.colors[2], node: roundAll, place: Placement(move: SIMD3(0, 0, 10)))])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let oldJSON = String(decoding: (try? encoder.encode(earlier)) ?? Data(), as: UTF8.self).replacingOccurrences(of: "\"color\":[255,184,51]", with: "\"color\":2")
+        let oldURL = dir.appendingPathComponent("old.3mf")
+        try? Zip.write([(ThreeMF.docPath, Data(oldJSON.utf8))]).write(to: oldURL)
+        lib.open(oldURL)
+        settle()
+        check("a file from an earlier version opens", oldJSON.contains("\"color\":2") && lib.doc.bodies.first?.color == Palette.colors[2]
+              && lib.doc.bodies.first?.node == roundAll && lib.doc.bodies.first.map { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) } == true)
+
+        // A rounded and hollowed cube, a ring and a torus saved together reopen with every shape shown and nothing said.
+        let kept = Document(bodies: [
+            Solid(name: "Cup", color: Palette.colors[0], node: .hollow(of: roundAll, open: [top], walls: [], thickness: 2), place: Placement(move: SIMD3(0, 0, 10))),
+            Solid(name: "Ring", color: Palette.colors[1], node: .primitive(.make(.ring)), place: Placement(move: SIMD3(30, 0, 2.5))),
+            Solid(name: "Torus", color: Palette.colors[2], node: .primitive(.make(.torus)), place: Placement(move: SIMD3(-30, 0, 4)))
+        ])
+        let keptMeshes = k.queue.sync { kept.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } } }
+        let keptURL = dir.appendingPathComponent("kept.3mf")
+        try? ThreeMF.write(keptURL, meshes: keptMeshes, doc: kept)
+        lib.note = nil
+        lib.open(keptURL)
+        settle()
+        check("a saved rounded cup, ring and torus reopen", keptMeshes.count == 3 && lib.doc == kept && lib.note == nil
+              && kept.bodies.allSatisfy { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) }, lib.note ?? "")
 
         // Real mouse events on the 3D view (offscreen): handles, ⌥ for symmetric, two shapes, a face in Angles.
         let view = CadView()

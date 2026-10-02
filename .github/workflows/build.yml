@@ -113,6 +113,178 @@ jobs:
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
 
+      - name: Use the real app
+        continue-on-error: true
+        run: |
+          # Temporary: real mouse and keyboard events on the real app, controls found by their accessibility names: a cold start
+          # with a saved rounded cup, an older file, a cube rounded, hollowed and bevelled by clicking, then a hot start.
+          R="$RUNNER_TEMP/results"
+          APP="$RUNNER_TEMP/out/Bcad.app"
+          mkdir -p "$R/shots"
+          cat > "$RUNNER_TEMP/ui.swift" <<'SWIFT'
+          import AppKit
+          import ApplicationServices
+
+          let a = Array(CommandLine.arguments.dropFirst())
+          guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "local.bohdan.bcad").first else { print("Bcad isn't running"); exit(1) }
+          let pid = app.processIdentifier
+          let root = AXUIElementCreateApplication(pid)
+
+          func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+              var v: CFTypeRef?
+              return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+          }
+          func texts(_ e: AXUIElement) -> [String] { [kAXDescriptionAttribute, kAXTitleAttribute, kAXValueAttribute].compactMap { value(e, $0) as? String } }
+          func kids(_ e: AXUIElement) -> [AXUIElement] { (value(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] }
+          func frame(_ e: AXUIElement) -> CGRect? {
+              guard let p = value(e, kAXPositionAttribute), let s = value(e, kAXSizeAttribute) else { return nil }
+              var pt = CGPoint.zero, sz = CGSize.zero
+              AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+              AXValueGetValue(s as! AXValue, .cgSize, &sz)
+              return CGRect(origin: pt, size: sz)
+          }
+          func all(_ e: AXUIElement, _ depth: Int = 0) -> [(AXUIElement, Int)] { depth > 60 ? [] : [(e, depth)] + kids(e).flatMap { all($0, depth + 1) } }
+          func find(_ label: String, _ n: Int) -> CGRect? {
+              let hits = all(root).filter { texts($0.0).contains(label) }.compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 }
+              return hits.count >= n ? hits[n - 1] : nil
+          }
+          func window() -> CGRect {
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+              for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid && (w[kCGWindowLayer as String] as? Int) == 0 {
+                  if let b = w[kCGWindowBounds as String], let r = CGRect(dictionaryRepresentation: b as! CFDictionary), r.width > 300 { return r }
+              }
+              return .zero
+          }
+          // The 3D view's middle: the window right of the 320-point side panel.
+          func middle() -> CGPoint { let w = window(); return CGPoint(x: w.minX + 320 + (w.width - 320) / 2, y: w.midY) }
+          func post(_ type: CGEventType, _ p: CGPoint, _ flags: CGEventFlags = []) {
+              let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
+              e?.flags = flags
+              e?.post(tap: .cghidEventTap)
+              usleep(25_000)
+          }
+          func click(_ p: CGPoint) {
+              post(.mouseMoved, p)
+              usleep(120_000)
+              post(.leftMouseDown, p)
+              post(.leftMouseUp, p)
+          }
+          func drag(_ from: CGPoint, _ to: CGPoint, _ flags: CGEventFlags = []) {
+              post(.mouseMoved, from)
+              usleep(120_000)
+              post(.leftMouseDown, from, flags)
+              for k in 1...24 { post(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * CGFloat(k) / 24, y: from.y + (to.y - from.y) * CGFloat(k) / 24), flags) }
+              post(.leftMouseUp, to, flags)
+          }
+          func flags(_ s: String?) -> CGEventFlags { ["option": .maskAlternate, "shift": .maskShift, "cmd": .maskCommand][s ?? ""] ?? [] }
+
+          // Bcad in front first: a click on a window in the background only brings it forward.
+          if !["trusted", "tree"].contains(a[0]) {
+              app.activate()
+              usleep(400_000)
+          }
+          switch a[0] {
+          case "trusted":
+              print("accessibility trusted: \(AXIsProcessTrusted()) · window \(window())")
+          case "tree":
+              for (e, d) in all(root) where !texts(e).isEmpty { print(String(repeating: " ", count: d), texts(e).joined(separator: " | "), frame(e).map { "\($0)" } ?? "") }
+          case "axpress":
+              let hit = all(root).first { texts($0.0).contains(a[1]) }
+              print("axpress \(a[1]):", hit.map { AXUIElementPerformAction($0.0, kAXPressAction as CFString).rawValue } ?? -1)
+          case "count":
+              print("shapes listed:", all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXStaticText" && texts($0.0).contains(a[1]) }.count)
+          case "hold":
+              // A press held for a while, at a spot in the element (fractions of its size).
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              let p = CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.minY + r.height * CGFloat(Double(a[3])!))
+              post(.mouseMoved, p)
+              usleep(600_000)
+              post(.leftMouseDown, p)
+              usleep(UInt32(Int(a[4])!) * 1000)
+              post(.leftMouseUp, p)
+              print("held \(a[1]) at \(p)")
+          case "press":
+              guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
+              var under: AXUIElement?
+              AXUIElementCopyElementAtPosition(root, Float(r.midX), Float(r.midY), &under)
+              click(CGPoint(x: r.midX, y: r.midY))
+              print("pressed \(a[1]) at \(r), under the pointer: \(under.map { texts($0) + [(value($0, kAXRoleAttribute) as? String) ?? ""] } ?? [])")
+          case "slide":
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              drag(CGPoint(x: r.midX, y: r.midY), CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.midY))
+              print("slid \(a[1]) in \(r)")
+          case "view":
+              let m = middle()
+              click(CGPoint(x: m.x + CGFloat(Double(a[1])!), y: m.y + CGFloat(Double(a[2])!)))
+          case "viewdrag":
+              let m = middle()
+              drag(CGPoint(x: m.x + CGFloat(Double(a[1])!), y: m.y + CGFloat(Double(a[2])!)), CGPoint(x: m.x + CGFloat(Double(a[3])!), y: m.y + CGFloat(Double(a[4])!)),
+                   flags(a.count > 5 ? a[5] : nil))
+          default:
+              for down in [true, false] {
+                  let e = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(Int(a[1])!), keyDown: down)
+                  e?.flags = flags(a.count > 2 ? a[2] : nil)
+                  e?.post(tap: .cghidEventTap)
+                  usleep(40_000)
+              }
+          }
+          SWIFT
+          swiftc -O "$RUNNER_TEMP/ui.swift" -o "$RUNNER_TEMP/ui"
+          U="$RUNNER_TEMP/ui"
+          shot() { sleep "${2:-2}"; screencapture -x "$R/shots/$1.png"; pgrep -x Bcad >/dev/null && echo "$1: running" || echo "$1: NOT running"; }
+          crashes() { ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -c '^Bcad' || true; }
+          before=$(crashes)
+          D="$TMPDIR/bcad-selftest"
+          ls -la "$D"/kept.3mf "$D"/old.3mf
+          pkill -x Bcad || true
+          sleep 2
+          rm -rf "$HOME/Library/Application Support/Bcad"
+          defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
+          echo "— cold start with a saved rounded cup, ring and torus"
+          open -a "$APP" "$D/kept.3mf"
+          shot ui-00-kept 14
+          $U trusted
+          $U tree | head -40
+          $U press kept; sleep 1
+          for k in Cup Ring Torus; do $U count $k; done
+          echo "— a file from an earlier version"
+          open -a "$APP" "$D/old.3mf"
+          shot ui-01-old 8
+          $U count Old
+          echo "— a new cube, rounded and hollowed by clicking"
+          $U key 45 cmd; sleep 2
+          $U hold Cube 0.5 0.5 60; sleep 2; $U key 3; sleep 2
+          shot ui-02-cube
+          $U press "Round edges"; sleep 1
+          $U view 0 -10; sleep 1
+          shot ui-03-round-pick
+          $U press Apply; sleep 5
+          shot ui-04-rounded
+          $U press Hollow; sleep 1
+          $U view 0 -10; sleep 1
+          shot ui-05-hollow-pick
+          $U press Apply; sleep 10
+          shot ui-06-hollowed
+          $U tree | grep -iE "cube|walls|hollow|round" | head -20
+          echo "— Angles on the rounded, hollowed cube"
+          $U press Angles; sleep 1
+          $U view 0 -10; sleep 1
+          $U press "Work with angles"; sleep 4
+          shot ui-07-angles
+          $U press Apply; sleep 6
+          shot ui-08-angled
+          $U key 12 cmd; shot ui-09-quit 2
+          $U press "Don't Save"; sleep 3
+          pkill -x Bcad || true
+          sleep 3
+          open -a "$APP"
+          shot ui-10-hot 8
+          pkill -x Bcad || true
+          sleep 5
+          echo "new Bcad crash reports: $(( $(crashes) - before ))"
+          mkdir -p "$R/crashes"
+          cp ~/Library/Logs/DiagnosticReports/Bcad* "$R/crashes/" 2>/dev/null || true
+
       - name: Thumbnails
         if: always()
         continue-on-error: true

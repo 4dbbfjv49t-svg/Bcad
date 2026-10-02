@@ -56,8 +56,14 @@ struct RootView: View {
                             }
                         }
                     }
+                    // Work under way shows with a spinner; a message (a result, a problem) without one.
                     if let busy = lib.busy {
                         BusyToast(text: busy)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 14)
+                            .transition(.move(edge: .top).combined(with: .haze))
+                    } else if let note = lib.note {
+                        NoteToast(text: note)
                             .frame(maxHeight: .infinity, alignment: .top)
                             .padding(.top, 14)
                             .transition(.move(edge: .top).combined(with: .haze))
@@ -68,6 +74,7 @@ struct RootView: View {
         .background(WindowConfigurator())
         .ignoresSafeArea()
         .animation(Neon.glide, value: lib.busy)
+        .animation(Neon.glide, value: lib.note)
         .animation(Neon.glide, value: lib.mode)
         .animation(Neon.glide, value: lib.selection.isEmpty)
         .animation(Neon.glide, value: lib.drawerOpen)
@@ -75,6 +82,24 @@ struct RootView: View {
 
     // A tool (split, round, hollow) is out: its bar shows instead of the inspector.
     private var tool: Bool { [.round, .split, .hollow].contains(lib.mode) }
+}
+
+// A short message at the top of the window, in the look of the busy note but without its spinner.
+struct NoteToast: View {
+    let text: String
+
+    var body: some View {
+        let look = Skin.shared
+        Text(text)
+            .font(.ui(size: 12.5, weight: .semibold, design: .rounded))
+            .foregroundStyle(Ink.text.opacity(0.85))
+            .padding(.horizontal, 16)
+            .frame(height: 36)
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Ink.void.opacity(0.6)))
+            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(.ultraThinMaterial))
+            .halo(look.accent, 14)
+            .allowsHitTesting(false)
+    }
 }
 
 extension View {

@@ -525,7 +525,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Frames the visible shapes (or the bed when there are none). False while shapes are still being built.
     func fit() -> Bool {
         var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
-        for b in lib.doc.bodies where !b.hidden { if let (l, h) = lib.worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) } }
+        // A shape reaching nowhere sensible (a broken file) would throw the camera out with it; it's left out.
+        func sane(_ v: SIMD3<Double>) -> Bool { v.finite && simd_reduce_max(simd_abs(v)) < 1e5 }
+        for b in lib.doc.bodies where !b.hidden {
+            if let (l, h) = lib.worldBounds(b), sane(l), sane(h) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
+        }
         if !lo.x.isFinite {
             if lib.doc.bodies.contains(where: { !$0.hidden }) && lib.building { return false }
             lib.camera.target = .zero

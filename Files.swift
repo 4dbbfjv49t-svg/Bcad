@@ -226,7 +226,7 @@ private final class ModelReader: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) {
         guard name == "object", let id else { return }
         let n = UInt32(mesh.points.count)
-        if !mesh.triangles.isEmpty, mesh.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }),
+        if !mesh.triangles.isEmpty, mesh.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && simd_reduce_max(simd_abs($0)) < 1e5 }),
            mesh.triangles.allSatisfy({ $0.max() < n }) {
             meshes[id] = mesh
         }

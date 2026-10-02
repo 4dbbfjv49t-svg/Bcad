@@ -423,6 +423,34 @@ enum Palette {
     static func color(_ c: SIMD3<UInt8>) -> Color { Color(red: Double(c.x) / 255, green: Double(c.y) / 255, blue: Double(c.z) / 255) }
     // The palette colour after c (the first one after a mixed colour).
     static func after(_ c: SIMD3<UInt8>) -> SIMD3<UInt8> { colors[((colors.firstIndex(of: c) ?? -1) + 1) % colors.count] }
+
+    // A saved colour: red, green and blue, or (in files from earlier versions) its number in the palette.
+    static func decode<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) throws -> SIMD3<UInt8>? {
+        if let rgb = try? c.decodeIfPresent(SIMD3<UInt8>.self, forKey: key) { return rgb }
+        return try c.decodeIfPresent(Int.self, forKey: key).map { colors[($0 % colors.count + colors.count) % colors.count] }
+    }
+}
+
+extension Solid {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        color = try Palette.decode(c, .color) ?? Palette.colors[0]
+        hidden = try c.decode(Bool.self, forKey: .hidden)
+        node = try c.decode(Node.self, forKey: .node)
+        place = try c.decode(Placement.self, forKey: .place)
+    }
+}
+
+extension Part {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        node = try c.decode(Node.self, forKey: .node)
+        place = try c.decode(Placement.self, forKey: .place)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        color = try Palette.decode(c, .color)
+    }
 }
 
 // MARK: - Kernel bridge
@@ -644,7 +672,7 @@ final class Kernel: @unchecked Sendable {
             var missing: Int32 = 0
             let out = s.with { bk_fillet($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
             if missing > 0 { problems.append("missing") }
-            if let out { return out }
+            if let out = out ?? beneath(of, node) { return out }
             problems.append(maxR > 0 ? "max:\(maxR)" : "round")
             return s.with { bk_copy($0) }
         case .bevel(let of, let picks, let legs, let corner):
@@ -653,7 +681,7 @@ final class Kernel: @unchecked Sendable {
             var missing: Int32 = 0
             let out = s.with { bk_chamfer($0, kinds, data, Int32(picks.count), legs.x, legs.y, corner, &missing) }
             if missing > 0 { problems.append("missing") }
-            if let out { return out }
+            if let out = out ?? beneath(of, node) { return out }
             problems.append("bevel")
             return s.with { bk_copy($0) }
         case .cove(let of, let picks, let radius):
@@ -663,7 +691,7 @@ final class Kernel: @unchecked Sendable {
             var missing: Int32 = 0
             let out = s.with { bk_cove($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
             if missing > 0 { problems.append("missing") }
-            if let out { return out }
+            if let out = out ?? beneath(of, node) { return out }
             problems.append(maxR > 0 ? "max:\(maxR)" : "cove")
             return s.with { bk_copy($0) }
         case .hollow(let of, let open, let walls, let thickness):
@@ -678,6 +706,36 @@ final class Kernel: @unchecked Sendable {
             problems.append("hollow")
             return s.with { bk_copy($0) }
         }
+    }
+
+    // A rounding or bevel that doesn't fit on top of an earlier rounding or bevel often does beneath it: these edges
+    // treated first, the earlier treatment after. Tried one level deep; nil when that doesn't work either.
+    private var swapping = false
+    private func beneath(_ of: Node, _ node: Node) -> OpaquePointer? {
+        guard !swapping, let inner = of.inner else { return nil }
+        switch of {
+        case .round, .bevel, .cove: break
+        default: return nil
+        }
+        swapping = true
+        defer { swapping = false }
+        let mark = problems.count
+        if let s = shape(of.wrapping(node.wrapping(inner))), !problems[mark...].contains(where: Self.failure) { return s.with { bk_copy($0) } }
+        problems.removeSubrange(mark...)
+        return nil
+    }
+
+    // Problems that mean the shape didn't come out as asked (skipped picks and a merge in pieces still did).
+    static func failure(_ p: String) -> Bool { p != "missing" && p != "pieces" }
+
+    // A new treatment of `node`'s inner shape, built apart from anything left over from earlier work: its mesh, and what
+    // went wrong with it.
+    func attempt(_ node: Node) -> (mesh: Mesh?, problems: [String]) {
+        if let inner = node.inner { _ = shape(inner) }
+        if case .group(_, let parts) = node { for p in parts { _ = shape(p.node) } }
+        problems = []
+        let m = mesh(node)
+        return (m, takeProblems())
     }
 
     private static func flat(_ picks: [Pick]) -> ([Int32], [Double]) {
@@ -703,7 +761,13 @@ final class Kernel: @unchecked Sendable {
     func mesh(_ node: Node, deflection: Double = 0.05) -> Mesh? {
         guard let s = shape(node), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
         defer { bk_mesh_free(m) }
-        return Mesh(m)
+        let mesh = Mesh(m)
+        // A shape reaching past 100 m (or nowhere) is broken geometry; shown, it would throw the view out.
+        guard mesh.vertices.isEmpty || [mesh.low, mesh.high].allSatisfy({ $0.finite && simd_reduce_max(simd_abs($0)) < 1e5 }) else {
+            problems.append("bounds")
+            return nil
+        }
+        return mesh
     }
 
     // World-space shape of a body (for export).
@@ -1035,7 +1099,9 @@ final class Workbench: DesignHost {
     var splitTilt = SIMD2<Double>(0, 0)
     var showSettings = false
     var drawerOpen = true
+    // Work under way (with a spinner), and a short message that goes by itself.
     var busy: String?
+    var note: String?
     var capturing: Action?
     var captureFail: Action?
     var angleEdit: AngleEdit?
@@ -1052,6 +1118,8 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var pendingBuild = false
     @ObservationIgnored private var previewBusy = false
     @ObservationIgnored private var previewAgain = false
+    // New shapes being tried before they go into the document.
+    @ObservationIgnored private(set) var trying = false
     @ObservationIgnored private var flashTask: Task<Void, Never>?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored var camera = Camera()
@@ -1192,15 +1260,15 @@ final class Workbench: DesignHost {
 
     func flash(_ text: String) {
         flashTask?.cancel()
-        withAnimation(Neon.spring) { busy = text }
+        withAnimation(Neon.spring) { note = text }
         flashTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3.5))
-            guard !Task.isCancelled else { return }
-            self?.ended(text)
+            guard !Task.isCancelled, let self, self.note == text else { return }
+            withAnimation(Neon.spring) { self.note = nil }
         }
     }
 
-    // Takes down the note `text`, unless another one has taken its place by now.
+    // Takes down the work note `text`, unless another one has taken its place by now.
     func ended(_ text: String) {
         if busy == text { withAnimation(Neon.spring) { busy = nil } }
     }
@@ -1230,6 +1298,39 @@ final class Workbench: DesignHost {
         begin()
         change(&doc)
         rebuildScene()
+    }
+
+    // Builds the new shapes first and runs `apply` (which commits them) only when all of them came out, so a rounding,
+    // hollow, bevel, merge or split that doesn't work never enters the document: it is said once, and nothing changes.
+    func tryThen(_ nodes: [Node], apply: @escaping () -> Void) {
+        guard !trying else { return }
+        trying = true
+        let clearance = settings.clearance, note = L("Building…")
+        // Only a slow try shows that it's working.
+        let shown = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.trying else { return }
+            withAnimation(Neon.spring) { self.busy = note }
+        }
+        Kernel.shared.queue.async {
+            Kernel.shared.clearance = clearance
+            var problems: [String] = [], ok = true
+            for n in nodes {
+                let (m, p) = Kernel.shared.attempt(n)
+                problems += p
+                if m?.vertices.isEmpty ?? true || p.contains(where: Kernel.failure) { ok = false }
+            }
+            if !ok && !problems.contains(where: Kernel.failure) { problems.append("failed") }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    shown.cancel()
+                    self.trying = false
+                    self.ended(note)
+                    if ok { apply() }
+                    self.report(problems)
+                }
+            }
+        }
     }
 
     func undo() {
@@ -1382,13 +1483,16 @@ final class Workbench: DesignHost {
         let first = parts[0]
         let name = op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect")
         let group = Solid(name: name, color: first.color, node: .group(op: op, parts: parts.map { Part(node: $0.node, place: $0.place, name: $0.name, color: $0.color) }))
-        let ids = Set(selection)
-        commit { d in
-            let at = d.bodies.firstIndex { ids.contains($0.id) } ?? d.bodies.count
-            d.bodies.removeAll { ids.contains($0.id) }
-            d.bodies.insert(group, at: min(at, d.bodies.count))
+        let ids = Set(parts.map(\.id))
+        tryThen([group.node]) { [weak self] in
+            guard let self, parts.allSatisfy({ self.body($0.id) == $0 }) else { return }
+            self.commit { d in
+                let at = d.bodies.firstIndex { ids.contains($0.id) } ?? d.bodies.count
+                d.bodies.removeAll { ids.contains($0.id) }
+                d.bodies.insert(group, at: min(at, d.bodies.count))
+            }
+            self.selection = [group.id]
         }
-        selection = [group.id]
     }
 
     func ungroup() {
@@ -1429,37 +1533,47 @@ final class Workbench: DesignHost {
 
     func split() {
         guard let plane = splitPlane else { return }
-        var made: [UUID] = []
-        commit { d in
-            for (i, b) in d.bodies.enumerated().reversed() where selection.contains(b.id) {
-                let inv = b.place.matrix.inverse
-                let lp = inv * SIMD4(plane.point, 1)
-                let ln = simd_transpose(b.place.matrix) * SIMD4(plane.normal, 0)
-                let local = Plane(point: SIMD3(lp.x, lp.y, lp.z), normal: normalize(SIMD3(ln.x, ln.y, ln.z)))
-                var one = b, two = b
-                one.id = UUID(); two.id = UUID()
-                one.node = .split(of: b.node, plane: local, side: 0)
-                two.node = .split(of: b.node, plane: local, side: 1)
-                one.name = b.name + " ▲"
-                two.name = b.name + " ▼"
-                two.color = Palette.after(b.color)
-                d.bodies.replaceSubrange(i...i, with: [one, two])
-                made += [one.id, two.id]
-            }
+        let targets = selected
+        var halves: [UUID: [Solid]] = [:]
+        for b in targets {
+            let inv = b.place.matrix.inverse
+            let lp = inv * SIMD4(plane.point, 1)
+            let ln = simd_transpose(b.place.matrix) * SIMD4(plane.normal, 0)
+            let local = Plane(point: SIMD3(lp.x, lp.y, lp.z), normal: normalize(SIMD3(ln.x, ln.y, ln.z)))
+            var one = b, two = b
+            one.id = UUID(); two.id = UUID()
+            one.node = .split(of: b.node, plane: local, side: 0)
+            two.node = .split(of: b.node, plane: local, side: 1)
+            one.name = b.name + " ▲"
+            two.name = b.name + " ▼"
+            two.color = Palette.after(b.color)
+            halves[b.id] = [one, two]
         }
-        selection = made
-        withAnimation(Neon.spring) { mode = .select }
+        // A plane beside a shape leaves one half empty: that split isn't made.
+        tryThen(halves.values.flatMap { $0.map(\.node) }) { [weak self] in
+            guard let self, targets.allSatisfy({ self.body($0.id) == $0 }) else { return }
+            self.commit { d in
+                for (i, b) in d.bodies.enumerated().reversed() {
+                    if let pair = halves[b.id] { d.bodies.replaceSubrange(i...i, with: pair) }
+                }
+            }
+            self.selection = targets.flatMap { halves[$0.id]?.map(\.id) ?? [] }
+            withAnimation(Neon.spring) { self.mode = .select }
+        }
     }
 
     // MARK: rounding
 
     func commitRound() {
-        guard let id = editBody, !edgePicks.isEmpty, roundRadius >= 0.01 else { return }
-        let picks = edgePicks, r = roundRadius
-        commit { d in
-            if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = .round(of: d.bodies[i].node, picks: picks, radius: r) }
+        guard let id = editBody, let b = body(id), !edgePicks.isEmpty, roundRadius >= 0.01 else { return }
+        let node = Node.round(of: b.node, picks: edgePicks, radius: roundRadius)
+        tryThen([node]) { [weak self] in
+            guard let self, self.body(id)?.node == b.node else { return }
+            self.commit { d in
+                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = node }
+            }
+            self.edgePicks = []
         }
-        edgePicks = []
     }
 
     // Live rounding while dragging: builds the rounded shape in the background, newest radius wins.
@@ -1471,8 +1585,7 @@ final class Workbench: DesignHost {
         let clearance = settings.clearance
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
-            let mesh = Kernel.shared.mesh(node)
-            let problems = Kernel.shared.takeProblems()
+            let (mesh, problems) = Kernel.shared.attempt(node)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.previewBusy = false
@@ -1619,16 +1732,19 @@ final class Workbench: DesignHost {
     }
 
     func commitHollow() {
-        guard let id = editBody, body(id) != nil else { flash(L("Select a shape to hollow")); return }
-        let open = hollowOpen, walls = hollowWalls, t = hollowThickness
-        commit { d in
-            if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = .hollow(of: d.bodies[i].node, open: open, walls: walls, thickness: t) }
-        }
-        withAnimation(Neon.spring) {
-            hollowOpen = []
-            hollowWalls = []
-            focusWall = nil
-            mode = .select
+        guard let id = editBody, let b = body(id) else { flash(L("Select a shape to hollow")); return }
+        let node = Node.hollow(of: b.node, open: hollowOpen, walls: hollowWalls, thickness: hollowThickness)
+        tryThen([node]) { [weak self] in
+            guard let self, self.body(id)?.node == b.node else { return }
+            self.commit { d in
+                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = node }
+            }
+            withAnimation(Neon.spring) {
+                self.hollowOpen = []
+                self.hollowWalls = []
+                self.focusWall = nil
+                self.mode = .select
+            }
         }
     }
 
@@ -1783,14 +1899,17 @@ final class Workbench: DesignHost {
     // Applies the editor's rounding or bevel to the picked edges, to the whole shape, or to every selected shape.
     func applyAngles(whole: Bool = false, everyShape: Bool = false) {
         guard let e = angleEdit else { return }
-        let ids = everyShape ? selection : [e.body]
-        commit { d in
-            for id in ids {
-                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = e.wrapping(d.bodies[i].node, whole: whole || everyShape) }
+        let made = (everyShape ? selected : body(e.body).map { [$0] } ?? []).map { (id: $0.id, was: $0.node, node: e.wrapping($0.node, whole: whole || everyShape)) }
+        tryThen(made.map { $0.node }) { [weak self] in
+            guard let self, made.allSatisfy({ self.body($0.id)?.node == $0.was }) else { return }
+            self.commit { d in
+                for m in made {
+                    if let i = d.bodies.firstIndex(where: { $0.id == m.id }) { d.bodies[i].node = m.node }
+                }
             }
+            self.edgePicks = []
+            self.closeAngles()
         }
-        edgePicks = []
-        closeAngles()
     }
 
     func updateAngles(_ change: (inout AngleEdit) -> Void) {
@@ -1865,9 +1984,9 @@ final class Workbench: DesignHost {
         if building { pendingBuild = true; return }
         let bodies = doc.bodies
         let clearance = settings.clearance
-        var todo: [(UUID, Node)] = []
+        var todo: [(id: UUID, node: Node, name: String)] = []
         let rebuildAll = clearance != builtClearance
-        for b in bodies where rebuildAll || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node)) }
+        for b in bodies where rebuildAll || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node, b.name)) }
         let alive = Set(bodies.map(\.id))
         meshes = meshes.filter { alive.contains($0.key) }
         built = built.filter { alive.contains($0.key) }
@@ -1875,58 +1994,61 @@ final class Workbench: DesignHost {
         guard !todo.isEmpty else { applyDrops(); return }
         building = true
         builtClearance = clearance
-        let slow = todo.count > 1 || todo.contains { if case .fastener = $0.1.base { true } else { false } }
+        let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
         let note = L("Building…")
         if slow { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
+            // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
+            _ = Kernel.shared.takeProblems()
+            var trouble: (name: String, problems: [String])?
             // Each shape shows as soon as it's built, rather than all of them at the end.
-            for (id, node) in todo {
-                let mesh = Kernel.shared.mesh(node) ?? Mesh()
+            for (id, node, name) in todo {
+                let mesh = Kernel.shared.mesh(node)
+                let problems = Kernel.shared.takeProblems()
+                if trouble == nil, !problems.isEmpty { trouble = (name, problems) }
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         self.built[id] = node
-                        self.meshes[id] = mesh
+                        // A shape the kernel can't build keeps what it showed (its saved look after opening a file).
+                        self.meshes[id] = mesh ?? self.meshes[id] ?? Mesh()
                         self.sceneVersion += 1
                     }
                 }
             }
-            let problems = Kernel.shared.takeProblems()
+            let found = trouble
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.building = false
                     if slow { self.ended(note) }
                     self.sceneVersion += 1
                     self.applyDrops()
-                    self.report(problems)
+                    // With several shapes built (a file opened), the message says which one.
+                    if let found { self.report(found.problems, name: todo.count > 1 ? found.name : nil) }
                     if self.pendingBuild { self.pendingBuild = false; self.rebuildScene() }
                 }
             }
         }
     }
 
-    private func report(_ problems: [String]) {
+    private func report(_ problems: [String], name: String? = nil) {
+        guard let text = Self.message(problems) else { return }
+        flash(name.map { "\($0): \(text)" } ?? text)
+    }
+
+    private static func message(_ problems: [String]) -> String? {
         if let m = problems.first(where: { $0.hasPrefix("max:") }) {
-            flash(L("Rounding too large — the most this edge takes is {r} mm", ["r": String(format: "%.2f", Double(m.dropFirst(4)) ?? 0)]))
-        } else if problems.contains("round") {
-            flash(L("These edges can't be rounded"))
-        } else if problems.contains("cove") {
-            flash(L("These edges can't be rounded inward"))
-        } else if problems.contains("bevel") {
-            flash(L("This bevel doesn't fit these edges — try smaller sizes"))
-        } else if problems.contains("bend") {
-            flash(L("The tube is too thick for this torus's tightest bend"))
-        } else if problems.contains("empty") {
-            flash(L("Nothing is left of this shape"))
-        } else if problems.contains("pieces") {
-            flash(L("These shapes don't touch, so the merge stays in separate pieces"))
-        } else if problems.contains("hollow") {
-            flash(L("These walls don't fit this shape — try thinner walls"))
-        } else if problems.contains("missing") {
-            flash(L("Some picked edges or faces no longer exist and were skipped"))
-        } else if !problems.isEmpty {
-            flash(L("The shape operation failed"))
+            return L("Rounding too large — the most this edge takes is {r} mm", ["r": String(format: "%.2f", Double(m.dropFirst(4)) ?? 0)])
         }
+        if problems.contains("round") { return L("These edges can't be rounded") }
+        if problems.contains("cove") { return L("These edges can't be rounded inward") }
+        if problems.contains("bevel") { return L("This bevel doesn't fit these edges — try smaller sizes") }
+        if problems.contains("bend") { return L("The tube is too thick for this torus's tightest bend") }
+        if problems.contains("empty") { return L("Nothing is left of this shape") }
+        if problems.contains("pieces") { return L("These shapes don't touch, so the merge stays in separate pieces") }
+        if problems.contains("hollow") { return L("These walls don't fit this shape — try thinner walls") }
+        if problems.contains("missing") { return L("Some picked edges or faces no longer exist and were skipped") }
+        return problems.isEmpty ? nil : L("The shape operation failed")
     }
 
     // MARK: keys
