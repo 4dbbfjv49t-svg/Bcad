@@ -1111,6 +1111,18 @@ static double volumeOf(const TopoDS_Shape &x) {
   return g.Mass();
 }
 
+// How far a shape reaches below a plane (point c, outward normal n), by its bounding box.
+static double depth(const TopoDS_Shape &x, const gp_Pnt &c, const gp_Vec &n) {
+  Bnd_Box box;
+  BRepBndLib::Add(x, box);
+  double x0, y0, z0, x1, y1, z1, most = 0;
+  box.Get(x0, y0, z0, x1, y1, z1);
+  for (double x : {x0, x1})
+    for (double y : {y0, y1})
+      for (double z : {z0, z1}) most = std::max(most, gp_Vec(gp_Pnt(x, y, z), c).Dot(n.Normalized()));
+  return most;
+}
+
 // The shape hollowed with these openings and own walls (faces of it); null when no way of offsetting fits.
 static TopoDS_Shape hollowWith(const TopoDS_Shape &shape, const std::vector<TopoDS_Face> &openings,
                                const std::vector<std::pair<TopoDS_Face, double>> &own, double thickness) {
@@ -1153,7 +1165,7 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
   return guarded("hollow", [&]() -> TopoDS_Shape {
     need(std::isfinite(thickness) && finite(open, openCount * 6) && finite(walls, wallCount * 6) && finite(wallThickness, wallCount),
          "walls must be numbers");
-    // The picked faces on a shape; false when one isn't there.
+    // The picked faces on a shape; lost counts those it doesn't have.
     auto picked = [&](const TopoDS_Shape &x, std::vector<TopoDS_Face> &openings, std::vector<std::pair<TopoDS_Face, double>> &own, int &lost) {
       TopTools_IndexedMapOfShape faces;
       TopExp::MapShapes(x, TopAbs_FACE, faces);
@@ -1176,28 +1188,50 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
     int miss = 0;
     picked(shape, openings, own, miss);
     if (missing) *missing = miss;
-    TopoDS_Shape out = hollowWith(shape, openings, own, thickness);
-    if (!out.IsNull()) return out;
     // Roundings no thicker than the walls leave nothing to shrink inward, and an opening edged by roundings doesn't
     // offset at all: the shape without them is hollowed instead, and only what lies inside the rounded shape is kept,
     // so the outside stays rounded.
     double full = volumeOf(shape);
-    for (int k = 0; k < sharpCount; k++) {
-      if (!sharp[k]) continue;
+    auto within = [&](const BKShape *k) -> TopoDS_Shape {
+      if (!k) return TopoDS_Shape();
       std::vector<TopoDS_Face> sharpOpenings;
       std::vector<std::pair<TopoDS_Face, double>> sharpOwn;
       int lost = 0;
-      picked(sharp[k]->shape, sharpOpenings, sharpOwn, lost);
-      if (lost > miss) continue;
+      picked(k->shape, sharpOpenings, sharpOwn, lost);
+      if (lost > miss) return TopoDS_Shape();
       try {
-        TopoDS_Shape hollowed = hollowWith(sharp[k]->shape, sharpOpenings, sharpOwn, thickness);
-        if (hollowed.IsNull()) continue;
-        out = common(shape, hollowed);
+        TopoDS_Shape hollowed = hollowWith(k->shape, sharpOpenings, sharpOwn, thickness);
+        if (hollowed.IsNull()) return TopoDS_Shape();
+        // A sharp inside corner mustn't break through a big rounding outside: what of the hollow lies outside the
+        // rounded shape has to be a lowered rim (at an opening, and shallow), not a hole further down.
+        TopoDS_Shape outside = cut(cut(k->shape, hollowed), shape);
+        for (TopExp_Explorer ex(outside, TopAbs_SOLID); ex.More(); ex.Next()) {
+          bool rim = false;
+          for (auto &f : sharpOpenings) {
+            gp_Pnt c;
+            gp_Vec n;
+            faceInfo(f, c, n);
+            rim = rim || (BRepExtrema_DistShapeShape(ex.Current(), f).Value() < 1e-3 && depth(ex.Current(), c, n) < depth(k->shape, c, n) / 2);
+          }
+          if (!rim) return TopoDS_Shape();
+        }
+        TopoDS_Shape out = common(shape, hollowed);
         double v = volumeOf(out);
         if (v > 0 && v < full * 0.999 && BRepCheck_Analyzer(out).IsValid()) return out;
       } catch (Standard_Failure &) {
       }
+      return TopoDS_Shape();
+    };
+    TopoDS_Shape out;
+    if (!own.empty() && sharpCount > 0) {
+      // A face with a wall of its own offsets wrongly beside any rounding (a solid comes out, but not with the walls
+      // asked for): only the shape without roundings is hollowed then.
+      out = within(sharp[sharpCount - 1]);
+    } else {
+      out = hollowWith(shape, openings, own, thickness);
+      for (int k = 0; k < sharpCount && out.IsNull(); k++) out = within(sharp[k]);
     }
+    if (!out.IsNull()) return out;
     throw Standard_Failure("the walls don't fit this shape");
   });
 }
