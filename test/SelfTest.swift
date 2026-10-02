@@ -687,11 +687,11 @@ enum SelfTest {
         lib.camera.yaw = .pi - 0.6
         let r = view.renderer!
         r.turnGizmo()
-        let (backLo, backHi) = bounds(cube.id)
+        let (behindLo, behindHi) = bounds(cube.id)
         pull(0, 10)
         let (turnLo, turnHi) = bounds(cube.id)
         check("from behind the handles face the view, and the near side grows", r.gizmoSides.x < 0 && r.gizmoSides.y < 0 && r.gizmoSides.z > 0
-              && abs(turnHi.x - backHi.x) < 0.01 && abs(turnLo.x - (backLo.x - 10)) < 0.6,
+              && abs(turnHi.x - behindHi.x) < 0.01 && abs(turnLo.x - (behindLo.x - 10)) < 0.6,
               String(format: "sides %.0f %.0f %.0f · x %.2f … %.2f", r.gizmoSides.x, r.gizmoSides.y, r.gizmoSides.z, turnLo.x, turnHi.x))
         lib.camera = Camera()
         lib.camera.distance = 150
@@ -724,11 +724,11 @@ enum SelfTest {
         lib.camera.distance = 150
         use([cube])
         lib.enter(.measure)
-        let corner = snap(SIMD3(10, -10, 20))
+        let seenCorner = snap(SIMD3(10, -10, 20))
         let hidden = snap(SIMD3(10, 10, 0), by: .zero)
-        check("the ruler snaps to a corner it can see, not to one behind", lib.mode == .measure && corner?.snap == .corner
-              && near(corner?.point ?? .zero, SIMD3(10, -10, 20), 1e-4) && !(hidden.map { near($0.point, SIMD3(10, 10, 0), 0.5) } ?? false),
-              "\(String(describing: corner?.snap)) · behind: \(String(describing: hidden?.snap))")
+        check("the ruler snaps to a corner it can see, not to one behind", lib.mode == .measure && seenCorner?.snap == .corner
+              && near(seenCorner?.point ?? .zero, SIMD3(10, -10, 20), 1e-4) && !(hidden.map { near($0.point, SIMD3(10, 10, 0), 0.5) } ?? false),
+              "\(String(describing: seenCorner?.snap)) · behind: \(String(describing: hidden?.snap))")
         let onEdge = snap(SIMD3(5, -10, 20), by: CGPoint(x: 0, y: 3))
         check("between corners it snaps to the edge", onEdge?.snap == .edge && abs((onEdge?.point.x ?? 0) - 5) < 0.5
               && near(SIMD3(0, onEdge?.point.y ?? 0, onEdge?.point.z ?? 0), SIMD3(0, -10, 20), 0.01), "\(String(describing: onEdge))")
