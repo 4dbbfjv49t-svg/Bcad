@@ -337,7 +337,7 @@ struct Fastener: Codable, Equatable, Sendable {
     func range(_ field: Field, loose: Bool = false) -> ClosedRange<Double>? {
         var b = c, out = [0.0, 0.0]
         bk_fastener_range(&b, field.rawValue, loose ? 1 : 0, &out)
-        return out[0] <= out[1] ? out[0]...out[1] : nil
+        return out[0] <= out[1] + 1e-6 ? out[0]...max(out[0], out[1]) : nil
     }
 
     @MainActor var name: String {
@@ -734,17 +734,16 @@ final class Worker: @unchecked Sendable {
         lock.unlock()
     }
 
-    func sync<T>(_ job: () -> T) -> T {
-        withoutActuallyEscaping(job) { job in
-            var out: T?
-            let done = DispatchSemaphore(value: 0)
-            async {
-                out = job()
-                done.signal()
-            }
-            done.wait()
-            return out!
+    // Escaping: the worker may still hold the job a moment after it has signalled that it's done.
+    func sync<T>(_ job: @escaping () -> T) -> T {
+        var out: T?
+        let done = DispatchSemaphore(value: 0)
+        async {
+            out = job()
+            done.signal()
         }
+        done.wait()
+        return out!
     }
 }
 

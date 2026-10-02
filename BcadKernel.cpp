@@ -522,7 +522,7 @@ void bk_fastener_range(const BKFastener *fp, int field, int loose, double *out) 
     } else if (torxDrive(k)) {
       lo = torxSizes[0].n;
       for (const auto &x : torxSizes)
-        if (x.a <= room) hi = x.n;
+        if (x.a <= room + 1e-6) hi = x.n;
     } else if (phillipsDrive(k)) {
       lo = 1, hi = 4;
     }
@@ -569,7 +569,7 @@ static void checkFit(const BKFastener &f) {
     if (!(fields & (1 << i))) continue;
     double r[2];
     bk_fastener_range(&f, i, 0, r);
-    need(v[i] >= r[0] - 1e-9 && v[i] <= r[1] + 1e-9, misfit(i));
+    need(v[i] >= r[0] - 1e-6 && v[i] <= r[1] + 1e-6, misfit(i));
   }
 }
 
@@ -581,7 +581,9 @@ void bk_fastener_fit(BKFastener *f) {
     if (!(fields & (1 << i))) continue;
     double r[2];
     bk_fastener_range(f, i, 0, r);
-    if (r[0] > r[1]) continue;
+    // A range that closes up at a single value comes out a hair empty or not by rounding.
+    if (r[0] > r[1] + 1e-6) continue;
+    r[1] = std::max(r[0], r[1]);
     if (i == BK_DRIVE && torxDrive(f->kind)) {
       // The nearest Torx size that fits.
       int best = (int)r[0];
