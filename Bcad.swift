@@ -1293,6 +1293,13 @@ struct GapEnd: Sendable {
     var point: [Double]
 }
 
+// Shapes on the clipboard, and the box they filled where they were copied.
+struct Clip: Codable {
+    static let type = NSPasteboard.PasteboardType("local.bohdan.bcad.shapes")
+    var bodies: [Solid]
+    var low, high: SIMD3<Double>?
+}
+
 // MARK: - Workbench (app state)
 
 @Observable @MainActor
@@ -1725,6 +1732,85 @@ final class Workbench: DesignHost {
     }
 
     func selectAll() { selection = doc.bodies.filter { !$0.hidden }.map(\.id) }
+
+    // MARK: between files
+
+    // The selected shapes on the clipboard, with the box they fill, for pasting here or into another file.
+    @discardableResult func copySelection() -> Bool {
+        let picked = selected
+        guard !picked.isEmpty else { return false }
+        var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
+        for b in picked { if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) } }
+        let clip = Clip(bodies: picked, low: lo.x.isFinite ? lo : nil, high: lo.x.isFinite ? hi : nil)
+        guard let data = try? JSONEncoder().encode(clip) else { return false }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setData(data, forType: Clip.type)
+        return true
+    }
+
+    func cutSelection() { if copySelection() { deleteSelection() } }
+
+    func paste() {
+        guard let data = NSPasteboard.general.data(forType: Clip.type), let clip = try? JSONDecoder().decode(Clip.self, from: data),
+              !clip.bodies.isEmpty, Document(bodies: clip.bodies).valid else { return }
+        insert(clip.bodies.map { var b = $0; b.id = UUID(); return b }, low: clip.low, high: clip.high)
+    }
+
+    // Shapes from Bcad files dropped on the window join this document (which stays the one open), each file's beside
+    // what is there when they would overlap it. False when nothing could be added.
+    @discardableResult func addFiles(_ urls: [URL]) -> Bool {
+        var problem: String?
+        var added = false
+        for url in urls {
+            guard url.pathExtension.lowercased() == "3mf" else { problem = L("Only 3MF files made by Bcad can be added"); continue }
+            do {
+                let (d, shapes) = try ThreeMF.read(url)
+                var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
+                var looks: [UUID: Mesh] = [:]
+                let incoming = d.bodies.map { b -> Solid in
+                    var c = b
+                    c.id = UUID()
+                    if let s = shapes[b.id] {
+                        for p in s.points { lo = simd_min(lo, SIMD3<Double>(p)); hi = simd_max(hi, SIMD3<Double>(p)) }
+                        looks[c.id] = Mesh(saved: s, place: b.place)
+                    }
+                    return c
+                }
+                guard !incoming.isEmpty else { continue }
+                insert(incoming, low: lo.x.isFinite ? lo : nil, high: lo.x.isFinite ? hi : nil, looks: looks)
+                added = true
+            } catch FileError.notBcad {
+                problem = L("This 3MF wasn't made by Bcad and can't be edited")
+            } catch {
+                problem = L("This file is damaged and can't be opened")
+            }
+        }
+        if let problem { flash(problem) }
+        return added
+    }
+
+    // New shapes joining the document where they were, or moved along x beside everything already there when their box
+    // would overlap a shape's. They show at once as `looks` (their saved meshes) until they are built, and are selected.
+    private func insert(_ shapes: [Solid], low: SIMD3<Double>?, high: SIMD3<Double>?, looks: [UUID: Mesh] = [:]) {
+        var shapes = shapes
+        if let low, let high {
+            var right = -Double.infinity, overlaps = false
+            for b in doc.bodies {
+                guard let (l, h) = worldBounds(b) else { continue }
+                right = max(right, h.x)
+                if simd_reduce_max(l - high) < -0.01 && simd_reduce_max(low - h) < -0.01 { overlaps = true }
+            }
+            if overlaps {
+                let dx = right + max(10, settings.snap * 10) - low.x
+                for i in shapes.indices { shapes[i].place.move.x += dx }
+            }
+        }
+        if mode != .select { cancelMode() }
+        for (id, m) in looks { meshes[id] = m }
+        commit { $0.bodies.append(contentsOf: shapes) }
+        selection = shapes.filter { !$0.hidden }.map(\.id)
+    }
 
     func hideSelection() {
         let ids = Set(selection)
@@ -2738,9 +2824,10 @@ struct BcadApp: App {
                 Button(L("Redo")) { Edits.send(#selector(UndoManager.redo)) ? () : lib.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .pasteboard) {
-                Button(L("Cut")) { _ = Edits.send(#selector(NSText.cut(_:))) }.keyboardShortcut("x")
-                Button(L("Copy")) { _ = Edits.send(#selector(NSText.copy(_:))) }.keyboardShortcut("c")
-                Button(L("Paste")) { _ = Edits.send(#selector(NSText.paste(_:))) }.keyboardShortcut("v")
+                // In a text field these edit its text; otherwise they work on shapes, between files too.
+                Button(L("Cut")) { if !Edits.send(#selector(NSText.cut(_:))) { lib.cutSelection() } }.keyboardShortcut("x")
+                Button(L("Copy")) { if !Edits.send(#selector(NSText.copy(_:))) { lib.copySelection() } }.keyboardShortcut("c")
+                Button(L("Paste")) { if !Edits.send(#selector(NSText.paste(_:))) { lib.paste() } }.keyboardShortcut("v")
                 Button(L("Select All")) { Edits.send(#selector(NSText.selectAll(_:))) ? () : lib.selectAll() }.keyboardShortcut("a")
                 Button(L("Duplicate")) { lib.duplicate() }.keyboardShortcut("d")
                 Button(L("Delete")) { lib.deleteSelection() }

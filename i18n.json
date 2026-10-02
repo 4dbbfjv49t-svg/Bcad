@@ -3863,6 +3863,27 @@
   "zh-Hans": "开",
   "ja": "オン"
  },
+ "Only 3MF files made by Bcad can be added": {
+  "uk": "Можна додати лише файли 3MF, створені в Bcad",
+  "cs": "Přidat lze jen soubory 3MF vytvořené v Bcad",
+  "de": "Nur in Bcad erstellte 3MF-Dateien können hinzugefügt werden",
+  "es": "Solo se pueden añadir archivos 3MF creados con Bcad",
+  "fr": "Seuls les fichiers 3MF créés avec Bcad peuvent être ajoutés",
+  "it": "Si possono aggiungere solo file 3MF creati con Bcad",
+  "hu": "Csak Bcad-del készült 3MF-fájlok adhatók hozzá",
+  "nl": "Alleen 3MF-bestanden die met Bcad zijn gemaakt kunnen worden toegevoegd",
+  "nb": "Bare 3MF-filer laget i Bcad kan legges til",
+  "pl": "Można dodać tylko pliki 3MF utworzone w Bcad",
+  "ro": "Se pot adăuga doar fișiere 3MF create cu Bcad",
+  "fi": "Vain Bcadilla tehtyjä 3MF-tiedostoja voi lisätä",
+  "sv": "Bara 3MF-filer skapade i Bcad kan läggas till",
+  "kk": "Тек Bcad-та жасалған 3MF файлдарын қосуға болады",
+  "ka": "შესაძლებელია მხოლოდ Bcad-ში შექმნილი 3MF ფაილების დამატება",
+  "ar": "يمكن إضافة ملفات 3MF المُنشأة في Bcad فقط",
+  "hi": "केवल Bcad में बनी 3MF फ़ाइलें जोड़ी जा सकती हैं",
+  "zh-Hans": "只能添加用 Bcad 制作的 3MF 文件",
+  "ja": "Bcadで作成した3MFファイルのみ追加できます"
+ },
  "Open…": {
   "uk": "Відкрити…",
   "cs": "Otevřít…",

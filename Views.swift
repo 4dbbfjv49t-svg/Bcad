@@ -77,6 +77,8 @@ struct RootView: View {
         }
         .background(WindowConfigurator())
         .ignoresSafeArea()
+        // Bcad files dropped on the window add their shapes to the one open.
+        .dropDestination(for: URL.self) { urls, _ in lib.addFiles(urls) }
         .animation(Neon.glide, value: lib.busy)
         .animation(Neon.glide, value: lib.note)
         .animation(Neon.glide, value: lib.mode)

@@ -706,6 +706,39 @@ enum SelfTest {
         let picked = lib.edgePicks.first
         let lit = picked.flatMap { pk in lib.meshes[cube.id].map { Picking.faceEdges($0, pk).count } } ?? 0
         check("a face clicked in Angles is picked with its edges", lib.edgePicks.count == 1 && picked?.kind == Int32(BK_PICK_FACE) && lit == 4, "\(lit) edges")
+        // Between files: copied shapes paste into another document where they were (beside the copies when pasted back into
+        // their own), and a Bcad file dropped on the window adds its shapes to the one open.
+        use([cube])
+        lib.selection = [cube.id]
+        let copied = lib.copySelection()
+        lib.paste()
+        settle()
+        let twin = lib.doc.bodies.last
+        let (cubeLo, cubeHi) = bounds(cube.id), (twinLo, _) = bounds(twin?.id ?? cube.id)
+        let twinSame: Bool = twin?.node == cube.node && twin?.id != cube.id && lib.selection == [twin?.id ?? cube.id]
+        let twinBeside: Bool = twinLo.x >= cubeHi.x && abs(twinLo.z - cubeLo.z) < 0.01
+        check("a shape pasted into its own file lands beside it", copied && lib.doc.bodies.count == 2 && twinSame && twinBeside,
+              String(format: "%d shapes, twin from x %.2f", lib.doc.bodies.count, twinLo.x))
+        let elsewhere = Solid(name: "Elsewhere", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(-60, 0, 10)))
+        use([elsewhere])
+        lib.paste()
+        settle()
+        let landed = lib.doc.bodies.last
+        let landedSame: Bool = landed?.node == cube.node && near(landed?.place.move ?? .zero, cube.place.move)
+        check("copied shapes paste into another file where they were", lib.doc.bodies.count == 2 && landedSame, "\(String(describing: landed?.place.move))")
+        let fileBefore = lib.fileURL
+        use([elsewhere])
+        let addedFile = lib.addFiles([keptURL])
+        settle()
+        let addedNodes: [Node] = lib.doc.bodies.dropFirst().map(\.node)
+        let keptNodes: [Node] = kept.bodies.map(\.node)
+        let allShown: Bool = lib.doc.bodies.allSatisfy { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) }
+        let stays: Bool = lib.doc.bodies.first == elsewhere && lib.fileURL == fileBefore
+        check("a dropped Bcad file adds its shapes to the open one", addedFile && lib.doc.bodies.count == 1 + kept.bodies.count
+              && stays && addedNodes == keptNodes && allShown, "\(lib.doc.bodies.count) shapes")
+        let notAdded = lib.addFiles([dir.appendingPathComponent("notes.txt")])
+        let saysSo: Bool = lib.note == L("Only 3MF files made by Bcad can be added")
+        check("a file that isn't a Bcad 3MF adds nothing and says so", !notAdded && lib.doc.bodies.count == 1 + kept.bodies.count && saysSo, lib.note ?? "")
         // Sizes in mm and in percent on shapes that were edited after they were made: a rounded, hollowed box and a merge.
         let edited = Solid(name: "Edited", color: Palette.colors[3], node: .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: [edge], radius: 1),
                            place: Placement(move: SIMD3(0, 0, 10)))
