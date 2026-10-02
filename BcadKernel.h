@@ -45,8 +45,9 @@ int bk_torx_number(int i);
 int bk_fastener_fields(int kind);
 // The kind's sizes for its thread, standard ones where there is a standard; its length too when withLength.
 void bk_fastener_defaults(BKFastener *f, int withLength);
-// The range one size takes with the others as they are: out[0] … out[1] (empty when out[0] > out[1]).
-void bk_fastener_range(const BKFastener *f, int field, double *out);
+// The range one size takes with the others as they are: out[0] … out[1] (empty when out[0] > out[1]). Loose: the range it
+// takes when the sizes depending on it follow (bk_fastener_fit), such as a socket getting shallower in a lower head.
+void bk_fastener_range(const BKFastener *f, int field, int loose, double *out);
 // Each size brought into its range, after another one changed.
 void bk_fastener_fit(BKFastener *f);
 // Sets the drive; a Phillips size brings the recess that goes with it.

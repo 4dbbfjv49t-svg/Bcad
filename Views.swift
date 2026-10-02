@@ -1864,9 +1864,9 @@ struct ThreadControls: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: f)
     }
 
-    // What a size may be, within these bounds too; just its value when nothing fits.
+    // What a size may be (the sizes depending on it follow), within these bounds too; just its value when nothing fits.
     private func bounded(_ field: Fastener.Field, to outer: ClosedRange<Double> = -100000...100000) -> ClosedRange<Double> {
-        guard let r = f.range(field) else { return f[field]...f[field] }
+        guard let r = f.range(field, loose: true) else { return f[field]...f[field] }
         let lo = max(r.lowerBound, outer.lowerBound), hi = min(r.upperBound, outer.upperBound)
         return lo <= hi ? lo...hi : f[field]...f[field]
     }

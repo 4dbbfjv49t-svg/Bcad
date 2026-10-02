@@ -135,10 +135,14 @@ enum SelfTest {
                 check("\(fs.name) · \(kind)", m?.valid == true && abs(h - tall) < 0.01 && sizeOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
             }
         }
-        // A size changed past what the others allow takes them along: a narrower socket head gets a smaller key.
-        let socketHead = Fastener(kind: .socket, size: 4), narrower = socketHead.setting(.width, 8.2)
-        check("a narrower head takes a smaller key with it", narrower.width == 8.2 && narrower.drive < socketHead.drive && narrower.drive * 2 / sqrt(3) <= 7.2 + 1e-9
-              && mesh(.fastener(narrower))?.valid == true, String(format: "key %.2f", narrower.drive))
+        // A size may go past what the others allow as they are, and they follow: a lower socket head gets a shallower socket,
+        // a narrower countersunk head a smaller Torx.
+        let socketHead = Fastener(kind: .socket, size: 4), lower = socketHead.setting(.height, 3)
+        check("a lower head takes a shallower socket with it", socketHead.range(.height, loose: true)?.contains(3) == true && socketHead.range(.height)?.contains(3) == false
+              && lower.height == 3 && lower.depth <= 2.7 + 1e-9 && mesh(.fastener(lower))?.valid == true, String(format: "depth %.2f", lower.depth))
+        let sunk = Fastener(kind: .torxCone, size: 4).setting(.drive, 50), narrower = sunk.setting(.width, 12)
+        check("a narrower countersunk head takes a smaller Torx with it", sunk.drive == 50 && narrower.width == 12 && narrower.drive < 50
+              && mesh(.fastener(narrower))?.valid == true, String(format: "T%.0f", narrower.drive))
         let phHead = Fastener(kind: .phCone, size: 4).setting(.drive, 2)
         check("a Phillips size brings its recess", phHead.drive == 2 && phHead.recess == 5 && mesh(.fastener(phHead))?.valid == true)
         _ = k.takeProblems()

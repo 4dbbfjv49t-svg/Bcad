@@ -332,10 +332,11 @@ struct Fastener: Codable, Equatable, Sendable {
         return n.through { bk_fastener_fit(&$0) }
     }
 
-    // What one size may be with the others as they are (nil when nothing fits).
-    func range(_ field: Field) -> ClosedRange<Double>? {
+    // What one size may be with the others as they are, or (loose) with the sizes depending on it following (nil when
+    // nothing fits).
+    func range(_ field: Field, loose: Bool = false) -> ClosedRange<Double>? {
         var b = c, out = [0.0, 0.0]
-        bk_fastener_range(&b, field.rawValue, &out)
+        bk_fastener_range(&b, field.rawValue, loose ? 1 : 0, &out)
         return out[0] <= out[1] ? out[0]...out[1] : nil
     }
 

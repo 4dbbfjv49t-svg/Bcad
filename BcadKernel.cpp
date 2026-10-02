@@ -448,8 +448,21 @@ static double driveRoom(const BKFastener &f) {
   return f.width - 1 - (countersunk(f.kind) ? 2 * f.depth * tanHalf(f.angle) : 0);
 }
 
-void bk_fastener_range(const BKFastener *fp, int field, double *out) {
-  const BKFastener &f = *fp;
+// The order sizes are fitted in after a change: each one depends only on the ones fitted after it (and the angle).
+static const int fitOrder[] = {BK_DRIVE, BK_RECESS, BK_DEPTH, BK_HEIGHT, BK_SEAT, BK_ANGLE, BK_WIDTH, BK_LENGTH};
+
+void bk_fastener_range(const BKFastener *fp, int field, int loose, double *out) {
+  BKFastener f = *fp;
+  // Loose: the sizes fitted before this one may shrink to their least to make room for it.
+  for (int i = 0; loose && fitOrder[i] != field; i++) {
+    switch (fitOrder[i]) {
+    case BK_DRIVE: if (keyDrive(f.kind)) f.drive = 0.7; else if (torxDrive(f.kind)) f.drive = torxSizes[0].n; break;
+    case BK_RECESS: f.recess = 2 * phWing[std::max(1, std::min(4, (int)lround(f.drive)))] + 0.4; break;
+    case BK_DEPTH: f.depth = 0.3; break;
+    case BK_HEIGHT: f.height = f.depth + 0.3; break;
+    case BK_SEAT: f.seat = 0.2; break;
+    }
+  }
   const ThreadSize &t = threadOf(f.size);
   int k = f.kind;
   double d = t.d, p = t.p, w = f.width, L = f.length, big = 4 * d + 20, lo = 0, hi = 0;
@@ -555,7 +568,7 @@ static void checkFit(const BKFastener &f) {
   for (int i = BK_LENGTH; i <= BK_DEPTH; i++) {
     if (!(fields & (1 << i))) continue;
     double r[2];
-    bk_fastener_range(&f, i, r);
+    bk_fastener_range(&f, i, 0, r);
     need(v[i] >= r[0] - 1e-9 && v[i] <= r[1] + 1e-9, misfit(i));
   }
 }
@@ -564,10 +577,10 @@ static void checkFit(const BKFastener &f) {
 void bk_fastener_fit(BKFastener *f) {
   double *v[] = {&f->length, &f->width, &f->height, &f->angle, &f->seat, &f->drive, &f->recess, &f->depth};
   int fields = bk_fastener_fields(f->kind);
-  for (int i : {BK_DRIVE, BK_RECESS, BK_DEPTH, BK_HEIGHT, BK_SEAT, BK_ANGLE, BK_WIDTH, BK_LENGTH}) {
+  for (int i : fitOrder) {
     if (!(fields & (1 << i))) continue;
     double r[2];
-    bk_fastener_range(f, i, r);
+    bk_fastener_range(f, i, 0, r);
     if (r[0] > r[1]) continue;
     if (i == BK_DRIVE && torxDrive(f->kind)) {
       // The nearest Torx size that fits.
