@@ -1653,14 +1653,17 @@ final class Workbench: DesignHost {
         mutate(id) { $0.name = t }
     }
 
-    func addFastener(_ f: Fastener) {
-        add(.fastener(f), name: f.name)
+    // Built first, so a bolt or nut that can't be made never enters the document; `then` follows its adding.
+    func addFastener(_ f: Fastener, then: (() -> Void)? = nil) {
+        tryThen([.fastener(f)]) { [weak self] in
+            self?.add(.fastener(f), name: f.name)
+            then?()
+        }
     }
 
     // ⌘B: the bolt or nut set up last, added at once, with the Thread tab open to change it.
     func addThread() {
-        addFastener(thread)
-        choose(.thread)
+        addFastener(thread) { [weak self] in self?.choose(.thread) }
     }
 
     @ObservationIgnored private var dropQueue: Set<UUID> = []
@@ -2509,6 +2512,7 @@ final class Workbench: DesignHost {
     }
 
     private static func message(_ problems: [String]) -> String? {
+        if problems.contains(where: { $0.hasSuffix("not in Bcad's engine yet") }) { return L("Not in Bcad's own engine yet") }
         if let m = problems.first(where: { $0.hasPrefix("max:") }) {
             return L("Rounding too large — the most this edge takes is {r} mm", ["r": String(format: "%.2f", Double(m.dropFirst(4)) ?? 0)])
         }

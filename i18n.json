@@ -3632,6 +3632,27 @@
   "zh-Hans": "北",
   "ja": "北"
  },
+ "Not in Bcad's own engine yet": {
+  "uk": "Ще немає у власному рушії Bcad",
+  "cs": "Zatím není ve vlastním jádře Bcad",
+  "de": "Noch nicht in Bcads eigener Engine",
+  "es": "Aún no está en el motor propio de Bcad",
+  "fr": "Pas encore dans le moteur de Bcad",
+  "it": "Non ancora nel motore di Bcad",
+  "hu": "Még nincs benne a Bcad saját motorjában",
+  "nl": "Nog niet in Bcads eigen engine",
+  "nb": "Ikke i Bcads egen motor ennå",
+  "pl": "Jeszcze nie ma tego we własnym silniku Bcad",
+  "ro": "Încă nu există în motorul propriu Bcad",
+  "fi": "Ei vielä Bcadin omassa moottorissa",
+  "sv": "Inte i Bcads egen motor än",
+  "kk": "Bcad-тың өз қозғалтқышында әлі жоқ",
+  "ka": "ჯერ არ არის Bcad-ის საკუთარ ძრავში",
+  "ar": "غير متوفر بعد في محرك Bcad الخاص",
+  "hi": "Bcad के अपने इंजन में अभी नहीं है",
+  "zh-Hans": "Bcad 自有引擎尚不支持",
+  "ja": "Bcad独自のエンジンにはまだありません"
+ },
  "Nothing is left of this shape": {
   "uk": "Від цієї фігури нічого не лишилося",
   "cs": "Z tohoto tvaru nic nezbylo",
