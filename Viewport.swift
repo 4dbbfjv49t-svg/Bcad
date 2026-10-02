@@ -14,10 +14,13 @@ struct Camera {
 
     var eye: SIMD3<Float> { target + distance * SIMD3(cos(pitch) * sin(yaw), -cos(pitch) * cos(yaw), sin(pitch)) }
 
+    // Screen-right in the world, level and from the yaw alone: still defined looking straight down or up.
+    var side: SIMD3<Float> { SIMD3(cos(yaw), sin(yaw), 0) }
+
     var view: simd_float4x4 {
         let e = eye
         let f = normalize(target - e)
-        let s = normalize(cross(f, SIMD3(0, 0, 1)))
+        let s = side
         let u = cross(s, f)
         return simd_float4x4(rows: [SIMD4(s, -dot(s, e)), SIMD4(u, -dot(u, e)), SIMD4(-f, dot(f, e)), SIMD4(0, 0, 0, 1)])
     }
@@ -29,9 +32,36 @@ struct Camera {
     }
 
     mutating func preset(_ n: Int) {
-        let views: [(Float, Float)] = [(-0.6, 0.62), (0, 0), (.pi, 0), (-.pi / 2, 0), (.pi / 2, 0), (0, 1.5607), (0, -1.5607)]
+        let views: [(Float, Float)] = [(-0.6, 0.62), (0, 0), (.pi, 0), (-.pi / 2, 0), (.pi / 2, 0), (0, .pi / 2), (0, -.pi / 2)]
         (yaw, pitch) = views[max(0, min(6, n))]
     }
+}
+
+// Straight views along an axis, named by where the camera stands: Top looks down, North looks south from the +y side.
+enum Side: CaseIterable {
+    case top, bottom, north, south, west, east
+
+    var name: String {
+        switch self {
+        case .top: L("Top")
+        case .bottom: L("Bottom")
+        case .north: L("North")
+        case .south: L("South")
+        case .west: L("West")
+        case .east: L("East")
+        }
+    }
+
+    var yaw: Float {
+        switch self {
+        case .top, .bottom, .south: 0
+        case .north: .pi
+        case .west: -.pi / 2
+        case .east: .pi / 2
+        }
+    }
+
+    var pitch: Float { self == .top ? .pi / 2 : self == .bottom ? -.pi / 2 : 0 }
 }
 
 extension simd_float4x4 {
@@ -314,7 +344,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if lib.mode == .hollow, lib.editBody == b.id { drawHollowMarks(enc, m, g, model, nm, accent2: accent2) }
         }
 
-        if lib.mode == .split, let plane = lib.splitPlane { drawPlane(enc, plane, accent: accent) }
+        if lib.mode == .split, let plane = lib.splitPlane { drawPlane(enc, plane, accent: accent, hatch: accent2) }
         if lib.mode == .select, !lib.selection.isEmpty { drawGizmo(enc) }
         if let g = self.view?.guides, !g.isEmpty {
             let c = color(lib.accent3)
@@ -427,7 +457,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func splitArrow(_ plane: Plane) -> (SIMD3<Double>, SIMD3<Double>) { (plane.point, plane.point + plane.normal * gizmoLength) }
 
-    private func drawPlane(_ enc: MTLRenderCommandEncoder, _ plane: Plane, accent: SIMD4<Float>) {
+    private func drawPlane(_ enc: MTLRenderCommandEncoder, _ plane: Plane, accent: SIMD4<Float>, hatch: SIMD4<Float>) {
         var size = 60.0
         for b in lib.selected { if let (lo, hi) = lib.worldBounds(b) { size = max(size, length(hi - lo) * 0.75) } }
         let n = plane.normal
@@ -438,7 +468,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var tri: [SIMD4<Float>] = [0, 1, 2, 0, 2, 3].map { SIMD4(corners[$0], -1) }
         let nf = SIMD4<Float>(SIMD3<Float>(n), 0)
         var nrm = [SIMD4<Float>](repeating: nf, count: 6)
-        var u = BodyU(model: matrix_identity_float4x4, normalM: matrix_identity_float4x4, color: SIMD4(accent.x, accent.y, accent.z, 0.16),
+        var u = BodyU(model: matrix_identity_float4x4, normalM: matrix_identity_float4x4, color: SIMD4(accent.x, accent.y, accent.z, 0.08),
                       rim: SIMD4(0, 0, 0, 0), hoverFace: -1, flags: 0)
         enc.setRenderPipelineState(glassPipe)
         enc.setDepthStencilState(depthRead)
@@ -447,6 +477,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.setVertexBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
         enc.setFragmentBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        // Thin diagonal lines both ways across the plane, a grid in the second colour that sets it apart from the shapes;
+        // like the fill, hidden where a shape is in front.
+        var grid: [LineV] = []
+        let step = size / 7
+        var d = -2 * size + step
+        while d < 2 * size - 1e-9 {
+            let u0 = max(-size, d - size), u1 = min(size, d + size)
+            for k in [1.0, -1.0] {
+                let p = c + t * u0 + s * (k * (d - u0)), q = c + t * u1 + s * (k * (d - u1))
+                Renderer.segment(SIMD3<Float>(p), SIMD3<Float>(q), width: 1, color: SIMD4(hatch.x, hatch.y, hatch.z, 0.4), into: &grid)
+            }
+            d += step
+        }
+        drawLines(enc, grid, depth: depthRead)
         var lines: [LineV] = []
         Renderer.polyline(corners + [corners[0]], width: 2.2, color: SIMD4(accent.x, accent.y, accent.z, 0.95), into: &lines)
         let active = view?.splitHandle
@@ -524,21 +568,10 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // Frames the visible shapes (or the bed when there are none). False while shapes are still being built.
     func fit() -> Bool {
-        var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
-        // A shape reaching nowhere sensible (a broken file) would throw the camera out with it; it's left out.
-        func sane(_ v: SIMD3<Double>) -> Bool { v.finite && simd_reduce_max(simd_abs(v)) < 1e5 }
-        for b in lib.doc.bodies where !b.hidden {
-            if let (l, h) = lib.worldBounds(b), sane(l), sane(h) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
-        }
-        if !lo.x.isFinite {
-            if lib.doc.bodies.contains(where: { !$0.hidden }) && lib.building { return false }
-            lib.camera.target = .zero
-            lib.camera.distance = Float(max(lib.settings.bed.x, lib.settings.bed.y)) * 2.4
-            return true
-        }
-        let r = max(10, length(hi - lo) / 2)
-        lib.camera.target = SIMD3<Float>((lo + hi) / 2)
-        lib.camera.distance = Float(r / tan(Double(lib.camera.fov) / 2) * 1.25)
+        let shown = lib.doc.bodies.filter { !$0.hidden }
+        let framing = lib.framing(shown)
+        if framing == nil && !shown.isEmpty && lib.building { return false }
+        (lib.camera.target, lib.camera.distance) = framing ?? lib.bedFraming
         return true
     }
 }
@@ -633,6 +666,12 @@ enum Picking {
             if d > best { best = d; hit = i }
         }
         return hit
+    }
+
+    // A face that meets no other face along any edge: the whole surface of its shape (a sphere's, a torus's).
+    static func alone(_ m: Mesh, _ face: Int) -> Bool {
+        let f = Int32(face)
+        return !m.edgeFaces.isEmpty && !m.edgeFaces.contains { ($0.x == f && $0.y >= 0 && $0.y != f) || ($0.y == f && $0.x >= 0 && $0.x != f) }
     }
 
     // The edges around a picked face: the ones a rounding of the face works on.
@@ -892,15 +931,15 @@ final class CadView: MTKView {
             return
         case .hollow:
             guard let h = hitBody(p), let m = lib.meshes[h.body], m.faceInfo.indices.contains(h.face) else { drag = shift ? .pan : .orbit; return }
-            if lib.editBody != h.body {
-                lib.editBody = h.body
-                lib.hollowOpen = []
-                lib.hollowWalls = []
-                lib.focusWall = nil
-            }
-            let f = m.faceInfo[h.face]
-            lib.pickHollowFace(Pick(kind: Int32(BK_PICK_FACE), a: f.normal, b: f.centroid), ownWall: e.modifierFlags.contains(.option))
+            if lib.editBody != h.body { lib.loadHollow(h.body) }
+            let f = m.faceInfo[h.face], own = e.modifierFlags.contains(.option)
             drag = .none
+            // A face that is the whole surface (a sphere's, a torus's) leaves nothing to keep when opened.
+            if !own && Picking.alone(m, h.face) {
+                lib.flash(L("A shape with one surface can't have an opening"))
+                return
+            }
+            lib.pickHollowFace(Pick(kind: Int32(BK_PICK_FACE), a: f.normal, b: f.centroid), ownWall: own)
             return
         case .round:
             let hv = roundHover(p)
@@ -1127,7 +1166,7 @@ final class CadView: MTKView {
     private func pan(_ dx: CGFloat, _ dy: CGFloat) {
         let cam = lib.camera
         let f = normalize(cam.target - cam.eye)
-        let r = normalize(cross(f, SIMD3(0, 0, 1)))
+        let r = cam.side
         let u = cross(r, f)
         let wpp = Float(worldPerPoint(at: SIMD3<Double>(cam.target)))
         lib.camera.target += (-r * Float(dx) - u * Float(dy)) * wpp

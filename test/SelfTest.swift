@@ -376,6 +376,61 @@ enum SelfTest {
         check("a rounded cube is hollowed with its top open", cupped && lib.mode == .select && lib.note == nil
               && (lib.meshes[softCube.id]?.volume ?? 0) < roundAllVolume - 1000, lib.note ?? "")
 
+        // Hollow on a hollowed shape changes that hollow (beneath a later rounding too) rather than hollowing it again;
+        // a sphere's one surface can't be opened.
+        let shut = Solid(name: "Shut", color: Palette.colors[2], node: .hollow(of: box, open: [], walls: [], thickness: 2), place: Placement(move: SIMD3(0, 0, 10)))
+        use([shut])
+        lib.selection = [shut.id]
+        lib.hollowThickness = 1
+        lib.enter(.hollow)
+        let loaded = lib.hollowThickness == 2 && lib.hollowOpen.isEmpty && lib.editBody == shut.id
+        lib.pickHollowFace(top, ownWall: false)
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        check("a hollowed box gets its top opened later", loaded && lib.body(shut.id)?.node == .hollow(of: box, open: [top], walls: [], thickness: 2)
+              && abs((lib.meshes[shut.id]?.volume ?? 0) - (8000 - 16 * 16 * 18)) < 0.5 && lib.note == nil, lib.note ?? "")
+        lib.enter(.hollow)
+        lib.pickHollowFace(Pick(kind: top.kind, a: top.a, b: top.b + SIMD3(0.01, 0.01, 0)), ownWall: false)
+        check("clicking an opening again closes it", lib.hollowOpen.isEmpty && lib.hollowThickness == 2)
+        lib.cancelMode()
+        let roundedShut = Solid(name: "Rounded shut", color: Palette.colors[3], node: .round(of: .hollow(of: box, open: [], walls: [], thickness: 2), picks: uprights, radius: 1),
+                                place: Placement(move: SIMD3(0, 0, 10)))
+        use([roundedShut])
+        lib.selection = [roundedShut.id]
+        lib.enter(.hollow)
+        lib.pickHollowFace(top, ownWall: false)
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        check("a hollow beneath a rounding is opened in place",
+              lib.body(roundedShut.id)?.node == .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: uprights, radius: 1) && lib.note == nil, lib.note ?? "")
+        let ball = k.queue.sync { k.mesh(.primitive(.make(.sphere))) }, cubeMesh = k.queue.sync { k.mesh(box) }
+        check("a sphere's one surface can't be opened, a box's faces can", ball.map { Picking.alone($0, 0) } == true
+              && cubeMesh.map { m in !m.faceInfo.isEmpty && m.faceInfo.indices.allSatisfy { !Picking.alone(m, $0) } } == true)
+
+        // The straight views look along an axis at the selection, or at every shape when nothing is selected.
+        func steady(_ c: Camera) -> Bool { [c.view.columns.0, c.view.columns.1, c.view.columns.2, c.view.columns.3].allSatisfy { simd_reduce_max(simd_abs($0)).isFinite } }
+        func flown() { let t = Date(); while Date().timeIntervalSince(t) < 1.5 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } }
+        let westBox = Solid(name: "West", color: Palette.colors[4], node: box, place: Placement(move: SIMD3(-40, 0, 10)))
+        let eastBox = Solid(name: "East", color: Palette.colors[5], node: box, place: Placement(move: SIMD3(40, 0, 10)))
+        use([westBox, eastBox])
+        lib.selection = [eastBox.id]
+        lib.look(from: .top)
+        flown()
+        let fromTop = lib.camera
+        lib.selection = []
+        lib.look(from: .north)
+        flown()
+        let fromNorth = lib.camera
+        var below = Camera()
+        below.pitch = -.pi / 2
+        check("straight views look along the axes, at the selection or at everything",
+              abs(fromTop.yaw) < 1e-4 && abs(fromTop.pitch - .pi / 2) < 1e-4 && near(SIMD3<Double>(fromTop.target), SIMD3(40, 0, 10), 0.01) && steady(fromTop)
+              && abs(fromNorth.yaw - .pi) < 1e-4 && abs(fromNorth.pitch) < 1e-4 && near(SIMD3<Double>(fromNorth.target), SIMD3(0, 0, 10), 0.01)
+              && fromNorth.distance > fromTop.distance && steady(below),
+              String(format: "top %.3f/%.3f, north %.3f/%.3f", fromTop.yaw, fromTop.pitch, fromNorth.yaw, fromNorth.pitch))
+
         // Angles on a shape with rounded edges: a 2 mm bevel beside the rounding goes in.
         let upstanding = Solid(name: "Upright", color: Palette.colors[3], node: upright, place: Placement(move: SIMD3(0, 0, 10)))
         use([upstanding])

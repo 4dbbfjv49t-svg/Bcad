@@ -1440,6 +1440,22 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var dropQueue: Set<UUID> = []
     private func dropSoon(_ ids: [UUID]) { if settings.dropToBed { dropQueue.formUnion(ids) } }
 
+    // Where the camera frames these shapes from: their middle, and how far away they fill the view. A shape reaching
+    // nowhere sensible (a broken file) would throw the camera out with it; it's left out. Nil when nothing is left.
+    func framing(_ bodies: [Solid]) -> (target: SIMD3<Float>, distance: Float)? {
+        var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+        func sane(_ v: SIMD3<Double>) -> Bool { v.finite && simd_reduce_max(simd_abs(v)) < 1e5 }
+        for b in bodies {
+            if let (l, h) = worldBounds(b), sane(l), sane(h) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
+        }
+        guard lo.x.isFinite else { return nil }
+        let r = max(10, simd_length(hi - lo) / 2)
+        return (SIMD3<Float>((lo + hi) / 2), Float(r / tan(Double(camera.fov) / 2) * 1.25))
+    }
+
+    // The whole bed in view, for an empty scene.
+    var bedFraming: (target: SIMD3<Float>, distance: Float) { (.zero, Float(max(settings.bed.x, settings.bed.y)) * 2.4) }
+
     // World bounding box of a body: exact from the shape's box when unrotated, from the mesh otherwise.
     func worldBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
         guard let m = meshes[b.id], !m.vertices.isEmpty else { return nil }
@@ -1733,20 +1749,46 @@ final class Workbench: DesignHost {
 
     // MARK: hollow
 
+    // The hollow a body already has, beneath later roundings too: the Hollow tool changes it rather than hollowing the
+    // hollow shape again (which never fits).
+    func existingHollow(_ b: Solid) -> (level: Int, open: [Pick], walls: [Wall], thickness: Double)? {
+        for (level, n) in stack(b).enumerated() {
+            if case .hollow(_, let open, let walls, let thickness) = n { return (level, open, walls, thickness) }
+        }
+        return nil
+    }
+
+    // The body the Hollow tool works on, starting from the openings, walls and thickness of the hollow it already has.
+    func loadHollow(_ id: UUID?) {
+        editBody = id
+        focusWall = nil
+        if let id, let b = body(id), let h = existingHollow(b) {
+            hollowOpen = h.open
+            hollowWalls = h.walls
+            hollowThickness = h.thickness
+        } else {
+            hollowOpen = []
+            hollowWalls = []
+        }
+    }
+
+    // Picks of one face taken from different meshes of it (before and after hollowing) differ by a hair.
+    private func sameFace(_ p: Pick, _ q: Pick) -> Bool { simd_dot(p.a, q.a) > 0.99 && simd_length(p.b - q.b) < 0.3 }
+
     // A click on a face: opens it, or closes it again; ⌥ gives it its own wall instead.
     func pickHollowFace(_ face: Pick, ownWall: Bool) {
         if ownWall {
-            hollowOpen.removeAll { $0 == face }
-            if let i = hollowWalls.firstIndex(where: { $0.face == face }) {
+            hollowOpen.removeAll { sameFace($0, face) }
+            if let i = hollowWalls.firstIndex(where: { sameFace($0.face, face) }) {
                 focusWall = i
             } else {
                 hollowWalls.append(Wall(face: face, thickness: hollowThickness))
                 focusWall = hollowWalls.count - 1
             }
         } else {
-            hollowWalls.removeAll { $0.face == face }
+            hollowWalls.removeAll { sameFace($0.face, face) }
             focusWall = nil
-            if let i = hollowOpen.firstIndex(of: face) { hollowOpen.remove(at: i) } else { hollowOpen.append(face) }
+            if let i = hollowOpen.firstIndex(where: { sameFace($0, face) }) { hollowOpen.remove(at: i) } else { hollowOpen.append(face) }
         }
     }
 
@@ -1758,18 +1800,30 @@ final class Workbench: DesignHost {
 
     func commitHollow() {
         guard let id = editBody, let b = body(id) else { flash(L("Select a shape to hollow")); return }
-        let node = Node.hollow(of: b.node, open: hollowOpen, walls: hollowWalls, thickness: hollowThickness)
+        let open = hollowOpen, walls = hollowWalls, thickness = hollowThickness
+        let node = existingHollow(b).map { h in
+            rewrite(b.node, level: h.level) { n in
+                guard case .hollow(let of, _, _, _) = n else { return n }
+                return .hollow(of: of, open: open, walls: walls, thickness: thickness)
+            }
+        } ?? .hollow(of: b.node, open: open, walls: walls, thickness: thickness)
+        // The hollow left as it was: the tool just closes.
+        guard node != b.node else { leaveHollow(); return }
         tryThen([node]) { [weak self] in
             guard let self, self.body(id)?.node == b.node else { return }
             self.commit { d in
                 if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = node }
             }
-            withAnimation(Neon.spring) {
-                self.hollowOpen = []
-                self.hollowWalls = []
-                self.focusWall = nil
-                self.mode = .select
-            }
+            self.leaveHollow()
+        }
+    }
+
+    private func leaveHollow() {
+        withAnimation(Neon.spring) {
+            hollowOpen = []
+            hollowWalls = []
+            focusWall = nil
+            mode = .select
         }
     }
 
@@ -1914,6 +1968,12 @@ final class Workbench: DesignHost {
         }
     }
 
+    // Glides round to look straight along an axis at the selection, or at every shape when nothing is selected.
+    func look(from side: Side) {
+        let f = framing(selection.isEmpty ? doc.bodies.filter { !$0.hidden } : selected) ?? bedFraming
+        fly(to: f.target, yaw: side.yaw, pitch: side.pitch, distance: f.distance)
+    }
+
     func closeAngles() {
         guard angleEdit != nil else { return }
         withAnimation(.spring(response: 0.5, dampingFraction: 0.88)) { angleEdit = nil }
@@ -1982,10 +2042,7 @@ final class Workbench: DesignHost {
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
-            hollowOpen = []
-            hollowWalls = []
-            focusWall = nil
-            editBody = mode == .hollow ? selection.last : nil
+            loadHollow(mode == .hollow ? selection.last : nil)
             splitOffset = 0
             splitTilt = .zero
         }

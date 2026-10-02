@@ -17,24 +17,28 @@ struct RootView: View {
             ScaledUI {
                 ZStack {
                     HStack(spacing: 0) {
+                        // A plain slide: blurring the panel on its way in draws its frosted glass out of place.
                         if lib.drawerOpen {
-                            Drawer().transition(.move(edge: .leading).combined(with: .haze))
+                            Drawer().transition(Neon.calm ? .opacity : .move(edge: .leading))
                         }
                         ZStack {
                             if lib.angleEdit != nil {
                                 AngleEditor().transition(.scale(scale: 0.4).combined(with: .opacity))
                             } else {
-                                if !lib.drawerOpen {
-                                    Button { withAnimation(Neon.glide) { lib.drawerOpen = true } } label: {
-                                        Image(systemName: "sidebar.left").accessibilityLabel(L("Show the side panel"))
+                                // The button grows and shrinks where it is, not from the middle of the window.
+                                ZStack {
+                                    if !lib.drawerOpen {
+                                        Button { withAnimation(Neon.glide) { lib.drawerOpen = true } } label: {
+                                            Image(systemName: "sidebar.left").accessibilityLabel(L("Show the side panel"))
+                                        }
+                                        .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 32))
+                                        .help(L("Show the side panel"))
+                                        .transition(.scale.combined(with: .opacity))
                                     }
-                                    .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 32))
-                                    .help(L("Show the side panel"))
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                                    .padding(.top, 40)
-                                    .padding(.leading, 14)
-                                    .transition(.scale.combined(with: .haze))
                                 }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .padding(.top, 40)
+                                .padding(.leading, 14)
                                 VStack(spacing: 10) {
                                     Spacer()
                                     if tool {
@@ -430,6 +434,7 @@ struct ShapeChoice: View {
 
 struct ToolRail: View {
     @Environment(Workbench.self) private var lib
+    @State private var views = false
 
     var body: some View {
         let s = lib.settings
@@ -444,6 +449,35 @@ struct ToolRail: View {
             ToolButton(icon: "arrow.uturn.backward", title: L("Undo"), key: "⌘Z", size: 30) { lib.undo() }
             ToolButton(icon: "arrow.uturn.forward", title: L("Redo"), key: "⇧⌘Z", size: 30) { lib.redo() }
             ToolButton(icon: "viewfinder", title: Action.frame.label, key: Keys.label(s.key(.frame)), size: 30) { lib.perform(.frame) }
+            // Straight views along an axis, opening beside the rail.
+            Button { withAnimation(Neon.glide) { views.toggle() } } label: {
+                Image(systemName: "chevron.left").font(.ui(size: 8, weight: .black))
+            }
+            .buttonStyle(NeonButtonStyle(tint: lib.accent, lit: views, size: 16))
+            .rotationEffect(.degrees(views ? 180 : 0))
+            .help(L("Views"))
+            .accessibilityLabel(L("Views"))
+            .overlay(alignment: .trailing) {
+                if views {
+                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
+                        ForEach([[Side.top, .bottom], [.north, .south], [.west, .east]], id: \.self) { pair in
+                            GridRow {
+                                ForEach(pair, id: \.self) { side in
+                                    Chip(text: side.name, chosen: false) {
+                                        lib.look(from: side)
+                                        withAnimation(Neon.glide) { views = false }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .glassBar(14)
+                    .fixedSize()
+                    .offset(x: -38)
+                    .transition(.menu)
+                }
+            }
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 7)
@@ -1288,7 +1322,7 @@ struct Combine: View {
     }
 }
 
-// Picking the edges to work on: just the hint until something is picked, then the ways to work on it.
+// Picking the edges to work on: just the hint until something is picked, then the way into the angle editor.
 struct AnglesScreen: View {
     @Environment(Workbench.self) private var lib
 
@@ -1299,26 +1333,10 @@ struct AnglesScreen: View {
             Hint(text: picks.isEmpty ? L("Click an edge, a corner or a face · ⇧ adds more") : (all ? L("All edges") : L("{n} picks", ["n": picks.count])))
                 .contentTransition(.opacity)
             if !picks.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        ForEach([CornerGlyph.Look.outbound, .inbound, .bevel(45)], id: \.self) { g in
-                            CornerGlyph(look: g, tint: Ink.text)
-                                .frame(width: 44, height: 34)
-                                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Ink.text.opacity(0.06)))
-                        }
-                        Spacer(minLength: 0)
-                        Chip(text: L("All edges") + " · A", chosen: all, tint: lib.accent2) {
-                            if let b = lib.editBody ?? lib.selection.last {
-                                lib.editBody = b
-                                lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
-                            }
-                        }
-                    }
-                    Button { lib.workWithAngles() } label: {
-                        Label(L("Work with angles"), systemImage: "angle")
-                    }
-                    .buttonStyle(PillStyle(tint: lib.accent2))
+                Button { lib.workWithAngles() } label: {
+                    Label(L("Work with angles"), systemImage: "angle")
                 }
+                .buttonStyle(PillStyle(tint: lib.accent2))
                 .transition(.scale(scale: 0.9, anchor: .top).combined(with: .haze))
             }
         }
