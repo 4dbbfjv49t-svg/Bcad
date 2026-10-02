@@ -484,23 +484,35 @@ enum SelfTest {
 
         // The straight views look along an axis at the selection, or at every shape when nothing is selected.
         func steady(_ c: Camera) -> Bool { [c.view.columns.0, c.view.columns.1, c.view.columns.2, c.view.columns.3].allSatisfy { simd_reduce_max(simd_abs($0)).isFinite } }
-        func flown() { let t = Date(); while Date().timeIntervalSince(t) < 1.5 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } }
+        // Angles the same way round, whatever whole turns lie between them.
+        func turned(_ a: Float, _ b: Float) -> Bool { abs(remainder(a - b, 2 * .pi)) < 1e-4 }
+        // Until the glide has ended: facing the way asked and no longer moving (a slow machine takes longer than half a second).
+        func flown(_ yaw: Float, _ pitch: Float) {
+            let t = Date()
+            var last = lib.camera
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                let now = lib.camera
+                if turned(now.yaw, yaw) && abs(now.pitch - pitch) < 1e-4 && now.target == last.target && now.distance == last.distance { return }
+                last = now
+            } while Date().timeIntervalSince(t) < 15
+        }
         let westBox = Solid(name: "West", color: Palette.colors[4], node: box, place: Placement(move: SIMD3(-40, 0, 10)))
         let eastBox = Solid(name: "East", color: Palette.colors[5], node: box, place: Placement(move: SIMD3(40, 0, 10)))
         use([westBox, eastBox])
         lib.selection = [eastBox.id]
         lib.look(from: .top)
-        flown()
+        flown(0, .pi / 2)
         let fromTop = lib.camera
         lib.selection = []
         lib.look(from: .north)
-        flown()
+        flown(.pi, 0)
         let fromNorth = lib.camera
         var below = Camera()
         below.pitch = -.pi / 2
         check("straight views look along the axes, at the selection or at everything",
-              abs(fromTop.yaw) < 1e-4 && abs(fromTop.pitch - .pi / 2) < 1e-4 && near(SIMD3<Double>(fromTop.target), SIMD3(40, 0, 10), 0.01) && steady(fromTop)
-              && abs(fromNorth.yaw - .pi) < 1e-4 && abs(fromNorth.pitch) < 1e-4 && near(SIMD3<Double>(fromNorth.target), SIMD3(0, 0, 10), 0.01)
+              turned(fromTop.yaw, 0) && abs(fromTop.pitch - .pi / 2) < 1e-4 && near(SIMD3<Double>(fromTop.target), SIMD3(40, 0, 10), 0.01) && steady(fromTop)
+              && turned(fromNorth.yaw, .pi) && abs(fromNorth.pitch) < 1e-4 && near(SIMD3<Double>(fromNorth.target), SIMD3(0, 0, 10), 0.01)
               && fromNorth.distance > fromTop.distance && steady(below),
               String(format: "top %.3f/%.3f, north %.3f/%.3f", fromTop.yaw, fromTop.pitch, fromNorth.yaw, fromNorth.pitch))
 
