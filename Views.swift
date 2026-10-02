@@ -84,8 +84,8 @@ struct RootView: View {
         .animation(Neon.glide, value: lib.drawerOpen)
     }
 
-    // A tool (split, round, hollow) is out: its bar shows instead of the inspector.
-    private var tool: Bool { [.round, .split, .hollow].contains(lib.mode) }
+    // A tool (split, round, hollow, the ruler) is out: its bar shows instead of the inspector.
+    private var tool: Bool { lib.mode.isTool }
 }
 
 // A short message at the top of the window, in the look of the busy note but without its spinner.
@@ -445,6 +445,8 @@ struct ToolRail: View {
             ToolButton(icon: "app", title: Action.round.label, key: Keys.label(s.key(.round)), tint: lib.accent2, lit: lib.mode == .round, size: 30) { lib.perform(.round) }
             ToolButton(icon: "square.dashed.inset.filled", title: Action.hollow.label, key: Keys.label(s.key(.hollow)), tint: lib.accent2,
                        lit: lib.mode == .hollow, size: 30) { lib.perform(.hollow) }
+            ToolButton(icon: "ruler", title: Action.measure.label, key: Keys.label(s.key(.measure)), tint: lib.accent2,
+                       lit: lib.mode == .measure, size: 30) { lib.perform(.measure) }
             divider
             ToolButton(icon: "arrow.uturn.backward", title: L("Undo"), key: "⌘Z", size: 30) { lib.undo() }
             ToolButton(icon: "arrow.uturn.forward", title: L("Redo"), key: "⇧⌘Z", size: 30) { lib.redo() }
@@ -494,6 +496,7 @@ struct ModeBar: View {
         switch lib.mode {
         case .round: L("Round edges")
         case .hollow: L("Hollow")
+        case .measure: L("Ruler")
         default: L("Split")
         }
     }
@@ -502,6 +505,9 @@ struct ModeBar: View {
         switch lib.mode {
         case .round: lib.edgePicks.isEmpty ? L("Click an edge, a corner or a face · ⇧ adds more") : L("Drag up or down on the pick to round it · Enter applies")
         case .hollow: L("Click faces to open them · ⌥-click a face for its own wall")
+        case .measure:
+            lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
+                : lib.measureB == nil ? L("Click the second point") : L("Click to measure again · Esc clears")
         default: L("Drag the arrow to move the plane · drag a ring to tilt it")
         }
     }
@@ -517,6 +523,7 @@ struct ModeBar: View {
                 switch lib.mode {
                 case .round: round
                 case .hollow: hollow
+                case .measure: measure
                 default: split
                 }
                 // Not 28 or 34 points: at those sizes a hovered button ignores clicks along its middle line.
@@ -547,6 +554,23 @@ struct ModeBar: View {
             .buttonStyle(PillStyle(tint: lib.accent2))
             .frame(width: 90)
             .disabled(lib.edgePicks.isEmpty)
+    }
+
+    // The distance between the ends, along each axis, and the gap between surfaces when it differs.
+    @ViewBuilder private var measure: some View {
+        if let a = lib.measureA, let b = lib.measureB {
+            let d = b.point - a.point
+            Text(L("Distance")).foregroundStyle(Ink.text.opacity(0.55))
+            Text(Ruler.mm(simd_length(d))).foregroundStyle(lib.accent).monospacedDigit()
+            ForEach(0..<3, id: \.self) { i in
+                Text("Δ" + ["X", "Y", "Z"][i]).foregroundStyle(Axis.color(i))
+                Text(String(format: "%.2f", abs(d[i]))).monospacedDigit()
+            }
+            if let g = lib.shownGap {
+                Text(L("Gap")).foregroundStyle(Ink.text.opacity(0.55))
+                Text(Ruler.mm(g.distance)).foregroundStyle(lib.accent2).monospacedDigit()
+            }
+        }
     }
 
     @ViewBuilder private var hollow: some View {

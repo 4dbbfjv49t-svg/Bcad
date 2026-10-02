@@ -946,28 +946,63 @@ BKShape *bk_fastener(const BKFastener *f, double clearance) {
 
 // MARK: - transforms and operations
 
+// The shape moved by m (row-major 3x4); throws on a placement that isn't one.
+static TopoDS_Shape place(const TopoDS_Shape &shape, const double *m) {
+  need(finite(m, 12), "placement must be numbers");
+  gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
+  need(fabs(c0.Dot(c1.Crossed(c2))) > 1e-12, "placement flattens the shape");
+  double l0 = c0.Magnitude(), l1 = c1.Magnitude(), l2 = c2.Magnitude();
+  bool uniform = fabs(l0 - l1) < 1e-9 * l0 + 1e-12 && fabs(l0 - l2) < 1e-9 * l0 + 1e-12 && fabs(c0.Dot(c1)) < 1e-9 &&
+                 fabs(c0.Dot(c2)) < 1e-9 && fabs(c1.Dot(c2)) < 1e-9;
+  // A mesh-free copy: transforming a shape that was already meshed can carry stale mesh records
+  // (polygons on a dropped triangulation) into the result.
+  TopoDS_Shape clean = BRepBuilderAPI_Copy(shape, true, false).Shape();
+  if (uniform) {
+    gp_Trsf t;
+    t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+    return BRepBuilderAPI_Transform(clean, t, false).Shape();
+  }
+  gp_GTrsf g;
+  for (int r = 0; r < 3; r++)
+    for (int c = 0; c < 4; c++) g.SetValue(r + 1, c + 1, m[r * 4 + c]);
+  return BRepBuilderAPI_GTransform(clean, g, false).Shape();
+}
+
 BKShape *bk_transform(const BKShape *s, const double *m) {
   if (!s) return nullptr;
-  return guarded("transform", [&]() -> TopoDS_Shape {
-    need(finite(m, 12), "placement must be numbers");
-    gp_Vec c0(m[0], m[4], m[8]), c1(m[1], m[5], m[9]), c2(m[2], m[6], m[10]);
-    need(fabs(c0.Dot(c1.Crossed(c2))) > 1e-12, "placement flattens the shape");
-    double l0 = c0.Magnitude(), l1 = c1.Magnitude(), l2 = c2.Magnitude();
-    bool uniform = fabs(l0 - l1) < 1e-9 * l0 + 1e-12 && fabs(l0 - l2) < 1e-9 * l0 + 1e-12 && fabs(c0.Dot(c1)) < 1e-9 &&
-                   fabs(c0.Dot(c2)) < 1e-9 && fabs(c1.Dot(c2)) < 1e-9;
-    // A mesh-free copy: transforming a shape that was already meshed can carry stale mesh records
-    // (polygons on a dropped triangulation) into the result.
-    TopoDS_Shape clean = BRepBuilderAPI_Copy(s->shape, true, false).Shape();
-    if (uniform) {
-      gp_Trsf t;
-      t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
-      return BRepBuilderAPI_Transform(clean, t, false).Shape();
+  return guarded("transform", [&]() -> TopoDS_Shape { return place(s->shape, m); });
+}
+
+// One end of a measurement as a shape in place: a vertex, or the edge or face numbered as bk_mesh numbers them.
+static TopoDS_Shape measureEnd(const BKShape *s, const double *m, int kind, int index, const double *point) {
+  if (kind == BK_END_POINT) {
+    need(point && finite(point, 3), "a point must be numbers");
+    return BRepBuilderAPI_MakeVertex(gp_Pnt(point[0], point[1], point[2])).Vertex();
+  }
+  need(s && m && (kind == BK_END_EDGE || kind == BK_END_FACE), "no shape to measure");
+  TopTools_IndexedMapOfShape items;
+  TopExp::MapShapes(s->shape, kind == BK_END_EDGE ? TopAbs_EDGE : TopAbs_FACE, items);
+  need(index >= 0 && index < items.Extent(), "no such edge or face");
+  return place(items(index + 1), m);
+}
+
+double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, const double *pointA, const BKShape *b,
+                   const double *mb, int kindB, int indexB, const double *pointB, double *out) {
+  try {
+    BRepExtrema_DistShapeShape d(measureEnd(a, ma, kindA, indexA, pointA), measureEnd(b, mb, kindB, indexB, pointB));
+    need(d.IsDone() && d.NbSolution() > 0, "no distance found");
+    gp_Pnt p = d.PointOnShape1(1), q = d.PointOnShape2(1);
+    if (out) {
+      double v[6] = {p.X(), p.Y(), p.Z(), q.X(), q.Y(), q.Z()};
+      memcpy(out, v, sizeof v);
     }
-    gp_GTrsf g;
-    for (int r = 0; r < 3; r++)
-      for (int c = 0; c < 4; c++) g.SetValue(r + 1, c + 1, m[r * 4 + c]);
-    return BRepBuilderAPI_GTransform(clean, g, false).Shape();
-  });
+    return d.Value();
+  } catch (Standard_Failure &e) {
+    lastError = std::string("distance: ") + (e.GetMessageString() ? e.GetMessageString() : "OpenCascade error");
+  } catch (...) {
+    lastError = "distance failed";
+  }
+  return -1;
 }
 
 BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b) {

@@ -942,6 +942,23 @@ final class Kernel: @unchecked Sendable {
         return s.with { sp in b.place.kernel.withUnsafeBufferPointer { bk_transform(sp, $0.baseAddress) } }.map(ShapeRef.init)
     }
 
+    // The shortest distance between two measurement ends.
+    func distance(_ a: GapEnd, _ b: GapEnd) -> Gap? {
+        // An end on a shape that can't be built has nothing to measure from.
+        let ra = a.node.map { shape($0) }, rb = b.node.map { shape($0) }
+        if case .some(.none) = ra { return nil }
+        if case .some(.none) = rb { return nil }
+        func with<T>(_ r: ShapeRef??, _ f: (OpaquePointer?) -> T) -> T { if let r = r ?? nil { r.with { f($0) } } else { f(nil) } }
+        var out = [Double](repeating: 0, count: 6)
+        let d = with(ra) { pa in
+            with(rb) { pb in
+                bk_distance(pa, a.place, a.kind, a.index, a.point, pb, b.place, b.kind, b.index, b.point, &out)
+            }
+        }
+        guard d >= 0, d.isFinite else { return nil }
+        return Gap(distance: d, a: SIMD3(out[0], out[1], out[2]), b: SIMD3(out[3], out[4], out[5]))
+    }
+
     // A body's fine mesh in world coordinates, for files.
     func worldMesh(_ b: Solid, deflection: Double = 0.01) -> Mesh? {
         guard let s = placed(b), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
@@ -962,7 +979,7 @@ final class Kernel: @unchecked Sendable {
 // MARK: - Settings
 
 enum Action: String, CaseIterable, Codable {
-    case move, rotate, scale, round, split, hollow, drop, frame, hide, showAll
+    case move, rotate, scale, round, split, hollow, measure, drop, frame, hide, showAll
 
     var name: String {
         switch self {
@@ -972,6 +989,7 @@ enum Action: String, CaseIterable, Codable {
         case .round: "Round edges"
         case .split: "Split"
         case .hollow: "Hollow"
+        case .measure: "Measure"
         case .drop: "Drop onto the bed"
         case .frame: "Zoom to fit"
         case .hide: "Hide selection"
@@ -983,7 +1001,7 @@ enum Action: String, CaseIterable, Codable {
 
 struct Settings: Codable, Equatable {
     static let defaultKeys: [String: String] = [
-        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
+        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "measure": "KeyM", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
     ]
     var keys = Settings.defaultKeys
     var snap = 1.0
@@ -1041,7 +1059,12 @@ enum Paths {
     static let state = dir.appendingPathComponent("state.json")
 }
 
-enum Mode: Equatable { case select, round, split, hollow, angles, thread }
+enum Mode: Equatable {
+    case select, round, split, hollow, angles, thread, measure
+
+    // A tool with its own bar at the bottom in place of the inspector.
+    var isTool: Bool { [.round, .split, .hollow, .measure].contains(self) }
+}
 
 // The inspector's screens: its segments and the gizmo they bring.
 enum Screen: Int, CaseIterable {
@@ -1230,6 +1253,46 @@ struct Hover: Equatable {
     var point = SIMD3<Double>(0, 0, 0)
 }
 
+// One end of a measurement: where it is (world, mm) and what it stands for. A corner, a circle's centre or an edge's middle
+// is a point; an edge or a face is also measured from as a whole, for the shortest distance between surfaces.
+struct MeasureEnd: Equatable {
+    enum Snap { case corner, centre, midpoint, edge, face }
+    var snap: Snap
+    var point: SIMD3<Double>
+    var body: UUID?
+    var index = -1   // the edge's or face's number in the body's mesh
+
+    @MainActor var name: String {
+        switch snap {
+        case .corner: L("Corner")
+        case .centre: L("Centre")
+        case .midpoint: L("Midpoint")
+        case .edge: L("Edge")
+        case .face: L("Face")
+        }
+    }
+}
+
+// The ruler's numbers: millimetres to two places.
+enum Ruler {
+    @MainActor static func mm(_ v: Double) -> String { String(format: "%.2f ", v) + L("mm") }
+}
+
+// The shortest distance between the edges or faces at a measurement's ends, and the two points it runs between.
+struct Gap: Equatable, Sendable {
+    var distance: Double
+    var a, b: SIMD3<Double>
+}
+
+// A measurement's end as the kernel takes it: a point, or an edge or face of a built shape in place.
+struct GapEnd: Sendable {
+    var kind: Int32
+    var index: Int32 = 0
+    var node: Node?
+    var place = [Double](repeating: 0, count: 12)
+    var point: [Double]
+}
+
 // MARK: - Workbench (app state)
 
 @Observable @MainActor
@@ -1263,6 +1326,11 @@ final class Workbench: DesignHost {
     var focusWall: Int?
     var thread = Fastener(kind: .hex, size: 4)
     var splitAxis = 2
+    // The ruler: its ends, the end the pointer is on, and the shortest distance between surfaces when an end is one.
+    var measureA: MeasureEnd?
+    var measureB: MeasureEnd?
+    var measureHover: MeasureEnd?
+    var gap: Gap?
     var splitOffset = 0.0
     var splitTilt = SIMD2<Double>(0, 0)
     var showSettings = false
@@ -1302,6 +1370,7 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var swiped = false
     @ObservationIgnored private var cameraBeforeAngles: Camera?
     @ObservationIgnored private var flight: Task<Void, Never>?
+    @ObservationIgnored private var measureRun = 0
     @ObservationIgnored private var insetGlide: Task<Void, Never>?
 
     var accent: Color { Skin.shared.accent }
@@ -1820,13 +1889,14 @@ final class Workbench: DesignHost {
     // A resize drag: the shapes in `starts` stretched by f along axis i (all axes when uniform), a lone shape along its own
     // axis, several along the world's, spreading from their shared box as one. The left, front and bottom sides stay put,
     // or the middle when symmetric.
-    func stretch(_ starts: [UUID: Placement], axis i: Int, by f: Double, uniform: Bool, symmetric: Bool) {
+    // low: the low side along axis i moves and the high one stays (a handle on the low side).
+    func stretch(_ starts: [UUID: Placement], axis i: Int, by f: Double, uniform: Bool, symmetric: Bool, low: Bool = false) {
         let axes = uniform ? [0, 1, 2] : [i]
         if starts.count == 1, let (id, s) = starts.first {
             var keep = SIMD3<Double>(0, 0, 0)
             if let m = meshes[id] {
                 keep = (m.low + m.high) / 2
-                if !symmetric { for k in axes { keep[k] = m.low[k] } }
+                if !symmetric { for k in axes { keep[k] = low && k == i ? m.high[k] : m.low[k] } }
             }
             var scale = s.scale
             for k in axes { scale[k] *= f }
@@ -1839,7 +1909,8 @@ final class Workbench: DesignHost {
                 if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
             }
             guard lo.x.isFinite else { return }
-            let pivot = symmetric ? (lo + hi) / 2 : lo
+            var pivot = symmetric ? (lo + hi) / 2 : lo
+            if low, !symmetric { pivot[i] = hi[i] }
             var d = SIMD3<Double>(1, 1, 1)
             for k in axes { d[k] = f }
             for (id, s) in starts {
@@ -2063,7 +2134,7 @@ final class Workbench: DesignHost {
 
     func choose(_ s: Screen) {
         // The current screen again does nothing, unless a tool (split, round, hollow) has the inspector hidden.
-        guard s != screen || [.round, .split, .hollow].contains(mode) else { return }
+        guard s != screen || mode.isTool else { return }
         if mode == .round { clearPreview() }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
@@ -2217,6 +2288,7 @@ final class Workbench: DesignHost {
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
+            clearMeasure()
             loadHollow(mode == .hollow ? selection.last : nil)
             splitOffset = 0
             splitTilt = .zero
@@ -2225,13 +2297,66 @@ final class Workbench: DesignHost {
 
     func cancelMode() {
         if angleEdit != nil { closeAngles(); return }
+        if mode == .measure, measureA != nil { clearMeasure(); return }
         if mode == .round { clearPreview() }
         withAnimation(Neon.spring) {
             if mode != .select { mode = .select } else { selection = [] }
             edgePicks = []
+            clearMeasure()
             hollowOpen = []
             hollowWalls = []
             focusWall = nil
+        }
+    }
+
+    // MARK: ruler
+
+    // Sets the first end, then the second; a further click starts again.
+    func measure(_ end: MeasureEnd) {
+        measureRun += 1
+        gap = nil
+        guard let a = measureA, measureB == nil else { measureA = end; measureB = nil; return }
+        measureB = end
+        let ga = gapEnd(a), gb = gapEnd(end)
+        // Two points need no more than their distance, and an edge or face measured to itself has none.
+        guard ga.kind != Int32(BK_END_POINT) || gb.kind != Int32(BK_END_POINT),
+              !(ga.kind == gb.kind && a.body == end.body && a.index == end.index) else { return }
+        let run = measureRun
+        Kernel.shared.queue.async {
+            let g = Kernel.shared.distance(ga, gb)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard run == self.measureRun, let g else { return }
+                    self.gap = g
+                }
+            }
+        }
+    }
+
+    // The gap, when it says more than the distance between the ends themselves.
+    var shownGap: Gap? {
+        guard let g = gap, let a = measureA, let b = measureB, abs(g.distance - simd_length(b.point - a.point)) > 0.005 else { return nil }
+        return g
+    }
+
+    func clearMeasure() {
+        measureRun += 1
+        if measureA != nil { measureA = nil }
+        if measureB != nil { measureB = nil }
+        if gap != nil { gap = nil }
+    }
+
+    // What the kernel measures from: the edge or face itself while its body's exact mesh is shown, otherwise the point.
+    private func gapEnd(_ e: MeasureEnd) -> GapEnd {
+        let point = [e.point.x, e.point.y, e.point.z]
+        guard let id = e.body, let b = body(id), let m = meshes[id], e.index >= 0 else { return GapEnd(kind: Int32(BK_END_POINT), point: point) }
+        switch e.snap {
+        case .edge where e.index < m.edges.count:
+            return GapEnd(kind: Int32(BK_END_EDGE), index: Int32(e.index), node: b.node, place: b.place.kernel, point: point)
+        case .face where e.index < m.faceInfo.count:
+            return GapEnd(kind: Int32(BK_END_FACE), index: Int32(e.index), node: b.node, place: b.place.kernel, point: point)
+        default:
+            return GapEnd(kind: Int32(BK_END_POINT), point: point)
         }
     }
 
@@ -2355,6 +2480,7 @@ final class Workbench: DesignHost {
         case .round: enter(.round)
         case .split: enter(.split)
         case .hollow: enter(.hollow)
+        case .measure: enter(.measure)
         case .drop: dropToBed()
         case .frame: requestFit = true; sceneVersion += 1
         case .hide: hideSelection()
@@ -2629,6 +2755,7 @@ struct BcadApp: App {
                 Button(L("Round edges")) { lib.enter(.round) }
                 Divider()
                 Button(L("Hollow")) { lib.enter(.hollow) }
+                Button(L("Measure")) { lib.enter(.measure) }
                 Button(L("Drop onto the bed")) { lib.dropToBed() }
                 Divider()
                 Button(L("Add thread")) { lib.addThread() }.keyboardShortcut("b")

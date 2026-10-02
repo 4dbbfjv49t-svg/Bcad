@@ -23,6 +23,28 @@ enum SelfTest {
             for t in tris { for (a, b) in [(t.x, t.y), (t.y, t.z), (t.z, t.x)] { count[SIMD2(min(a, b), max(a, b)), default: 0] += 1 } }
             return !tris.isEmpty && count.values.allSatisfy { $0 == 2 }
         }
+        // The ruler's kernel half: the gap between two faces, a point to a face, an edge to an edge, a stretched placement,
+        // a cylinder's side, and a face that isn't there.
+        do {
+            let cubeNode = Node.primitive(.make(.box)), canNode = Node.primitive(.make(.cylinder))
+            let cm = mesh(cubeNode), cyl = mesh(canNode)
+            let px = cm?.faceInfo.firstIndex { $0.normal.x > 0.9 } ?? -1, nx = cm?.faceInfo.firstIndex { $0.normal.x < -0.9 } ?? -1
+            let side = cyl?.faceInfo.firstIndex { abs($0.normal.z) < 0.1 } ?? -1
+            func at(_ x: Double, _ sx: Double = 1) -> [Double] { Placement(move: SIMD3(x, 0, 0), scale: SIMD3(sx, 1, 1)).kernel }
+            func face(_ n: Node, _ f: Int, _ place: [Double]) -> GapEnd { GapEnd(kind: Int32(BK_END_FACE), index: Int32(f), node: n, place: place, point: [0, 0, 0]) }
+            let gaps = [
+                k.distance(face(cubeNode, px, at(0)), face(cubeNode, nx, at(25)))?.distance,
+                k.distance(GapEnd(kind: Int32(BK_END_POINT), point: [10, 10, 10]), face(cubeNode, nx, at(25)))?.distance,
+                k.distance(GapEnd(kind: Int32(BK_END_EDGE), index: 0, node: cubeNode, place: at(0), point: [0, 0, 0]),
+                           GapEnd(kind: Int32(BK_END_EDGE), index: 0, node: cubeNode, place: at(30), point: [0, 0, 0]))?.distance,
+                k.distance(face(cubeNode, px, at(0, 2)), face(cubeNode, nx, at(45)))?.distance,
+                k.distance(face(cubeNode, px, at(0)), face(canNode, side, at(30)))?.distance
+            ]
+            let want: [Double] = [5, 5, 30, 15, 10]
+            let fine = gaps.count == want.count && zip(gaps, want).allSatisfy { g, w in g.map { abs($0 - w) < 1e-6 } ?? false }
+            check("the ruler's gap between faces, points and edges, placed and stretched", fine && k.distance(face(cubeNode, 99, at(0)), face(cubeNode, nx, at(25))) == nil,
+                  gaps.map { $0.map { String(format: "%.3f", $0) } ?? "–" }.joined(separator: " "))
+        }
 
         let prims: [Primitive] = [.make(.box), .make(.cylinder), .make(.cone), .make(.sphere), .make(.torus), .make(.wedge)]
             + [3, 5, 6, 8].map { .make(.prism, sides: $0) } + [3, 4, 6, 8].map { .make(.pyramid, sides: $0) }
@@ -627,9 +649,11 @@ enum SelfTest {
             view.mouseUp(with: event(.leftMouseUp, to, mods))
             settle()
         }
-        // From the handle of axis i to where it lies `mm` further along that axis.
+        // From the handle of axis i to where it lies `mm` further out along it (the handle points the way it is drawn).
         func pull(_ i: Int, _ mm: Double, _ mods: NSEvent.ModifierFlags = []) {
-            let r = view.renderer!, c = r.gizmoCenter, a = r.gizmoAxes()[i], at = r.gizmoLength * 0.95
+            let r = view.renderer!
+            r.turnGizmo()
+            let c = r.gizmoCenter, a = r.gizmoHandles()[i], at = r.gizmoLength * 0.95
             guard let from = view.project(c + a * at), let to = view.project(c + a * (at + mm)) else { return }
             drag(from, to, mods)
         }
@@ -655,6 +679,23 @@ enum SelfTest {
         let pair = [cube.id, other.id].map { lib.body($0)?.node.base }
         let widened = pair.allSatisfy { if case .primitive(let p) = $0 { p.size[0] > 20.5 && p.size[1] == 20 && p.size[2] == 20 } else { false } }
         check("dragging the side handle of two shapes changes that side only", widened, pair.map { "\($0.map { "\($0)" } ?? "none")" }.joined(separator: " · "))
+        // Seen from behind, the side handles turn round with the view: x's points to -x, and pulling it grows that side.
+        use([cube])
+        lib.selection = [cube.id]
+        lib.choose(.move)
+        lib.choose(.resize)
+        lib.camera.yaw = .pi - 0.6
+        let r = view.renderer!
+        r.turnGizmo()
+        let (backLo, backHi) = bounds(cube.id)
+        pull(0, 10)
+        let (turnLo, turnHi) = bounds(cube.id)
+        check("from behind the handles face the view, and the near side grows", r.gizmoSides.x < 0 && r.gizmoSides.y < 0 && r.gizmoSides.z > 0
+              && abs(turnHi.x - backHi.x) < 0.01 && abs(turnLo.x - (backLo.x - 10)) < 0.6,
+              String(format: "sides %.0f %.0f %.0f · x %.2f … %.2f", r.gizmoSides.x, r.gizmoSides.y, r.gizmoSides.z, turnLo.x, turnHi.x))
+        lib.camera = Camera()
+        lib.camera.distance = 150
+        r.turnGizmo()
         use([cube])
         lib.selection = [cube.id]
         lib.choose(.angles)
@@ -665,6 +706,54 @@ enum SelfTest {
         let picked = lib.edgePicks.first
         let lit = picked.flatMap { pk in lib.meshes[cube.id].map { Picking.faceEdges($0, pk).count } } ?? 0
         check("a face clicked in Angles is picked with its edges", lib.edgePicks.count == 1 && picked?.kind == Int32(BK_PICK_FACE) && lit == 4, "\(lit) edges")
+        // The ruler, through the pointer: it snaps to what can be seen, two corners give their distance, two faces the gap
+        // between them as well, Esc clears and then leaves.
+        func click(_ w: SIMD3<Double>, _ mods: NSEvent.ModifierFlags = []) {
+            guard let p = view.project(w) else { return }
+            view.mouseDown(with: event(.leftMouseDown, p, mods))
+            view.mouseUp(with: event(.leftMouseUp, p, mods))
+        }
+        func snap(_ w: SIMD3<Double>, by d: CGPoint = CGPoint(x: 4, y: 3)) -> MeasureEnd? {
+            view.project(w).flatMap { view.measureSnap(CGPoint(x: $0.x + d.x, y: $0.y + d.y)) }
+        }
+        func gapSettled() {
+            k.queue.sync {}
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        lib.camera = Camera()
+        lib.camera.distance = 150
+        use([cube])
+        lib.enter(.measure)
+        let corner = snap(SIMD3(10, -10, 20))
+        let hidden = snap(SIMD3(10, 10, 0), by: .zero)
+        check("the ruler snaps to a corner it can see, not to one behind", lib.mode == .measure && corner?.snap == .corner
+              && near(corner?.point ?? .zero, SIMD3(10, -10, 20), 1e-4) && !(hidden.map { near($0.point, SIMD3(10, 10, 0), 0.5) } ?? false),
+              "\(String(describing: corner?.snap)) · behind: \(String(describing: hidden?.snap))")
+        let onEdge = snap(SIMD3(5, -10, 20), by: CGPoint(x: 0, y: 3))
+        check("between corners it snaps to the edge", onEdge?.snap == .edge && abs((onEdge?.point.x ?? 0) - 5) < 0.5
+              && near(SIMD3(0, onEdge?.point.y ?? 0, onEdge?.point.z ?? 0), SIMD3(0, -10, 20), 0.01), "\(String(describing: onEdge))")
+        click(SIMD3(10, -10, 20))
+        click(SIMD3(-10, 10, 0))
+        gapSettled()
+        let span = lib.measureA.flatMap { a in lib.measureB.map { simd_length($0.point - a.point) } } ?? 0
+        check("two corners measure their distance", abs(span - (1200.0).squareRoot()) < 0.01 && lib.gap == nil, String(format: "%.3f mm", span))
+        let other2 = Solid(name: "Other", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(30, 0, 10)))
+        use([cube, other2])
+        click(SIMD3(0, -10, 10))
+        click(SIMD3(30, -10, 15))
+        gapSettled()
+        check("two faces measure the gap between them too", lib.measureA?.snap == .face && lib.measureB?.snap == .face
+              && abs((lib.shownGap?.distance ?? 0) - 10) < 0.01,
+              String(format: "%@ · gap %.3f mm", Ruler.mm(lib.measureA.flatMap { a in lib.measureB.map { simd_length($0.point - a.point) } } ?? 0), lib.gap?.distance ?? -1))
+        let can = Solid(name: "Can", color: Palette.colors[2], node: .primitive(.make(.cylinder)), place: Placement(move: SIMD3(0, 0, 10)))
+        use([can])
+        let centre = snap(SIMD3(0, 0, 20))
+        check("a circle's centre is a snap", centre?.snap == .centre && near(centre?.point ?? .zero, SIMD3(0, 0, 20), 1e-4), "\(String(describing: centre?.snap))")
+        click(SIMD3(0, 0, 20))
+        lib.cancelMode()
+        let cleared = lib.measureA == nil && lib.mode == .measure
+        lib.cancelMode()
+        check("Esc clears the ruler, then leaves it", cleared && lib.mode == .select)
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")

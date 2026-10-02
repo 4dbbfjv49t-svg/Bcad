@@ -100,6 +100,12 @@ void bk_section_free(BKSection *section);
 // solid is kept.
 BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount, const double *open, int openCount, const double *walls,
                    const double *wallThickness, int wallCount, double thickness, int *missing);
+// The shortest distance between two picked elements, each a point (x y z) or an edge or face of a shape by its index in
+// bk_mesh's lists (0-based), the shape placed by m (row-major 3x4). out: the two closest points (x y z, x y z).
+// -1 when it fails (bk_last_error says why).
+enum { BK_END_POINT, BK_END_EDGE, BK_END_FACE };
+double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, const double *pointA, const BKShape *b,
+                   const double *mb, int kindB, int indexB, const double *pointB, double *out);
 // Separate solids in a shape: a merge of parts that don't touch stays in pieces.
 int bk_piece_count(const BKShape *s);
 BKShape *bk_copy(const BKShape *s);

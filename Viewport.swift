@@ -323,7 +323,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             let c = SIMD3<Float>(b.color) / 255
             let facePicking = ((lib.mode == .round || lib.mode == .angles) && lib.hover.edge < 0 && lib.hover.corner < 0) || lib.mode == .hollow
-            let faceHover = facePicking && hovered ? Int32(lib.hover.face) : -1
+            var faceHover = facePicking && hovered ? Int32(lib.hover.face) : -1
+            if lib.mode == .measure, let mh = lib.measureHover, mh.snap == .face, mh.body == b.id { faceHover = Int32(mh.index) }
             var u = BodyU(model: model, normalM: nm, color: SIMD4(c, 1), rim: rim, hoverFace: faceHover, flags: selected ? 1 : 0)
             enc.setRenderPipelineState(meshPipe)
             enc.setDepthStencilState(depthWrite)
@@ -358,6 +359,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             for (p, q) in g { Renderer.segment(SIMD3<Float>(p), SIMD3<Float>(q), width: 2, color: SIMD4(c.x, c.y, c.z, 0.95), into: &lines) }
             drawLines(enc, lines, depth: depthOff)
         }
+        if lib.mode == .measure { drawMeasure(enc, accent: accent, accent2: accent2) }
+        self.view?.placeTags()
         enc.endEncoding()
         cmd.present(drawable)
         cmd.commit()
@@ -518,6 +521,53 @@ final class Renderer: NSObject, MTKViewDelegate {
         drawLines(enc, lines, depth: depthOff)
     }
 
+    // MARK: ruler
+
+    // The ruler: its line (to the pointer while the second end is still to come), the gap between surfaces in the second
+    // accent, and a mark for each end in the shape of what it snapped to.
+    private func drawMeasure(_ enc: MTLRenderCommandEncoder, accent: SIMD4<Float>, accent2: SIMD4<Float>) {
+        var lines: [LineV] = []
+        let hot = SIMD4(accent.x, accent.y, accent.z, 1), second = SIMD4(accent2.x, accent2.y, accent2.z, 1)
+        let eye = SIMD3<Double>(lib.camera.eye), side = SIMD3<Double>(lib.camera.side)
+        let r = Double(lib.camera.distance) * 0.008
+        func seg(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ w: Float, _ c: SIMD4<Float>) {
+            Renderer.segment(SIMD3<Float>(a), SIMD3<Float>(b), width: w, color: c, into: &lines)
+        }
+        func mark(_ e: MeasureEnd, _ c: SIMD4<Float>) {
+            let p = e.point, n = unit(eye - p), up = unit(cross(n, side))
+            switch e.snap {
+            case .corner:
+                for a in [SIMD3<Double>(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)] { seg(p - a * r, p + a * r, 4, c) }
+            case .centre:
+                Renderer.polyline(circle(around: n, p, r).map { SIMD3<Float>($0) }, width: 3, color: c, into: &lines)
+                seg(p - side * r * 0.4, p + side * r * 0.4, 2.5, c)
+                seg(p - up * r * 0.4, p + up * r * 0.4, 2.5, c)
+            case .midpoint:
+                let d = [p + side * r, p + up * r, p - side * r, p - up * r, p + side * r]
+                Renderer.polyline(d.map { SIMD3<Float>($0) }, width: 3, color: c, into: &lines)
+            case .edge, .face:
+                Renderer.polyline(circle(around: n, p, r * 0.45).map { SIMD3<Float>($0) }, width: 4, color: c, into: &lines)
+            }
+        }
+        // The edge the pointer is on, lit along its length.
+        if let h = lib.measureHover, h.snap == .edge, let id = h.body, let b = lib.body(id), let m = lib.meshes[id], m.edges.indices.contains(h.index) {
+            let mat = b.place.matrix
+            let pts = m.edges[h.index].map { SIMD3<Float>((mat * SIMD4(SIMD3<Double>($0), 1)).xyz) }
+            Renderer.polyline(pts, width: 3, color: SIMD4(accent.x, accent.y, accent.z, 0.6), into: &lines)
+        }
+        if let a = lib.measureA, let b = lib.measureB ?? lib.measureHover { seg(a.point, b.point, 2.5, hot) }
+        if let g = lib.shownGap {
+            seg(g.a, g.b, 2.5, second)
+            for q in [g.a, g.b] {
+                let n = unit(eye - q), up = unit(cross(n, side))
+                seg(q - side * r * 0.5, q + side * r * 0.5, 2.5, second)
+                seg(q - up * r * 0.5, q + up * r * 0.5, 2.5, second)
+            }
+        }
+        for e in [lib.measureA, lib.measureB, lib.measureHover] { if let e { mark(e, hot) } }
+        drawLines(enc, lines, depth: depthOff)
+    }
+
     // MARK: gizmo
 
     var gizmoCenter: SIMD3<Double> {
@@ -536,6 +586,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         return [SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)]
     }
 
+    // Which way each move or scale handle points: up the screen and away into the scene, as from the starting view, from
+    // whichever side the shape is seen, so the handles keep their place on screen. An axis lying almost across that keeps
+    // its side, and nothing turns while a handle is held.
+    var gizmoSides = SIMD3<Double>(1, 1, 1)
+
+    func turnGizmo() {
+        guard view?.dragAxis == nil else { return }
+        let yaw = Double(lib.camera.yaw)
+        let ahead = unit(SIMD3(-sin(yaw), cos(yaw), 1))
+        for (i, a) in gizmoAxes().enumerated() {
+            let d = dot(unit(a), ahead)
+            if abs(d) > 0.12 { gizmoSides[i] = d < 0 ? -1 : 1 }
+        }
+    }
+
+    // The move or scale handles' directions from the gizmo's centre.
+    func gizmoHandles() -> [SIMD3<Double>] { gizmoAxes().enumerated().map { $1 * gizmoSides[$0] } }
+
     static let axisColors: [SIMD4<Float>] = Axis.rgb.map { SIMD4($0, 1) }
 
     func ring(_ axis: Int, _ c: SIMD3<Double>, _ r: Double) -> [SIMD3<Double>] { circle(around: gizmoAxes()[axis], c, r) }
@@ -547,7 +615,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     private func drawGizmo(_ enc: MTLRenderCommandEncoder) {
-        let c = gizmoCenter, L = gizmoLength, axes = gizmoAxes()
+        turnGizmo()
+        let c = gizmoCenter, L = gizmoLength, axes = gizmoHandles()
         var lines: [LineV] = []
         let active = view?.dragAxis
         for (i, a) in axes.enumerated() {
@@ -718,6 +787,8 @@ final class CadView: MTKView {
     private var ownRings: [SIMD3<Double>] = []
     private var frameAsked = false
     var guides: [(SIMD3<Double>, SIMD3<Double>)] = []
+    // The ruler's length at the middle of its line, and what the pointer snaps to beside it.
+    private let lengthTag = Tag(), snapTag = Tag()
 
     init() {
         let r = Renderer()
@@ -732,6 +803,8 @@ final class CadView: MTKView {
         layer?.isOpaque = false
         isPaused = true
         enableSetNeedsDisplay = false
+        addSubview(lengthTag)
+        addSubview(snapTag)
     }
 
     // Draws once on the next turn of the main loop, however often it's asked. Frames are drawn here rather than left to
@@ -836,7 +909,7 @@ final class CadView: MTKView {
         guard lib.mode == .select, !lib.selection.isEmpty else { return nil }
         let c = renderer.gizmoCenter, L = renderer.gizmoLength
         var best: CGFloat = 9, hit: Int?
-        for (i, a) in renderer.gizmoAxes().enumerated() {
+        for (i, a) in renderer.gizmoHandles().enumerated() {
             if lib.gizmo == .rotate {
                 let pts = renderer.ring(i, c, L * 0.9).compactMap { project($0) }
                 for k in 1..<max(1, pts.count) {
@@ -849,6 +922,88 @@ final class CadView: MTKView {
             }
         }
         return hit
+    }
+
+    // MARK: ruler
+
+    // The ruler's end under the pointer: the nearest corner, circle centre or edge middle within 9 points, else the nearest
+    // point of an edge within 7, else the face. Only what can be seen counts. free (⌥): the point on the face as it is.
+    func measureSnap(_ p: CGPoint, free: Bool = false) -> MeasureEnd? {
+        let hit = hitBody(p)
+        let face = hit.map { MeasureEnd(snap: .face, point: $0.world, body: $0.body, index: $0.face) }
+        if free { return face }
+        let (o, d) = ray(p)
+        var points: [(gap: CGFloat, end: MeasureEnd, at: CGPoint)] = []
+        var edges: [(gap: CGFloat, end: MeasureEnd, at: CGPoint)] = []
+        for b in lib.doc.bodies where !b.hidden {
+            // Only a shape's exact mesh has its corners and edges (not the saved look shown while a file opens).
+            guard let m = lib.meshes[b.id], !m.edges.isEmpty else { continue }
+            let mat = b.place.matrix
+            func world(_ v: SIMD3<Float>) -> SIMD3<Double> { (mat * SIMD4(SIMD3<Double>(v), 1)).xyz }
+            func near(_ w: SIMD3<Double>, _ reach: CGFloat) -> (CGFloat, CGPoint)? {
+                guard let s = project(w) else { return nil }
+                let g = hypot(s.x - p.x, s.y - p.y)
+                return g < reach ? (g, s) : nil
+            }
+            for c in m.corners {
+                let w = world(c)
+                if let (g, s) = near(w, 9) { points.append((g, MeasureEnd(snap: .corner, point: w, body: b.id), s)) }
+            }
+            for r in CadView.rings(m, b.place) {
+                if let (g, s) = near(r.center, 9) { points.append((g + 0.5, MeasureEnd(snap: .centre, point: r.center, body: b.id), s)) }
+            }
+            for (i, e) in m.edges.enumerated() where e.count > 1 {
+                // A closed edge (a whole circle) has no middle.
+                if length(e[0] - e[e.count - 1]) > 1e-4 {
+                    let w = world(Picking.midpoint(e).0)
+                    if let (g, s) = near(w, 9) { points.append((g + 1, MeasureEnd(snap: .midpoint, point: w, body: b.id), s)) }
+                }
+                var best: (CGFloat, SIMD3<Double>, CGPoint)?
+                var prev: SIMD3<Double>?
+                for v in e {
+                    let w = world(v)
+                    defer { prev = w }
+                    guard let a = prev else { continue }
+                    let q = a + (w - a) * closest(o, d, a, w)
+                    if let (g, s) = near(q, 7), best == nil || g < best!.0 { best = (g, q, s) }
+                }
+                if let (g, q, s) = best { edges.append((g, MeasureEnd(snap: .edge, point: q, body: b.id, index: i), s)) }
+            }
+        }
+        // Seen: no shape lies in front of it (a few of the nearest are tried).
+        func seen(_ w: SIMD3<Double>, _ s: CGPoint) -> Bool {
+            let (so, _) = ray(s)
+            let dist = length(w - so)
+            guard let h = hitBody(s) else { return true }
+            return h.distance >= dist - max(0.3, dist * 0.004)
+        }
+        for c in points.sorted(by: { $0.gap < $1.gap }).prefix(6) where seen(c.end.point, c.at) { return c.end }
+        for c in edges.sorted(by: { $0.gap < $1.gap }).prefix(6) where seen(c.end.point, c.at) { return c.end }
+        return face
+    }
+
+    // Where on segment a…b the line of the ray (o, unit d) passes closest, 0…1.
+    private func closest(_ o: SIMD3<Double>, _ d: SIMD3<Double>, _ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double {
+        let u = b - a, w = a - o
+        let uu = dot(u, u), ud = dot(u, d)
+        let den = uu - ud * ud
+        guard den > 1e-12 else { return 0 }
+        return max(0, min(1, (ud * dot(d, w) - dot(u, w)) / den))
+    }
+
+    // The tags follow their points every frame.
+    func placeTags() {
+        let on = lib.mode == .measure
+        if on, let a = lib.measureA, let b = lib.measureB ?? lib.measureHover, let s = project((a.point + b.point) / 2) {
+            lengthTag.show(Ruler.mm(length(b.point - a.point)), color: NSColor(lib.accent), at: CGPoint(x: s.x, y: s.y + 16))
+        } else {
+            lengthTag.isHidden = true
+        }
+        if on, let h = lib.measureHover, let s = project(h.point) {
+            snapTag.show(h.name, color: NSColor(lib.accent2), at: CGPoint(x: s.x + 18, y: s.y - 18), centered: false)
+        } else {
+            snapTag.isHidden = true
+        }
     }
 
     // Round mode: corner, then edge, then face under the pointer.
@@ -907,6 +1062,10 @@ final class CadView: MTKView {
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         var hv: Hover
+        if lib.mode == .measure {
+            let end = measureSnap(p, free: e.modifierFlags.contains(.option))
+            if end != lib.measureHover { lib.measureHover = end }
+        }
         if lib.mode == .round || lib.mode == .angles {
             hv = roundHover(p)
         } else {
@@ -916,7 +1075,10 @@ final class CadView: MTKView {
         if hv != lib.hover { lib.hover = hv }
     }
 
-    override func mouseExited(with event: NSEvent) { if lib.hover != Hover() { lib.hover = Hover() } }
+    override func mouseExited(with event: NSEvent) {
+        if lib.hover != Hover() { lib.hover = Hover() }
+        if lib.measureHover != nil { lib.measureHover = nil }
+    }
 
     override func mouseDown(with e: NSEvent) {
         window?.makeFirstResponder(self)
@@ -927,6 +1089,10 @@ final class CadView: MTKView {
         accum = 0
         let shift = e.modifierFlags.contains(.shift), cmd = e.modifierFlags.contains(.command)
         switch lib.mode {
+        case .measure:
+            // A click measures (on mouse up); a drag turns or pans the view.
+            drag = shift ? .pan : .orbit
+            return
         case .split:
             startOffset = lib.splitOffset
             startTilt = lib.splitTilt
@@ -1058,7 +1224,9 @@ final class CadView: MTKView {
             if !free { ang = (ang / lib.settings.turnStep).rounded() * lib.settings.turnStep }
             rotate(axis, ang)
         case .scaleAxis(let i):
-            accum = travel(p, renderer.gizmoAxes()[i], dx, dy)
+            // Along the handle: dragging it outwards grows the side it is on.
+            let low = renderer.gizmoSides[i] < 0
+            accum = travel(p, renderer.gizmoHandles()[i], dx, dy)
             guides = []
             let uniform = lib.settings.uniform || e.modifierFlags.contains(.shift)
             let symmetric = lib.settings.symmetric || e.modifierFlags.contains(.option)
@@ -1068,9 +1236,9 @@ final class CadView: MTKView {
             guard s0 > 0 else { return }
             var f = max(0.02, 1 + accum * (symmetric ? 2 : 1) / s0)
             if !free, lib.selection.count == 1, let b = lib.primary, let st = starts[b.id] {
-                f = resize(s0 * f, axis: i, start: st, symmetric: symmetric) / s0
+                f = resize(s0 * f, axis: i, start: st, symmetric: symmetric, low: low) / s0
             }
-            lib.stretch(starts, axis: i, by: f, uniform: uniform, symmetric: symmetric)
+            lib.stretch(starts, axis: i, by: f, uniform: uniform, symmetric: symmetric, low: low)
         case .round:
             let wpp = worldPerPoint(at: startPlane)
             startRadius += Double(dy) * wpp * 0.6
@@ -1116,6 +1284,9 @@ final class CadView: MTKView {
     override func mouseUp(with e: NSEvent) {
         switch drag {
         case .orbit, .pan:
+            if !moved && lib.mode == .measure, let end = measureSnap(convert(e.locationInWindow, from: nil), free: e.modifierFlags.contains(.option)) {
+                lib.measure(end)
+            }
             if !moved && (lib.mode == .select || lib.mode == .thread) && !e.modifierFlags.contains(.shift) { lib.selection = [] }
         case .round:
             if moved { lib.commitRound() } else { lib.clearPreview() }
@@ -1282,7 +1453,7 @@ final class CadView: MTKView {
 
     // A resize along one axis: links the size to another shape's width, depth or height, or the moving side to a mark in reach
     // (with symmetric resizing, the size the middle reaching out both ways would make).
-    private func resize(_ size: Double, axis i: Int, start: Placement, symmetric: Bool) -> Double {
+    private func resize(_ size: Double, axis i: Int, start: Placement, symmetric: Bool, low: Bool = false) -> Double {
         let step = max(lib.settings.snap, (size / lib.settings.snap).rounded() * lib.settings.snap)
         guard lib.settings.autoLink, let box = startBox else { return step }
         let reach = linkReach
@@ -1295,7 +1466,7 @@ final class CadView: MTKView {
         }
         if start.turn == SIMD3(0, 0, 0) {
             for m in marks[i] {
-                let s = symmetric ? 2 * abs(m.value - box.mid[i]) : m.value - box.lo[i]
+                let s = symmetric ? 2 * abs(m.value - box.mid[i]) : low ? box.hi[i] - m.value : m.value - box.lo[i]
                 if s > 0, abs(s - size) < reach, best == nil || abs(s - size) < best!.score { best = (abs(s - size), s, m.box) }
             }
         }
@@ -1362,4 +1533,34 @@ final class CadView: MTKView {
 struct Viewport: NSViewRepresentable {
     func makeNSView(context: Context) -> CadView { CadView() }
     func updateNSView(_ v: CadView, context: Context) {}
+}
+
+// A small label over the 3D view (the ruler's length, what the pointer snaps to). It lets clicks through.
+final class Tag: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.backgroundColor = NSColor(white: 0.05, alpha: 0.82).cgColor
+        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        addSubview(label)
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    // At p: its middle, or its left edge when not centred.
+    func show(_ text: String, color: NSColor, at p: CGPoint, centered: Bool = true) {
+        if label.stringValue != text { label.stringValue = text }
+        label.textColor = color
+        label.sizeToFit()
+        let size = CGSize(width: ceil(label.frame.width) + 14, height: ceil(label.frame.height) + 6)
+        label.frame.origin = CGPoint(x: 7, y: 3)
+        frame = CGRect(x: (centered ? p.x - size.width / 2 : p.x).rounded(), y: (p.y - size.height / 2).rounded(), width: size.width, height: size.height)
+        isHidden = false
+    }
 }
