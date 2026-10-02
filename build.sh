@@ -29,11 +29,13 @@ trap 'rm -rf "$WORK"' EXIT
 echo "▸ Compiling the geometry kernel"
 clang++ -O2 -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -isystem "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$WORK/BcadKernel.o"
 
-LIBS=()
-for f in "$OCCT"/lib/*.a; do LIBS+=(-Xlinker "$f"); done
+# One -l per OpenCascade library (libTKernel.dylib; the numbered names are links to it); only those Bcad uses are kept.
+LIBS=(-L"$OCCT/lib" -Xlinker -dead_strip_dylibs)
+for f in "$OCCT"/lib/lib*.dylib; do b=${f:t:r}; [[ $b == *.* ]] || LIBS+=(-l${b#lib}); done
 SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift)
-FLAGS=()
-if (( SELFTEST )); then SOURCES+=(test/SelfTest.swift); FLAGS+=(-D SELFTEST); fi
+# The app finds OpenCascade in its own Frameworks folder, the self-test where it was built.
+FLAGS=(-Xlinker -rpath -Xlinker @executable_path/../Frameworks)
+if (( SELFTEST )); then SOURCES+=(test/SelfTest.swift); FLAGS=(-D SELFTEST -Xlinker -rpath -Xlinker "$OCCT/lib"); fi
 
 echo "▸ Compiling"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 $FLAGS \
@@ -50,7 +52,8 @@ fi
 
 echo "▸ Rendering icon"
 mkdir -p "$WORK/icon.iconset"
-"$WORK/Bcad" --render-icon "$WORK/icon.png"
+# Run before the app is put together: OpenCascade is still where it was built.
+DYLD_LIBRARY_PATH="$OCCT/lib" "$WORK/Bcad" --render-icon "$WORK/icon.png"
 for s in 16 32 128 256 512; do
   sips -z $s $s "$WORK/icon.png" --out "$WORK/icon.iconset/icon_${s}x${s}.png" >/dev/null
   sips -z $((s*2)) $((s*2)) "$WORK/icon.png" --out "$WORK/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
@@ -117,12 +120,31 @@ if pgrep -xq Bcad; then
   fi
 fi
 rm -rf "$TARGET"
-mkdir -p "$TARGET/Contents/MacOS" "$TARGET/Contents/Resources"
+FW="$TARGET/Contents/Frameworks"
+mkdir -p "$TARGET/Contents/MacOS" "$TARGET/Contents/Resources" "$FW"
 cp "$WORK/Bcad" "$TARGET/Contents/MacOS/Bcad"
 cp "$WORK/Info.plist" "$TARGET/Contents/Info.plist"
 cp "$WORK/AppIcon.icns" "$TARGET/Contents/Resources/AppIcon.icns"
 cp i18n.json "$TARGET/Contents/Resources/i18n.json"
 cp -R "$WORK"/lproj/*.lproj "$TARGET/Contents/Resources/"
+# OpenCascade's libraries Bcad uses, and the ones those use, as separate files anyone can replace with their own build
+# (LGPL 2.1), with its licence.
+todo=("$TARGET/Contents/MacOS/Bcad")
+while (( $#todo )); do
+  for dep in $(otool -L "$todo[1]" | awk 'NR > 1 && $1 ~ /^@rpath\// { print substr($1, 8) }'); do
+    [[ -e "$FW/$dep" ]] && continue
+    cp -L "$OCCT/lib/$dep" "$FW/$dep"
+    todo+=("$FW/$dep")
+  done
+  shift todo
+done
+if otool -L "$TARGET/Contents/MacOS/Bcad" "$FW"/*.dylib | awk '$1 !~ /:$/ && $1 !~ /^(@rpath\/|\/usr\/lib\/|\/System\/)/' | grep -q .; then
+  echo "✗ Bcad would load a library from outside the app and the system:"
+  otool -L "$TARGET/Contents/MacOS/Bcad" "$FW"/*.dylib
+  exit 1
+fi
+cat "$OCCT"/share/doc/opencascade*/OCCT_LGPL_EXCEPTION.txt "$OCCT"/share/doc/opencascade*/LICENSE_LGPL_21.txt > "$TARGET/Contents/Resources/OpenCASCADE-License.txt"
+codesign --force -s - "$FW"/*.dylib
 codesign --force -s - "$TARGET"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" 2>/dev/null || true
 echo "✓ $TARGET"

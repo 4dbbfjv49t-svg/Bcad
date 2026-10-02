@@ -129,6 +129,8 @@ BKMesh *bk_mesh(const BKShape *s, double deflection);
 void bk_mesh_free(BKMesh *m);
 int bk_export_step(const BKShape *const *shapes, int count, const char *path);
 const char *bk_last_error(void);
+// The version of OpenCascade the kernel runs on, such as "7.9.3".
+const char *bk_occt_version(void);
 
 #ifdef __cplusplus
 }

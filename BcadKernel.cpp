@@ -59,6 +59,7 @@
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_Version.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -113,6 +114,7 @@ template <typename F> static BKShape *guarded(const char *what, F f) {
 }
 
 const char *bk_last_error(void) { return lastError.c_str(); }
+const char *bk_occt_version(void) { return OCC_VERSION_COMPLETE; }
 
 // Input OpenCascade can't take is refused up front: it crashes on some degenerate sizes and never returns on NaN or infinity.
 static void need(bool ok, const char *what) {

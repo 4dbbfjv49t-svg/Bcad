@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds a static OpenCascade (modeling + STEP) into Vendor/occt once. Called by build.sh; safe to rerun.
+# Builds OpenCascade (modeling + STEP) as shared libraries into Vendor/occt once. Called by build.sh; safe to rerun.
+# Shared, so the app carries them as separate files anyone can replace with their own build (LGPL 2.1).
 # Tools are downloaded into Vendor/ (portable CMake), nothing is installed on the Mac.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -8,7 +9,8 @@ mkdir -p "$VENDOR"
 CMAKE_VERSION="4.4.3"
 OCCT_TAG="V7_9_3"
 OUT="$VENDOR/occt"
-[[ -f "$OUT/.done-$OCCT_TAG" ]] && exit 0
+DONE="$OUT/.done-$OCCT_TAG-shared"
+[[ -f "$DONE" ]] && exit 0
 
 fetch() {
   [[ -s "$2" ]] && return
@@ -35,8 +37,10 @@ fi
 
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 BUILD="$VENDOR/occt-build"
-echo "▸ Building OpenCascade $OCCT_TAG (static; first time only)"
-"$CMAKE" -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRARY_TYPE=Static \
+echo "▸ Building OpenCascade $OCCT_TAG (first time only)"
+# From scratch: nothing is kept from an earlier build of another version or kind (static).
+rm -rf "$BUILD" "$OUT"
+"$CMAKE" -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRARY_TYPE=Shared -DINSTALL_NAME_DIR=@rpath \
   -DCMAKE_INSTALL_PREFIX="$OUT" -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 -DCMAKE_OSX_SYSROOT="$SDK" \
   -DBUILD_MODULE_Draw=OFF -DBUILD_DOC_Overview=OFF -DBUILD_SAMPLES_QT=OFF \
   -DUSE_FREETYPE=OFF -DUSE_FREEIMAGE=OFF -DUSE_OPENVR=OFF -DUSE_FFMPEG=OFF -DUSE_TBB=OFF -DUSE_VTK=OFF \
@@ -44,5 +48,5 @@ echo "▸ Building OpenCascade $OCCT_TAG (static; first time only)"
   || { tail -30 "$VENDOR/occt-cmake.log"; exit 1; }
 "$CMAKE" --build "$BUILD" -j "$(sysctl -n hw.ncpu)" >"$VENDOR/occt-build.log" 2>&1 || { grep -m5 -B2 -A5 "error" "$VENDOR/occt-build.log"; exit 1; }
 "$CMAKE" --install "$BUILD" >/dev/null
-touch "$OUT/.done-$OCCT_TAG"
+touch "$DONE"
 echo "✓ OpenCascade in $OUT"

@@ -14,6 +14,8 @@ enum SelfTest {
         }
         let k = Kernel.shared
         k.clearance = 0.2
+        let occt = String(cString: bk_occt_version())
+        check("OpenCascade's version is known for the acknowledgements", occt.split(separator: ".").count == 3, occt)
         func mesh(_ n: Node) -> Mesh? { k.mesh(n) }
         func manifold(_ m: Mesh) -> Bool {
             let (_, tris) = Weld.run(m)
