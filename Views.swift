@@ -917,7 +917,7 @@ struct Inspector: View {
         let items = lib.selected
         VStack(alignment: .leading, spacing: 10) {
             NamesRow(items: items)
-            ScreenSwitch().padding(.horizontal, 12)
+            ScreenSwitch(current: lib.screen).padding(.horizontal, 12)
             Snug {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1049,14 +1049,14 @@ struct NameChip: View {
 // Move · Resize · Rotate · Angles · Thread: the lit segment slides to the chosen screen (a two-finger swipe over the panel does too).
 struct ScreenSwitch: View {
     @Environment(Workbench.self) private var lib
+    // Handed in by the inspector, which follows the screen: a screen chosen as the inspector appears (⌘B) is lit at once.
+    let current: Screen
     @Namespace private var lane
     @State private var hover: Screen?
     @State private var waves = 0
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        // Read here rather than in each segment, so the switch follows a screen chosen as the inspector appears (⌘B).
-        let current = lib.screen
         HStack(spacing: 2) {
             ForEach(Screen.allCases, id: \.self) { sc in
                 let on = sc == current
