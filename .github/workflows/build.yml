@@ -117,7 +117,7 @@ jobs:
         continue-on-error: true
         run: |
           # Temporary: real mouse and keyboard events on the real app, controls found by their accessibility names.
-          # Step 0: the side panel shown and hidden (screenshot bursts), a cube hollowed and then hollowed again with its top open.
+          # The side panel hidden and shown, a hollow opened later, Angles, straight views, the split plane, a sphere, a hot start.
           R="$RUNNER_TEMP/results"
           APP="$RUNNER_TEMP/out/Bcad.app"
           mkdir -p "$R/shots"
@@ -253,16 +253,47 @@ jobs:
           $U press Hollow; sleep 1
           $U press Apply; sleep 10
           shot ui-05-closed
-          $U tree | grep -iE "hollow|opening|walls" | head -10
           $U press Hollow; sleep 1
+          $U tree | grep -iE "walls|opening|apply" | head -10
           $U view 10 -110; sleep 1
           shot ui-06-pick
-          $U tree | grep -iE "walls|opening|apply" | head -10
           $U press Apply; sleep 10
-          shot ui-07-again
+          shot ui-07-opened
           $U tree | grep -iE "hollow|opening|walls|fit" | head -12
-          $U key 12 cmd; shot ui-08-quit 2
+          echo "— Angles: only Work with angles once an edge is picked"
+          $U press Angles; sleep 1
+          $U view -130 10; sleep 2
+          shot ui-08-angles
+          $U tree | grep -iE "work with angles|all edges|pick" | head -8
+          echo "— straight views: Top of the selection, North of everything"
+          $U press Views; sleep 1
+          shot ui-09-views
+          $U press Top; sleep 5
+          shot ui-10-top
+          $U key 53; sleep 1; $U key 53; sleep 1
+          $U press Views; sleep 1
+          $U press North; sleep 5
+          shot ui-11-north
+          echo "— the split plane"
+          $U key 3; sleep 2
+          $U view 0 0; sleep 1
+          $U press Split; sleep 2
+          shot ui-12-split
+          $U key 53; sleep 1
+          echo "— a sphere can't be opened"
+          $U key 0 cmd; sleep 1; $U key 51; sleep 2
+          $U press Sphere; sleep 3; $U key 3; sleep 2
+          $U press Hollow; sleep 1
+          $U view 0 0; sleep 1
+          shot ui-13-sphere 0
+          $U tree | grep -iE "one surface|opening" | head -5
+          $U key 53; sleep 1
+          $U key 12 cmd; shot ui-14-quit 2
           $U press "Don't Save"; sleep 3
+          pkill -x Bcad || true
+          sleep 3
+          open -a "$APP"
+          shot ui-15-hot 8
           pkill -x Bcad || true
           sleep 5
           echo "new Bcad crash reports: $(( $(crashes) - before ))"
