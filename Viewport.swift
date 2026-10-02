@@ -41,7 +41,7 @@ struct Camera {
 enum Side: CaseIterable {
     case top, bottom, north, south, west, east
 
-    var name: String {
+    @MainActor var name: String {
         switch self {
         case .top: L("Top")
         case .bottom: L("Bottom")
