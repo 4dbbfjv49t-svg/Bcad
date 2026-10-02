@@ -21,14 +21,40 @@ enum { BK_PICK_EDGE, BK_PICK_CORNER, BK_PICK_FACE, BK_PICK_BODY };
 // oval: dA dB angle h (diameter dA along x, diameter dB at angle° from it, 5…175; 90 = plain ellipse)
 // oval torus: sides dA dB angle d (the tube of a torus along an oval: dA and dB outside, as for oval)
 BKShape *bk_primitive(int kind, const double *p);
-// ISO metric coarse bolt / nut. size = index into bk_thread_sizes (M3 … M24).
-BKShape *bk_bolt(int size, double length, int threadOnly, double clearance);
-BKShape *bk_nut(int size, double length, int threadOnly, double clearance);
+// Bolts and nuts on ISO metric coarse threads (M3 … M24). Bolts: a threaded rod without a head; a hex or 12-point head, on
+// its own or with a cone under it; a round head with a hex or Torx socket; a countersunk head with a hex socket, Torx or
+// Phillips; a hex head with a Phillips recess, with or without a cone under it. Nuts: a plain sleeve, square, hex, or a
+// hex narrowing into a cone seat below.
+enum { BK_ROD, BK_HEX, BK_HEX_CONE, BK_SOCKET, BK_SOCKET_CONE, BK_TWELVE, BK_TWELVE_CONE, BK_TORX, BK_TORX_CONE, BK_PH_HEX,
+       BK_PH_HEX_CONE, BK_PH_CONE, BK_SLEEVE, BK_SQUARE_NUT, BK_HEX_NUT, BK_CONE_NUT };
+enum { BK_LENGTH, BK_WIDTH, BK_HEIGHT, BK_ANGLE, BK_SEAT, BK_DRIVE, BK_RECESS, BK_DEPTH };
+// size: the thread, M3 … M24 in turn. length: a bolt's below its head (a countersunk head and a cone under a head count
+// in it, as on the box), a nut's height. width: across flats (hex, 12-point, square), the diameter of a round or
+// countersunk head, a sleeve's wall. height: a head's (not countersunk). angle: a cone's included angle. seat: the height
+// of a cone nut's cone. drive: hex key across flats, Torx size (10 = T10) or PH size. recess: a Phillips recess's
+// diameter. depth: the socket's or recess's. All in mm and degrees; a kind uses only some of them (bk_fastener_fields).
+typedef struct {
+  int kind, size;
+  double length, width, height, angle, seat, drive, recess, depth;
+} BKFastener;
 int bk_thread_count(void);
 const char *bk_thread_name(int size);
-double bk_thread_default_length(int size, int nut);
-// The bounding size (x y z) of the bolt or nut those arguments make.
-void bk_fastener_extent(int size, double length, int nut, int threadOnly, double clearance, double *out);
+int bk_torx_count(void);
+int bk_torx_number(int i);
+// The sizes a kind has: bit (1 << BK_…) for each.
+int bk_fastener_fields(int kind);
+// The kind's sizes for its thread, standard ones where there is a standard; its length too when withLength.
+void bk_fastener_defaults(BKFastener *f, int withLength);
+// The range one size takes with the others as they are: out[0] … out[1] (empty when out[0] > out[1]).
+void bk_fastener_range(const BKFastener *f, int field, double *out);
+// Each size brought into its range, after another one changed.
+void bk_fastener_fit(BKFastener *f);
+// Sets the drive; a Phillips size brings the recess that goes with it.
+void bk_fastener_drive(BKFastener *f, double drive);
+// NULL when a size is out of its range (bk_last_error says which).
+BKShape *bk_fastener(const BKFastener *f, double clearance);
+// The bounding size (x y z) of what bk_fastener makes.
+void bk_fastener_extent(const BKFastener *f, double clearance, double *out);
 
 // m = row-major 3x4 affine matrix (rotation·scale | translation).
 BKShape *bk_transform(const BKShape *s, const double *m);

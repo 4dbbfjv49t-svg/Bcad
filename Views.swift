@@ -613,10 +613,7 @@ struct Drawer: View {
                     Spacer(minLength: 0)
                 } else {
                     HStack(spacing: 6) {
-                        Text(lib.title)
-                            .font(.ui(size: 15, weight: .bold, design: .rounded))
-                            .foregroundStyle(Ink.text)
-                            .lineLimit(1)
+                        DocumentName()
                         if lib.dirty {
                             Circle().fill(lib.accent).frame(width: 6, height: 6).glow(lib.accent, 5).transition(.scale)
                         }
@@ -652,6 +649,51 @@ struct Drawer: View {
         .overlay(alignment: .trailing) {
             Rectangle().fill(lib.accent.opacity(0.22)).frame(width: 1).glow(lib.accent, 5).allowsHitTesting(false)
         }
+    }
+}
+
+// The document's name: double-click it to rename the document, Enter keeps the new name and Esc leaves it as it was.
+struct DocumentName: View {
+    @Environment(Workbench.self) private var lib
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField("", text: $draft)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit(commit)
+                    .onExitCommand { editing = false }
+                    .onChange(of: focused) { if !focused && editing { commit() } }
+                    .task {
+                        draft = lib.title
+                        try? await Task.sleep(for: .milliseconds(40))
+                        focused = true
+                        try? await Task.sleep(for: .milliseconds(30))
+                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                    }
+                    .padding(.horizontal, 6)
+                    .frame(height: 26)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(lib.accent.opacity(0.16)))
+            } else {
+                Text(lib.title)
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) { editing = true }
+                    .help(L("Double-click to rename"))
+            }
+        }
+        .font(.ui(size: 15, weight: .bold, design: .rounded))
+        .foregroundStyle(Ink.text)
+        .accessibilityElement(children: .combine)
+        .accessibilityAction(named: L("Rename")) { editing = true }
+    }
+
+    private func commit() {
+        lib.renameDocument(draft)
+        editing = false
     }
 }
 
@@ -1459,10 +1501,9 @@ struct FastenerLength: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             SettingsTitle(text: L("Size") + " · " + L("mm"))
-            SizeLine(title: L("Length"), axis: 2, value: f.length, range: 1...lib.settings.longest) { v in
-                var n = f
-                n.length = v
-                lib.reshape(id) { _ in .fastener(n) }
+            let r = f.range(.length) ?? f.length...f.length, lo = max(1, r.lowerBound), hi = min(r.upperBound, lib.settings.longest)
+            SizeLine(title: L("Length"), axis: 2, value: f.length, range: lo <= hi ? lo...hi : f.length...f.length) { v in
+                lib.reshape(id) { _ in .fastener(f.setting(.length, v)) }
             }
         }
     }
@@ -1475,13 +1516,13 @@ struct ThreadScreen: View {
 
     var body: some View {
         if items.count == 1, let b = items.first, case .fastener(let f) = b.node.base {
-            ThreadControls(f: f, compact: true) { n in
+            ThreadControls(f: f) { n in
                 let old = f.name
                 lib.reshape(b.id) { _ in .fastener(n) }
                 lib.mutate(b.id) { if $0.name == old { $0.name = n.name } }
             }
         } else {
-            ThreadControls(f: lib.thread, compact: true) { lib.thread = $0 }
+            ThreadControls(f: lib.thread) { lib.thread = $0 }
             Button(lib.thread.nut ? L("Add nut") : L("Add bolt")) { lib.addFastener(lib.thread) }
                 .buttonStyle(PillStyle(tint: lib.accent))
                 .contentTransition(.interpolate)
@@ -1571,80 +1612,209 @@ struct Segmented<Option: Hashable>: View {
     }
 }
 
-// Bolt | Nut, Plain | Hexed, thread size and length: the Thread tab's choices.
+// A row that opens a list under it: what's chosen, and a chevron that turns when it's open.
+struct DropRow<Lead: View>: View {
+    @Environment(Workbench.self) private var lib
+    let title: String
+    let value: String
+    let open: Bool
+    let toggle: () -> Void
+    @ViewBuilder var lead: () -> Lead
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            lead()
+            Text(value).lineLimit(1).contentTransition(.numericText())
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.down")
+                .font(.ui(size: 10, weight: .bold))
+                .rotationEffect(.degrees(open ? 180 : 0))
+        }
+        .font(.ui(size: 13, weight: .bold, design: .rounded))
+        .foregroundStyle(hover || open ? lib.accent : Ink.text)
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Ink.text.opacity(hover || open ? 0.1 : 0.06)))
+        .glow(lib.accent, hover ? 10 : (open ? 5 : 0))
+        .contentShape(Rectangle())
+        .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
+        .onTapGesture { withAnimation(Neon.glide) { toggle() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default) { withAnimation(Neon.glide) { toggle() } }
+    }
+}
+
+extension DropRow where Lead == EmptyView {
+    init(title: String, value: String, open: Bool, toggle: @escaping () -> Void) {
+        self.init(title: title, value: value, open: open, toggle: toggle) { EmptyView() }
+    }
+}
+
+// A bolt head or a nut drawn small: from above (its outline and drive) and from the side (flat, a cone below, countersunk).
+struct HeadGlyph: Shape {
+    let kind: Fastener.Kind
+
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let s = min(r.height, r.width / 2.2)
+        let top = CGRect(x: r.minX, y: r.midY - s / 2, width: s, height: s).insetBy(dx: 0.5, dy: 0.5)
+        let side = CGRect(x: r.maxX - s, y: r.midY - s / 2, width: s, height: s).insetBy(dx: 0.5, dy: 0.5)
+        above(&p, top)
+        beside(&p, side)
+        return p
+    }
+
+    private func ring(_ c: CGPoint, _ radii: [CGFloat], turn: Double = 0) -> [CGPoint] {
+        radii.indices.map { i in
+            let a = turn + Double(i) / Double(radii.count) * 2 * .pi
+            return CGPoint(x: c.x + radii[i] * cos(a), y: c.y + radii[i] * sin(a))
+        }
+    }
+
+    private func above(_ p: inout Path, _ b: CGRect) {
+        let c = CGPoint(x: b.midX, y: b.midY), r = b.width / 2
+        switch kind {
+        case .hex, .hexCone, .phHex, .phHexCone, .hexNut, .coneNut: p.addLines(ring(c, Array(repeating: r, count: 6)))
+        case .twelve, .twelveCone: p.addLines(ring(c, (0..<24).map { $0 % 2 == 0 ? r : r * 0.87 }))
+        case .squareNut: p.addRect(b.insetBy(dx: r * 0.18, dy: r * 0.18))
+        default: p.addEllipse(in: b)
+        }
+        p.closeSubpath()
+        switch kind {
+        case .socket, .socketCone:
+            p.addLines(ring(c, Array(repeating: r * 0.4, count: 6)))
+            p.closeSubpath()
+        case .torx, .torxCone:
+            p.addLines(ring(c, (0..<12).map { $0 % 2 == 0 ? r * 0.46 : r * 0.28 }))
+            p.closeSubpath()
+        case .phHex, .phHexCone, .phCone:
+            p.move(to: CGPoint(x: c.x - r * 0.45, y: c.y))
+            p.addLine(to: CGPoint(x: c.x + r * 0.45, y: c.y))
+            p.move(to: CGPoint(x: c.x, y: c.y - r * 0.45))
+            p.addLine(to: CGPoint(x: c.x, y: c.y + r * 0.45))
+        case .rod: p.addEllipse(in: b.insetBy(dx: r * 0.3, dy: r * 0.3))
+        case .sleeve, .squareNut, .hexNut, .coneNut: p.addEllipse(in: b.insetBy(dx: r * 0.55, dy: r * 0.55))
+        default: break
+        }
+    }
+
+    private func beside(_ p: inout Path, _ b: CGRect) {
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: b.minX + x * b.width, y: b.minY + y * b.height) }
+        func shape(_ pts: [(CGFloat, CGFloat)]) {
+            p.addLines(pts.map { pt($0.0, $0.1) })
+            p.closeSubpath()
+        }
+        func shank(from y: CGFloat) { shape([(0.32, y), (0.68, y), (0.68, 1), (0.32, 1)]) }
+        switch kind {
+        case .rod:
+            shank(from: 0)
+        case .socketCone, .torxCone, .phCone:
+            shape([(0.02, 0), (0.98, 0), (0.68, 0.34), (0.32, 0.34)])
+            shank(from: 0.34)
+        case .hexCone, .twelveCone, .phHexCone:
+            shape([(0.05, 0), (0.95, 0), (0.95, 0.26), (0.05, 0.26)])
+            shape([(0.12, 0.26), (0.88, 0.26), (0.68, 0.46), (0.32, 0.46)])
+            shank(from: 0.46)
+        case .sleeve:
+            shape([(0.15, 0.2), (0.85, 0.2), (0.85, 0.8), (0.15, 0.8)])
+        case .squareNut, .hexNut:
+            shape([(0.05, 0.25), (0.95, 0.25), (0.95, 0.75), (0.05, 0.75)])
+        case .coneNut:
+            shape([(0.05, 0.12), (0.95, 0.12), (0.95, 0.56), (0.05, 0.56)])
+            shape([(0.1, 0.56), (0.9, 0.56), (0.74, 0.86), (0.26, 0.86)])
+        default:
+            shape([(0.05, 0), (0.95, 0), (0.95, 0.32), (0.05, 0.32)])
+            shank(from: 0.32)
+        }
+        if kind.nut {
+            p.move(to: pt(0.36, kind == .coneNut ? 0.12 : 0.25))
+            p.addLine(to: pt(0.36, kind == .coneNut ? 0.86 : 0.75))
+            p.move(to: pt(0.64, kind == .coneNut ? 0.12 : 0.25))
+            p.addLine(to: pt(0.64, kind == .coneNut ? 0.86 : 0.75))
+        }
+    }
+}
+
+// One kind in the list of heads or nuts: its picture and name.
+struct KindRow: View {
+    @Environment(Workbench.self) private var lib
+    let kind: Fastener.Kind
+    let chosen: Bool
+    let choose: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HeadGlyph(kind: kind)
+                .stroke(style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
+                .frame(width: 36, height: 16)
+            Text(L(kind.label)).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(.ui(size: 12.5, weight: .bold, design: .rounded))
+        .foregroundStyle(chosen ? Color.black : (hover ? lib.accent : Ink.text.opacity(0.8)))
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(chosen ? lib.accent : lib.accent.opacity(hover ? 0.16 : 0)))
+        .glow(lib.accent, chosen ? 8 : 0)
+        .contentShape(Rectangle())
+        .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
+        .onTapGesture { withAnimation(Neon.spring) { choose() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(.default) { withAnimation(Neon.spring) { choose() } }
+    }
+}
+
+// Bolt | Nut, the head or the nut's shape, the thread and length, and every size of the head or nut: the Thread tab's choices.
 struct ThreadControls: View {
     @Environment(Workbench.self) private var lib
     let f: Fastener
-    var compact = false
     let change: (Fastener) -> Void
-    @State private var sizesOpen = false
-    @State private var hover = false
+    @State private var open: Dropdown?
 
-    private var name: String { String(cString: bk_thread_name(Int32(f.size))) }
+    enum Dropdown { case kinds, threads }
+
+    private var thread: String { String(cString: bk_thread_name(Int32(f.size))) }
 
     private var detail: String {
-        switch (f.nut, f.threadOnly) {
-        case (false, false): L("Length is measured under the head")
-        case (false, true): L("The thread takes the whole length")
-        case (true, false): L("A hex nut of this height")
-        case (true, true): L("A thin cylinder around the thread instead of a hex nut")
+        switch f.kind {
+        case .rod: L("The thread takes the whole length")
+        case .sleeve: L("A thin cylinder around the thread instead of a hex nut")
+        case .squareNut: L("A square nut of this height")
+        case .hexNut: L("A hex nut of this height")
+        case .coneNut: L("A hex nut narrowing into a cone seat below")
+        default:
+            f.kind.countersunk ? L("Length includes the countersunk head")
+                : f.kind.coneBelow ? L("Length includes the cone under the head") : L("Length is measured under the head")
         }
     }
+
+    private func toggle(_ d: Dropdown) { open = open == d ? nil : d }
 
     var body: some View {
         VStack(spacing: 10) {
             Segmented(options: [false, true], label: { $0 ? L("Nut") : L("Bolt") }, icon: { $0 ? "circle.hexagonpath" : "screwdriver" },
                       current: f.nut) { nut in
-                var n = f
-                n.nut = nut
-                n.length = bk_thread_default_length(Int32(n.size), nut ? 1 : 0)
-                change(n)
+                change(f.becoming(nut ? .hexNut : .hex))
+                open = nil
             }
-            Segmented(options: [true, false], label: { $0 ? L("Plain") : L("Hexed") }, icon: { $0 ? "circle" : "hexagon" },
-                      current: f.threadOnly) { only in
-                var n = f
-                n.threadOnly = only
-                change(n)
+            DropRow(title: f.nut ? L("Nut") : L("Head"), value: L(f.kind.label), open: open == .kinds) { toggle(.kinds) } lead: {
+                HeadGlyph(kind: f.kind)
+                    .stroke(style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                    .frame(width: 36, height: 16)
             }
-            HStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    if !compact { Text(L("Thread")).foregroundStyle(Ink.text.opacity(0.55)) }
-                    Text(name).contentTransition(.numericText())
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.down")
-                        .font(.ui(size: 10, weight: .bold))
-                        .rotationEffect(.degrees(sizesOpen ? 180 : 0))
-                }
-                .font(.ui(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(hover || sizesOpen ? lib.accent : Ink.text)
-                .padding(.horizontal, 12)
-                .frame(height: 36)
-                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Ink.text.opacity(hover || sizesOpen ? 0.1 : 0.06)))
-                .glow(lib.accent, hover ? 10 : (sizesOpen ? 5 : 0))
-                .contentShape(Rectangle())
-                .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
-                .onTapGesture { withAnimation(Neon.glide) { sizesOpen.toggle() } }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(L("Thread"))
-                .accessibilityValue(name)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction(.default) { withAnimation(Neon.glide) { sizesOpen.toggle() } }
-                Text(L("Length")).font(.ui(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Ink.text.opacity(0.55))
-                MMField(value: f.length, unit: L("mm"), range: 1...lib.settings.longest, width: compact ? 54 : 60) { v in
-                    var n = f
-                    n.length = v
-                    change(n)
-                }
-            }
-            if sizesOpen {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
-                    ForEach(0..<Int(bk_thread_count()), id: \.self) { i in
-                        Chip(text: String(cString: bk_thread_name(Int32(i))), chosen: i == f.size) {
-                            var n = f
-                            n.size = i
-                            n.length = bk_thread_default_length(Int32(i), f.nut ? 1 : 0)
-                            change(n)
-                            withAnimation(Neon.glide) { sizesOpen = false }
+            if open == .kinds {
+                let kinds = f.nut ? Fastener.Kind.nuts : Fastener.Kind.bolts
+                VStack(spacing: 2) {
+                    ForEach(Array(kinds.enumerated()), id: \.element) { i, k in
+                        KindRow(kind: k, chosen: k == f.kind) {
+                            if k != f.kind { change(f.becoming(k)) }
+                            withAnimation(Neon.glide) { open = nil }
                         }
                         .cascade(i)
                     }
@@ -1652,6 +1822,36 @@ struct ThreadControls: View {
                 .padding(6)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Ink.void.opacity(0.5)))
                 .transition(.menu)
+            }
+            HStack(spacing: 8) {
+                DropRow(title: L("Thread"), value: thread, open: open == .threads) { toggle(.threads) }
+                Text(L("Length")).font(.ui(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Ink.text.opacity(0.55))
+                MMField(value: f.length, unit: L("mm"), range: bounded(.length, to: 1...lib.settings.longest), width: 54) {
+                    change(f.setting(.length, $0))
+                }
+            }
+            if open == .threads {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
+                    ForEach(0..<Int(bk_thread_count()), id: \.self) { i in
+                        Chip(text: String(cString: bk_thread_name(Int32(i))), chosen: i == f.size) {
+                            change(f.threaded(i))
+                            withAnimation(Neon.glide) { open = nil }
+                        }
+                        .cascade(i)
+                    }
+                }
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Ink.void.opacity(0.5)))
+                .transition(.menu)
+            }
+            let fields = f.kind.fields.filter { $0 != .length }
+            if !fields.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    SettingsTitle(text: (f.nut ? L("Nut sizes") : L("Head sizes")) + " · " + L("mm"))
+                    ForEach(fields, id: \.self) { field in row(field) }
+                }
+                .id(f.kind)
+                .transition(.haze)
             }
             Text(detail)
                 .font(.ui(size: 10.5, design: .rounded))
@@ -1662,6 +1862,65 @@ struct ThreadControls: View {
                 .transition(.haze)
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: f)
+    }
+
+    // What a size may be, within these bounds too; just its value when nothing fits.
+    private func bounded(_ field: Fastener.Field, to outer: ClosedRange<Double> = -100000...100000) -> ClosedRange<Double> {
+        guard let r = f.range(field) else { return f[field]...f[field] }
+        let lo = max(r.lowerBound, outer.lowerBound), hi = min(r.upperBound, outer.upperBound)
+        return lo <= hi ? lo...hi : f[field]...f[field]
+    }
+
+    @ViewBuilder private func row(_ field: Fastener.Field) -> some View {
+        if field == .drive && f.kind.torxDrive {
+            let r = bounded(.drive)
+            SizeChips(title: L("Torx size"), options: (0..<Int(bk_torx_count())).map { Int(bk_torx_number(Int32($0))) }.filter { r.contains(Double($0)) },
+                      label: { "T\($0)" }, chosen: Int(f.drive)) { change(f.setting(.drive, Double($0))) }
+        } else if field == .drive && f.kind.phillips {
+            SizeChips(title: L("PH size"), options: [1, 2, 3, 4], label: { "PH\($0)" }, chosen: Int(f.drive)) { change(f.setting(.drive, Double($0))) }
+        } else {
+            SizeLine(title: title(field), axis: nil, value: f[field], unit: field == .angle ? "°" : nil, range: bounded(field)) { v in
+                change(f.setting(field, v))
+            }
+        }
+    }
+
+    private func title(_ field: Fastener.Field) -> String {
+        switch field {
+        case .width:
+            f.kind == .sleeve ? L("Wall thickness")
+                : [.socket, .torx].contains(f.kind) || f.kind.countersunk ? L("Head diameter") : L("Across flats")
+        case .height: L("Head height")
+        case .angle: L("Cone angle")
+        case .seat: L("Cone height")
+        case .drive: L("Key size")
+        case .recess: L("Recess diameter")
+        case .depth: f.kind.phillips ? L("Recess depth") : L("Socket depth")
+        case .length: L("Length")
+        }
+    }
+}
+
+// A size chosen from a few standard ones.
+struct SizeChips: View {
+    let title: String
+    let options: [Int]
+    let label: (Int) -> String
+    let chosen: Int
+    let choose: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.ui(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Ink.text)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
+                ForEach(options, id: \.self) { o in
+                    Chip(text: label(o), chosen: o == chosen) { if o != chosen { choose(o) } }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Ink.text.opacity(0.05)))
     }
 }
 
@@ -1702,7 +1961,7 @@ struct SettingsPane: View {
                     NeonToggle(state: s.autoLink) { lib.updateSettings { $0.autoLink.toggle() } }
                         .accessibilityLabel(L("Automatic linking"))
                 }
-                SettingLine(title: L("Drop onto the bed"), detail: L("New and rotated shapes rest on the bed")) {
+                SettingLine(title: L("Drop onto the bed"), detail: L("New shapes rest on the bed")) {
                     NeonToggle(state: s.dropToBed) { lib.updateSettings { $0.dropToBed.toggle() } }
                         .accessibilityLabel(L("Drop onto the bed"))
                 }

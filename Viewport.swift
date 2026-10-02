@@ -176,6 +176,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var depthOff: MTLDepthStencilState!
     private struct GPUBody { var stamp: Int; var dark: Bool; var pos: MTLBuffer; var nrm: MTLBuffer; var idx: MTLBuffer; var count: Int; var edges: MTLBuffer?; var edgeCount: Int }
     private var bodies: [UUID: GPUBody] = [:]
+    // The bed's lines, made again only when the bed, the theme, the accent or the brightness changes.
+    private var bedLines: (key: [Float], buffer: MTLBuffer, count: Int)?
     private let start = CACurrentMediaTime()
     weak var view: CadView?
     let lib = Workbench.shared
@@ -264,12 +266,16 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private func drawLines(_ enc: MTLRenderCommandEncoder, _ lines: [LineV], model: simd_float4x4 = matrix_identity_float4x4, depth: MTLDepthStencilState) {
         guard !lines.isEmpty, let buf = device.makeBuffer(bytes: lines, length: lines.count * MemoryLayout<LineV>.stride) else { return }
+        drawLines(enc, buf, count: lines.count, model: model, depth: depth)
+    }
+
+    private func drawLines(_ enc: MTLRenderCommandEncoder, _ buf: MTLBuffer, count: Int, model: simd_float4x4 = matrix_identity_float4x4, depth: MTLDepthStencilState) {
         var m = model
         enc.setRenderPipelineState(linePipe)
         enc.setDepthStencilState(depth)
         enc.setVertexBuffer(buf, offset: 0, index: 0)
         enc.setVertexBytes(&m, length: 64, index: 2)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: lines.count)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count)
     }
 
     func frame(_ size: CGSize) -> FrameU {
@@ -359,6 +365,12 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private func drawBed(_ enc: MTLRenderCommandEncoder, accent: SIMD4<Float>) {
         let bed = lib.settings.bed
+        let glow = Float(lib.brightness)
+        let key = [Float(bed.x), Float(bed.y), Float(bed.z), Skin.shared.dark ? 1 : 0, accent.x, accent.y, accent.z, glow]
+        if let b = bedLines, b.key == key {
+            drawLines(enc, b.buffer, count: b.count, depth: depthRead)
+            return
+        }
         let w = Float(bed.x / 2), d = Float(bed.y / 2), h = Float(bed.z)
         var lines: [LineV] = []
         var x = -w
@@ -373,7 +385,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             Renderer.segment(SIMD3(-w, y, 0), SIMD3(w, y, 0), width: major ? 1.2 : 0.8, color: SIMD4(Renderer.ink, major ? 0.16 : 0.07), into: &lines)
             y += 10
         }
-        let glow = Float(lib.brightness)
         Renderer.polyline([SIMD3(-w, -d, 0), SIMD3(w, -d, 0), SIMD3(w, d, 0), SIMD3(-w, d, 0), SIMD3(-w, -d, 0)], width: 2.2,
                           color: SIMD4(accent.x, accent.y, accent.z, 0.55 + 0.4 * glow), into: &lines)
         for c in [SIMD3<Float>(-w, -d, 0), SIMD3(w, -d, 0), SIMD3(w, d, 0), SIMD3(-w, d, 0)] {
@@ -382,7 +393,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         Renderer.segment(SIMD3(-w, -d, 0.02), SIMD3(-w + 30, -d, 0.02), width: 2.5, color: SIMD4(1, 0.3, 0.35, 0.9), into: &lines)
         Renderer.segment(SIMD3(-w, -d, 0.02), SIMD3(-w, -d + 30, 0.02), width: 2.5, color: SIMD4(0.35, 1, 0.5, 0.9), into: &lines)
         Renderer.segment(SIMD3(-w, -d, 0.02), SIMD3(-w, -d, 30), width: 2.5, color: SIMD4(0.35, 0.6, 1, 0.9), into: &lines)
-        drawLines(enc, lines, depth: depthRead)
+        guard let buf = device.makeBuffer(bytes: lines, length: lines.count * MemoryLayout<LineV>.stride) else { return }
+        bedLines = (key, buf, lines.count)
+        drawLines(enc, buf, count: lines.count, depth: depthRead)
     }
 
     private func drawRoundMarks(_ enc: MTLRenderCommandEncoder, _ b: Solid, _ m: Mesh, _ model: simd_float4x4, accent: SIMD4<Float>, accent2: SIMD4<Float>) {
@@ -458,12 +471,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     func splitArrow(_ plane: Plane) -> (SIMD3<Double>, SIMD3<Double>) { (plane.point, plane.point + plane.normal * gizmoLength) }
 
     private func drawPlane(_ enc: MTLRenderCommandEncoder, _ plane: Plane, accent: SIMD4<Float>, hatch: SIMD4<Float>) {
-        var size = 60.0
-        for b in lib.selected { if let (lo, hi) = lib.worldBounds(b) { size = max(size, length(hi - lo) * 0.75) } }
+        let (c, size) = lib.splitPatch(plane)
         let n = plane.normal
         let t = normalize(abs(n.z) < 0.9 ? cross(n, SIMD3(0, 0, 1)) : cross(n, SIMD3(1, 0, 0)))
         let s = cross(n, t)
-        let c = plane.point
         let corners = [c + (t + s) * size, c + (t - s) * size, c + (-t - s) * size, c + (-t + s) * size].map { SIMD3<Float>($0) }
         var tri: [SIMD4<Float>] = [0, 1, 2, 0, 2, 3].map { SIMD4(corners[$0], -1) }
         let nf = SIMD4<Float>(SIMD3<Float>(n), 0)

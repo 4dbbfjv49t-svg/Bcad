@@ -263,7 +263,7 @@ extension Node {
             }
             return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy(\.isFinite) && sides
         case .fastener(let f):
-            return (0..<Int(bk_thread_count())).contains(f.size) && f.length.isFinite
+            return (0..<Int(bk_thread_count())).contains(f.size) && [f.length, f.width, f.height, f.angle, f.seat, f.drive, f.recess, f.depth].allSatisfy(\.isFinite)
         case .group(let op, let parts):
             return (0...2).contains(op) && !parts.isEmpty && parts.allSatisfy { $0.node.valid && $0.place.valid }
         case .split(let n, let plane, _):

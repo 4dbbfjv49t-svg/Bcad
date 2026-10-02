@@ -225,23 +225,163 @@ struct Primitive: Codable, Equatable, Sendable {
     }
 }
 
+// A bolt or nut on an ISO metric coarse thread; the kernel knows every kind's sizes and what they may be (BcadKernel.h).
 struct Fastener: Codable, Equatable, Sendable {
-    var nut: Bool
+    // In the kernel's order (BK_ROD … BK_CONE_NUT).
+    enum Kind: String, Codable, CaseIterable, Sendable {
+        case rod, hex, hexCone, socket, socketCone, twelve, twelveCone, torx, torxCone, phHex, phHexCone, phCone
+        case sleeve, squareNut, hexNut, coneNut
+
+        var code: Int32 { Int32(Self.allCases.firstIndex(of: self)!) }
+        var nut: Bool { code >= Int32(BK_SLEEVE) }
+        var fields: [Field] { Field.allCases.filter { bk_fastener_fields(code) & (1 << $0.rawValue) != 0 } }
+        var countersunk: Bool { [.socketCone, .torxCone, .phCone].contains(self) }
+        var coneBelow: Bool { [.hexCone, .twelveCone, .phHexCone].contains(self) }
+        var keyDrive: Bool { self == .socket || self == .socketCone }
+        var torxDrive: Bool { self == .torx || self == .torxCone }
+        var phillips: Bool { [.phHex, .phHexCone, .phCone].contains(self) }
+        static let bolts = allCases.filter { !$0.nut }
+        static let nuts = allCases.filter(\.nut)
+
+        var label: String {
+            switch self {
+            case .rod: "Threaded rod"
+            case .hex, .hexNut: "Hex"
+            case .hexCone: "Hex · cone below"
+            case .socket: "Hex socket"
+            case .socketCone: "Hex socket · countersunk"
+            case .twelve: "12-point"
+            case .twelveCone: "12-point · cone below"
+            case .torx: "Torx"
+            case .torxCone: "Torx · countersunk"
+            case .phHex: "PH · hex"
+            case .phHexCone: "PH · hex · cone below"
+            case .phCone: "PH · countersunk"
+            case .sleeve: "Sleeve"
+            case .squareNut: "Square"
+            case .coneNut: "Cone"
+            }
+        }
+    }
+
+    // In the kernel's order (BK_LENGTH … BK_DEPTH).
+    enum Field: Int32, CaseIterable, Sendable { case length, width, height, angle, seat, drive, recess, depth }
+
+    var kind: Kind
     var size: Int
     var length: Double
-    var threadOnly: Bool
+    var width = 0.0, height = 0.0, angle = 0.0, seat = 0.0, drive = 0.0, recess = 0.0, depth = 0.0
+
+    var nut: Bool { kind.nut }
+
+    // A new one: its kind's sizes for this thread, and the usual length.
+    init(kind: Kind, size: Int) {
+        self.kind = kind
+        self.size = size
+        length = 0
+        self = through { bk_fastener_defaults(&$0, 1) }
+    }
+
+    var c: BKFastener {
+        BKFastener(kind: kind.code, size: Int32(size), length: length, width: width, height: height, angle: angle, seat: seat,
+                   drive: drive, recess: recess, depth: depth)
+    }
+
+    // The same with the kernel's change made to it.
+    private func through(_ change: (inout BKFastener) -> Void) -> Fastener {
+        var b = c
+        change(&b)
+        var n = self
+        (n.length, n.width, n.height, n.angle, n.seat, n.drive, n.recess, n.depth) = (b.length, b.width, b.height, b.angle, b.seat, b.drive, b.recess, b.depth)
+        return n
+    }
+
+    // Another kind on the same thread, with that kind's sizes; a nut's height is one of them, and so is a bolt's length
+    // when it was a nut.
+    func becoming(_ k: Kind) -> Fastener {
+        var n = self
+        n.kind = k
+        let length = k.nut || nut ? 1 : 0
+        return n.through { bk_fastener_defaults(&$0, Int32(length)) }
+    }
+
+    // Another thread: its sizes and usual length.
+    func threaded(_ size: Int) -> Fastener { Fastener(kind: kind, size: size) }
+
+    subscript(_ field: Field) -> Double {
+        get { [length, width, height, angle, seat, drive, recess, depth][Int(field.rawValue)] }
+        set {
+            switch field {
+            case .length: length = newValue
+            case .width: width = newValue
+            case .height: height = newValue
+            case .angle: angle = newValue
+            case .seat: seat = newValue
+            case .drive: drive = newValue
+            case .recess: recess = newValue
+            case .depth: depth = newValue
+            }
+        }
+    }
+
+    // One size changed; the ones depending on it follow into what they may be (a Phillips size brings its recess).
+    func setting(_ field: Field, _ v: Double) -> Fastener {
+        if field == .drive { return through { bk_fastener_drive(&$0, v) } }
+        var n = self
+        n[field] = v
+        return n.through { bk_fastener_fit(&$0) }
+    }
+
+    // What one size may be with the others as they are (nil when nothing fits).
+    func range(_ field: Field) -> ClosedRange<Double>? {
+        var b = c, out = [0.0, 0.0]
+        bk_fastener_range(&b, field.rawValue, &out)
+        return out[0] <= out[1] ? out[0]...out[1] : nil
+    }
 
     @MainActor var name: String {
         let m = String(cString: bk_thread_name(Int32(size)))
-        if nut { return threadOnly ? L("{m} threaded sleeve", ["m": m]) : L("{m} nut", ["m": m]) }
-        return threadOnly ? L("{m} threaded rod", ["m": m]) : L("{m} bolt", ["m": m])
+        return switch kind {
+        case .rod: L("{m} threaded rod", ["m": m])
+        case .sleeve: L("{m} threaded sleeve", ["m": m])
+        case .squareNut: L("{m} square nut", ["m": m])
+        case .coneNut: L("{m} cone nut", ["m": m])
+        case .hexNut: L("{m} nut", ["m": m])
+        default: L("{m} bolt", ["m": m])
+        }
     }
 
     // Its bounding size; the kernel centres it on its own origin like a primitive.
     func extent(clearance: Double) -> SIMD3<Double> {
-        var out = [Double](repeating: 0, count: 3)
-        bk_fastener_extent(Int32(size), length, nut ? 1 : 0, threadOnly ? 1 : 0, clearance, &out)
+        var b = c, out = [0.0, 0.0, 0.0]
+        bk_fastener_extent(&b, clearance, &out)
         return SIMD3(out[0], out[1], out[2])
+    }
+}
+
+extension Fastener {
+    private enum Saved: String, CodingKey { case kind, size, length, width, height, angle, seat, drive, recess, depth, nut, threadOnly }
+
+    // Files from earlier versions keep a bolt or nut as hex or plain (threadOnly), without head sizes: it gets the standard ones.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Saved.self)
+        let size = try c.decode(Int.self, forKey: .size), length = try c.decode(Double.self, forKey: .length)
+        if let kind = try c.decodeIfPresent(Kind.self, forKey: .kind) {
+            self.kind = kind
+            self.size = size
+            self.length = length
+            width = try c.decode(Double.self, forKey: .width)
+            height = try c.decode(Double.self, forKey: .height)
+            angle = try c.decode(Double.self, forKey: .angle)
+            seat = try c.decode(Double.self, forKey: .seat)
+            drive = try c.decode(Double.self, forKey: .drive)
+            recess = try c.decode(Double.self, forKey: .recess)
+            depth = try c.decode(Double.self, forKey: .depth)
+        } else {
+            let nut = try c.decode(Bool.self, forKey: .nut), plain = try c.decode(Bool.self, forKey: .threadOnly)
+            self = Fastener(kind: nut ? (plain ? .sleeve : .hexNut) : (plain ? .rod : .hex), size: size)
+            self.length = length
+        }
     }
 }
 
@@ -652,7 +792,8 @@ final class Kernel: @unchecked Sendable {
             guard p.bends() else { problems.append("bend"); return nil }
             return made(p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) })
         case .fastener(let f):
-            return made(f.nut ? bk_nut(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance) : bk_bolt(Int32(f.size), f.length, f.threadOnly ? 1 : 0, clearance))
+            var b = f.c
+            return made(bk_fastener(&b, clearance))
         case .group(let op, let parts):
             // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
@@ -1101,6 +1242,8 @@ final class Workbench: DesignHost {
     var settings = Settings()
     var doc = Document()
     var fileURL: URL?
+    // The name given to a document that isn't saved yet; the Save panel offers it.
+    var docName: String?
     // The document as last opened or saved; it has changes while it differs from that.
     private var saved = Document()
     var dirty: Bool { doc != saved }
@@ -1118,7 +1261,7 @@ final class Workbench: DesignHost {
     var hollowWalls: [Wall] = []
     var hollowThickness = 2.0
     var focusWall: Int?
-    var thread = Fastener(nut: false, size: 4, length: 30, threadOnly: false)
+    var thread = Fastener(kind: .hex, size: 4)
     var splitAxis = 2
     var splitOffset = 0.0
     var splitTilt = SIMD2<Double>(0, 0)
@@ -1460,22 +1603,26 @@ final class Workbench: DesignHost {
     // The whole bed in view, for an empty scene.
     var bedFraming: (target: SIMD3<Float>, distance: Float) { (.zero, Float(max(settings.bed.x, settings.bed.y)) * 2.4) }
 
-    // World bounding box of a body: exact from the shape's box when unrotated, from the mesh otherwise.
+    // World boxes of turned shapes over all their vertices, kept per mesh and placement: each frame and drag step asks
+    // for them several times.
+    @ObservationIgnored private var turnedBoxes: [UUID: (stamp: Int, place: Placement, lo: SIMD3<Double>, hi: SIMD3<Double>)] = [:]
+
+    // World bounding box of a body: exact from the shape's box when unrotated, from every vertex of the mesh otherwise.
     func worldBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
         guard let m = meshes[b.id], !m.vertices.isEmpty else { return nil }
         if b.place.turn == SIMD3(0, 0, 0) {
             let a = m.low * b.place.scale + b.place.move, c = m.high * b.place.scale + b.place.move
             return (simd_min(a, c), simd_max(a, c))
         }
+        if let k = turnedBoxes[b.id], k.stamp == m.stamp, k.place == b.place { return (k.lo, k.hi) }
         let mat = b.place.matrix
         var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
-        let step = max(1, m.vertices.count / 4000)
-        for i in stride(from: 0, to: m.vertices.count, by: step) {
-            let v = m.vertices[i]
+        for v in m.vertices {
             let w = mat * SIMD4<Double>(Double(v.x), Double(v.y), Double(v.z), 1)
             lo = simd_min(lo, SIMD3(w.x, w.y, w.z))
             hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
         }
+        turnedBoxes[b.id] = (m.stamp, b.place, lo, hi)
         return (lo, hi)
     }
 
@@ -1576,6 +1723,18 @@ final class Workbench: DesignHost {
         return Plane(point: p, normal: normalize(t))
     }
 
+    // The square drawn for the split plane: around the selection's middle, and wide enough that every cut through the
+    // selection lies inside it at any tilt and offset (a cut lies within the sphere around the selection's box).
+    func splitPatch(_ plane: Plane) -> (centre: SIMD3<Double>, half: Double) {
+        var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+        for b in selected {
+            if let (l, h) = worldBounds(b) { lo = simd_min(lo, l); hi = simd_max(hi, h) }
+        }
+        guard lo.x.isFinite else { return (plane.point, 60) }
+        let m = (lo + hi) / 2
+        return (m - plane.normal * simd_dot(m - plane.point, plane.normal), max(60, simd_length(hi - lo) * 0.75))
+    }
+
     func split() {
         guard let plane = splitPlane else { return }
         let targets = selected
@@ -1653,10 +1812,8 @@ final class Workbench: DesignHost {
         rebuildScene()
     }
 
-    // After a drag: rotated parts settle back onto the bed.
+    // After a move or turn: shapes stay where the drag left them, as after a resize.
     func finishTransform() {
-        if settings.dropToBed && gizmo == .rotate { dropSoon(selection) }
-        applyDrops()
         sceneVersion += 1
     }
 
@@ -1711,9 +1868,8 @@ final class Workbench: DesignHost {
             case .primitive(var p):
                 p.scale(by: s)
                 next = .primitive(p)
-            case .fastener(var f):
-                f.length = max(1, (f.length * s.z * 100).rounded() / 100)
-                next = .fastener(f)
+            case .fastener(let f):
+                next = .fastener(f.setting(.length, max(1, (f.length * s.z * 100).rounded() / 100)))
             default:
                 continue
             }
@@ -2091,6 +2247,7 @@ final class Workbench: DesignHost {
         let alive = Set(bodies.map(\.id))
         meshes = meshes.filter { alive.contains($0.key) }
         built = built.filter { alive.contains($0.key) }
+        turnedBoxes = turnedBoxes.filter { alive.contains($0.key) }
         sceneVersion += 1
         guard !todo.isEmpty else { applyDrops(); return }
         building = true
@@ -2145,6 +2302,7 @@ final class Workbench: DesignHost {
         if problems.contains("cove") { return L("These edges can't be rounded inward") }
         if problems.contains("bevel") { return L("This bevel doesn't fit these edges — try smaller sizes") }
         if problems.contains("bend") { return L("The tube is too thick for this torus's tightest bend") }
+        if problems.contains(where: { $0.hasPrefix("bolt") || $0.hasPrefix("nut") }) { return L("These sizes don't fit this bolt or nut") }
         if problems.contains("empty") { return L("Nothing is left of this shape") }
         if problems.contains("pieces") { return L("These shapes don't touch, so the merge stays in separate pieces") }
         if problems.contains("hollow") { return L("These walls don't fit this shape — try thinner walls") }
@@ -2223,7 +2381,28 @@ final class Workbench: DesignHost {
 
     // MARK: files
 
-    var title: String { fileURL?.deletingPathExtension().lastPathComponent ?? L("Untitled") }
+    var title: String { fileURL?.deletingPathExtension().lastPathComponent ?? docName ?? L("Untitled") }
+
+    // A name typed for the document: a saved one's file is renamed where it is, an unsaved one keeps it for saving.
+    func renameDocument(_ name: String) {
+        let t = name.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        guard !t.isEmpty, t != title else { return }
+        guard let url = fileURL else { docName = t; return }
+        let to = url.deletingLastPathComponent().appendingPathComponent(t).appendingPathExtension(url.pathExtension)
+        // Another file by that name is never replaced; the same file may change only the case of its letters.
+        if FileManager.default.fileExists(atPath: to.path), !Self.sameFile(url, to) {
+            flash(L("A file named “{name}” already exists", ["name": to.lastPathComponent]))
+            return
+        }
+        guard Darwin.rename(url.path, to.path) == 0 else { flash(L("Couldn't rename the file")); return }
+        fileURL = to
+    }
+
+    private static func sameFile(_ a: URL, _ b: URL) -> Bool {
+        let id = { (u: URL) in (try? u.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier as? NSObject }
+        guard let x = id(a), let y = id(b) else { return false }
+        return x.isEqual(y)
+    }
 
     // Asks about unsaved changes before they'd be lost; `done` learns whether to go ahead (once saved, if that was chosen).
     func confirmDiscard(_ done: @escaping (Bool) -> Void) {
@@ -2248,6 +2427,7 @@ final class Workbench: DesignHost {
             self.doc = Document()
             self.saved = self.doc
             self.fileURL = nil
+            self.docName = nil
             self.rebuildScene()
         }
     }
@@ -2289,6 +2469,7 @@ final class Workbench: DesignHost {
             doc = d
             saved = d
             fileURL = url
+            docName = nil
             // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
             meshes = [:]
             for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
@@ -2324,6 +2505,7 @@ final class Workbench: DesignHost {
                     self.ended(note)
                     if ok {
                         self.fileURL = url
+                        self.docName = nil
                         self.saved = doc
                         self.flash(L("Saved {name}", ["name": url.lastPathComponent]))
                     } else {

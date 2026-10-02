@@ -88,7 +88,7 @@ enum SelfTest {
         let up = mesh(.split(of: box, plane: plane, side: 0))?.volume ?? 0, down = mesh(.split(of: box, plane: plane, side: 1))?.volume ?? 0
         check("split halves", abs(up + down - 8000) < 1 && abs(up - 2800) < 1, String(format: "%.2f + %.2f", up, down))
         let tilted = Plane(point: SIMD3(1, 2, 3), normal: normalize(SIMD3(0.3, -0.2, 1)))
-        for (name, whole) in [("cylinder", Node.primitive(.make(.cylinder))), ("M8 bolt", Node.fastener(Fastener(nut: false, size: 4, length: 30, threadOnly: false)))] {
+        for (name, whole) in [("cylinder", Node.primitive(.make(.cylinder))), ("M8 bolt", Node.fastener(Fastener(kind: .hex, size: 4)))] {
             let all = mesh(whole)?.volume ?? 0
             let a = mesh(.split(of: whole, plane: tilted, side: 0))?.volume ?? 0, b = mesh(.split(of: whole, plane: tilted, side: 1))?.volume ?? 0
             check("tilted split keeps all of the \(name)", a > 0 && b > 0 && abs(a + b - all) < all * 0.000_1, String(format: "%.3f + %.3f = %.3f", a, b, all))
@@ -115,19 +115,41 @@ enum SelfTest {
         let tooBig = mesh(.round(of: box, picks: [edge], radius: 40))
         check("too large radius reported", k.takeProblems().contains { $0.hasPrefix("max:") } && tooBig != nil)
 
-        for size in [0, Int(bk_thread_count()) - 1] {
-            for nut in [false, true] {
-                for only in [false, true] {
-                    let fs = Fastener(nut: nut, size: size, length: nut ? bk_thread_default_length(Int32(size), 1) : 30, threadOnly: only)
-                    let t0 = Date()
-                    let m = mesh(.fastener(fs))
-                    let h = m?.size.z ?? 0
-                    let lengthOK = nut || only ? abs(h - fs.length) < 0.01 : h > fs.length
-                    let sizeOK = m.map { simd_reduce_max(simd_abs($0.size - fs.extent(clearance: 0.2))) < 0.05 } == true
-                    check(fs.name, m?.valid == true && lengthOK && sizeOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
-                }
+        // Every bolt head and nut: its standard sizes fit at every thread; built at the smallest and largest, it's one closed
+        // solid of the size known beforehand, as long as its length (plus a head that isn't countersunk).
+        let outside = Fastener.Kind.allCases.flatMap { kind in
+            (0..<Int(bk_thread_count())).compactMap { size -> String? in
+                let fs = Fastener(kind: kind, size: size)
+                return kind.fields.allSatisfy { fs.range($0)?.contains(fs[$0]) == true } ? nil : "\(kind) M\(size)"
             }
         }
+        check("every head's and nut's standard sizes fit", outside.isEmpty, outside.joined(separator: ", "))
+        for size in [0, Int(bk_thread_count()) - 1] {
+            for kind in Fastener.Kind.allCases {
+                let fs = Fastener(kind: kind, size: size)
+                let t0 = Date()
+                let m = mesh(.fastener(fs))
+                let h = m?.size.z ?? 0
+                let tall = fs.length + (kind.nut || kind.countersunk || kind == .rod ? 0 : fs.height)
+                let sizeOK = m.map { simd_reduce_max(simd_abs($0.size - fs.extent(clearance: 0.2))) < 0.05 } == true
+                check("\(fs.name) · \(kind)", m?.valid == true && abs(h - tall) < 0.01 && sizeOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
+            }
+        }
+        // A size changed past what the others allow takes them along: a narrower socket head gets a smaller key.
+        let socketHead = Fastener(kind: .socket, size: 4), narrower = socketHead.setting(.width, 8.2)
+        check("a narrower head takes a smaller key with it", narrower.width == 8.2 && narrower.drive < socketHead.drive && narrower.drive * 2 / sqrt(3) <= 7.2 + 1e-9
+              && mesh(.fastener(narrower))?.valid == true, String(format: "key %.2f", narrower.drive))
+        let phHead = Fastener(kind: .phCone, size: 4).setting(.drive, 2)
+        check("a Phillips size brings its recess", phHead.drive == 2 && phHead.recess == 5 && mesh(.fastener(phHead))?.valid == true)
+        _ = k.takeProblems()
+        var misfit = Fastener(kind: .torx, size: 4)
+        misfit.depth = 20
+        check("sizes that don't fit are refused and said", mesh(.fastener(misfit)) == nil && k.takeProblems().contains { $0.hasPrefix("bolt") })
+        // Bolts and nuts in files from earlier versions: hex or plain, with the standard sizes.
+        let earlierBolt = try? JSONDecoder().decode(Fastener.self, from: Data(#"{"nut":false,"size":4,"length":30,"threadOnly":false}"#.utf8))
+        let earlierSleeve = try? JSONDecoder().decode(Fastener.self, from: Data(#"{"nut":true,"size":0,"length":2.4,"threadOnly":true}"#.utf8))
+        check("earlier bolts and nuts open as hex and plain ones", earlierBolt == Fastener(kind: .hex, size: 4) && earlierSleeve?.kind == .sleeve
+              && earlierSleeve?.width == 1.6 && earlierSleeve?.length == 2.4)
 
         let top = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))
         let bottom = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, -1), b: SIMD3(0, 0, -10))
@@ -205,7 +227,7 @@ enum SelfTest {
         check("cut through an edge", cut.map { abs($0.angle - 90) < 0.01 && $0.loops.count == 1 } == true, cut.map { String(format: "%.1f° · %d loops", $0.angle, $0.loops.count) } ?? "none")
 
         let block = Part(node: .primitive(Primitive(kind: .box, size: [30, 30, 20])), place: Placement())
-        let bolt = Part(node: .fastener(Fastener(nut: false, size: 4, length: 30, threadOnly: true)), place: Placement())
+        let bolt = Part(node: .fastener(Fastener(kind: .rod, size: 4)), place: Placement())
         let t0 = Date()
         let hole = mesh(.group(op: Int32(BK_SUBTRACT), parts: [block, bolt]))
         check("threaded hole", hole?.valid == true && (hole?.volume ?? 0) < 18000 - 600 && manifold(hole!), String(format: "%.1f s · %.2f mm³", Date().timeIntervalSince(t0), hole?.volume ?? 0))
@@ -213,7 +235,8 @@ enum SelfTest {
         var doc = Document()
         let mixed = SIMD3<UInt8>(12, 34, 56)
         doc.bodies = [Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2)),
-                      Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(nut: false, size: 4, length: 30, threadOnly: false)), place: Placement(move: SIMD3(40, 0, 15))),
+                      Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(40, 0, 15))),
+                      Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10))),
                       Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
                       Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
                                                                  picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
@@ -294,6 +317,21 @@ enum SelfTest {
         while saved == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
 
+        // Renaming: a saved file is renamed where it is and a name already taken is refused; an unsaved document keeps the
+        // name for saving.
+        lib.renameDocument("renamed")
+        let renamed = dir.appendingPathComponent("renamed.3mf")
+        check("renaming a saved document renames its file", lib.fileURL == renamed && lib.title == "renamed"
+              && FileManager.default.fileExists(atPath: renamed.path) && !FileManager.default.fileExists(atPath: copy.path))
+        try? Data().write(to: dir.appendingPathComponent("taken.3mf"))
+        lib.note = nil
+        lib.renameDocument("taken")
+        check("a name already taken is refused", lib.fileURL == renamed && lib.note == L("A file named “{name}” already exists", ["name": "taken.3mf"]), lib.note ?? "")
+        lib.fileURL = nil
+        lib.renameDocument(" Bracket / v2 ")
+        check("an unsaved document keeps a new name", lib.title == "Bracket - v2", lib.title)
+        lib.docName = nil
+
         // Resizing: a new size keeps the left, front and bottom sides (or the middle), roundings go along, drags stretch one
         // side, several shapes stretch along one axis only, and nothing drops to the bed.
         func settle() {
@@ -344,6 +382,37 @@ enum SelfTest {
         lib.stretch([left.id: left.place, right.id: right.place], axis: 0, by: 2, uniform: false, symmetric: false)
         check("several shapes stretch along one axis only", near(bounds(left.id).0, SIMD3(-30, -10, 0)) && near(bounds(left.id).1, SIMD3(10, 10, 20))
               && near(bounds(right.id).0, SIMD3(50, -10, 0)) && near(bounds(right.id).1, SIMD3(90, 10, 20)))
+
+        // Turning a raised shape leaves it where it is, as resizing does, with dropping onto the bed on.
+        let raisedBox = Solid(name: "Raised", color: Palette.colors[2], node: box, place: Placement(move: SIMD3(0, 0, 40)))
+        use([raisedBox])
+        lib.settings.dropToBed = true
+        lib.selection = [raisedBox.id]
+        lib.gizmo = .rotate
+        lib.setPlace(raisedBox.id) { $0.turn.x = 45 }
+        lib.finishTransform()
+        settle()
+        lib.gizmo = .move
+        let turnedLow = bounds(raisedBox.id).0.z
+        check("a turned shape stays up", abs(turnedLow - (40 - 10 * sqrt(2))) < 0.01, String(format: "bottom at %.2f", turnedLow))
+        // A turned shape's box takes in every point of its mesh, and follows a new turn.
+        let turnedBolt = Solid(name: "Turned bolt", color: Palette.colors[3], node: .fastener(Fastener(kind: .hex, size: 0)),
+                               place: Placement(move: SIMD3(0, 0, 30), turn: SIMD3(33, 21, 0)))
+        use([turnedBolt])
+        func everyPoint(of b: Solid) -> (SIMD3<Double>, SIMD3<Double>) {
+            var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
+            for v in lib.meshes[b.id]?.vertices ?? [] {
+                let w = b.place.matrix * SIMD4(Double(v.x), Double(v.y), Double(v.z), 1)
+                lo = simd_min(lo, SIMD3(w.x, w.y, w.z))
+                hi = simd_max(hi, SIMD3(w.x, w.y, w.z))
+            }
+            return (lo, hi)
+        }
+        let first = bounds(turnedBolt.id), firstWant = everyPoint(of: turnedBolt)
+        lib.setPlace(turnedBolt.id) { $0.turn.z = 50 }
+        let second = bounds(turnedBolt.id), secondWant = lib.body(turnedBolt.id).map(everyPoint) ?? (.zero, .zero)
+        check("a turned shape's box holds all of it and follows a new turn", near(first.0, firstWant.0, 1e-9) && near(first.1, firstWant.1, 1e-9)
+              && near(second.0, secondWant.0, 1e-9) && near(second.1, secondWant.1, 1e-9) && !near(first.0, second.0))
         lib.selection = []
         lib.addThread()
         settle()
@@ -430,6 +499,35 @@ enum SelfTest {
               && abs(fromNorth.yaw - .pi) < 1e-4 && abs(fromNorth.pitch) < 1e-4 && near(SIMD3<Double>(fromNorth.target), SIMD3(0, 0, 10), 0.01)
               && fromNorth.distance > fromTop.distance && steady(below),
               String(format: "top %.3f/%.3f, north %.3f/%.3f", fromTop.yaw, fromTop.pitch, fromNorth.yaw, fromNorth.pitch))
+
+        // The split plane's square holds every cut through the selection, however far the plane is tilted and moved.
+        lib.selection = [westBox.id, eastBox.id]
+        var uncovered = 0
+        let lo = simd_min(bounds(westBox.id).0, bounds(eastBox.id).0), hi = simd_max(bounds(westBox.id).1, bounds(eastBox.id).1)
+        let corners = (0..<8).map { i in SIMD3(i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z) }
+        for axis in 0..<3 {
+            for tilt in [SIMD2(0.0, 0), SIMD2(80, 0), SIMD2(-45, 70), SIMD2(80, -80)] {
+                for offset in [-30.0, 0, 25] {
+                    lib.splitAxis = axis
+                    lib.splitTilt = tilt
+                    lib.splitOffset = offset
+                    guard let plane = lib.splitPlane else { uncovered += 1; continue }
+                    let (c, half) = lib.splitPatch(plane)
+                    for i in 0..<8 {
+                        for j in 0..<8 where i < j && (i ^ j).nonzeroBitCount == 1 {
+                            let a = simd_dot(corners[i] - plane.point, plane.normal), b = simd_dot(corners[j] - plane.point, plane.normal)
+                            guard a * b <= 0, a != b else { continue }
+                            let q = corners[i] + (corners[j] - corners[i]) * (a / (a - b))
+                            if simd_length(q - c) > half + 1e-9 { uncovered += 1 }
+                        }
+                    }
+                }
+            }
+        }
+        lib.splitAxis = 2
+        lib.splitTilt = .zero
+        lib.splitOffset = 0
+        check("the split plane covers every cut through the selection", uncovered == 0, "\(uncovered) points outside")
 
         // Angles on a shape with rounded edges: a 2 mm bevel beside the rounding goes in.
         let upstanding = Solid(name: "Upright", color: Palette.colors[3], node: upright, place: Placement(move: SIMD3(0, 0, 10)))
