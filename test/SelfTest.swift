@@ -36,13 +36,15 @@ enum SelfTest {
             let cm = mesh(cubeNode), cyl = mesh(canNode)
             let px = cm?.faceInfo.firstIndex { $0.normal.x > 0.9 } ?? -1, nx = cm?.faceInfo.firstIndex { $0.normal.x < -0.9 } ?? -1
             let side = cyl?.faceInfo.firstIndex { abs($0.normal.z) < 0.1 } ?? -1
+            // An upright edge (engines number edges differently).
+            let standing = Int32(cm?.edges.firstIndex { e in (e.map(\.z).max() ?? 0) - (e.map(\.z).min() ?? 0) > 1 } ?? 0)
             func at(_ x: Double, _ sx: Double = 1) -> [Double] { Placement(move: SIMD3(x, 0, 0), scale: SIMD3(sx, 1, 1)).kernel }
             func face(_ n: Node, _ f: Int, _ place: [Double]) -> GapEnd { GapEnd(kind: Int32(BK_END_FACE), index: Int32(f), node: n, place: place, point: [0, 0, 0]) }
             let gaps = [
                 k.distance(face(cubeNode, px, at(0)), face(cubeNode, nx, at(25)))?.distance,
                 k.distance(GapEnd(kind: Int32(BK_END_POINT), point: [10, 10, 10]), face(cubeNode, nx, at(25)))?.distance,
-                k.distance(GapEnd(kind: Int32(BK_END_EDGE), index: 0, node: cubeNode, place: at(0), point: [0, 0, 0]),
-                           GapEnd(kind: Int32(BK_END_EDGE), index: 0, node: cubeNode, place: at(30), point: [0, 0, 0]))?.distance,
+                k.distance(GapEnd(kind: Int32(BK_END_EDGE), index: standing, node: cubeNode, place: at(0), point: [0, 0, 0]),
+                           GapEnd(kind: Int32(BK_END_EDGE), index: standing, node: cubeNode, place: at(30), point: [0, 0, 0]))?.distance,
                 k.distance(face(cubeNode, px, at(0, 2)), face(cubeNode, nx, at(45)))?.distance,
                 k.distance(face(cubeNode, px, at(0)), face(canNode, side, at(30)))?.distance
             ]
