@@ -6131,6 +6131,27 @@
   "zh-Hans": "此边无法以剖面显示",
   "ja": "このエッジは断面で表示できません"
  },
+ "This edge is smooth: there's no corner to work on": {
+  "uk": "Це ребро гладке: тут немає кута для обробки",
+  "cs": "Tato hrana je hladká: není tu roh k úpravě",
+  "de": "Diese Kante ist glatt: Hier gibt es keine Ecke zu bearbeiten",
+  "es": "Esta arista es suave: no hay esquina que trabajar",
+  "fr": "Cette arête est lisse : il n'y a pas d'angle à travailler",
+  "it": "Questo spigolo è liscio: non c'è un angolo da lavorare",
+  "hu": "Ez az él sima: nincs itt megmunkálható sarok",
+  "nl": "Deze rand is glad: er is geen hoek om te bewerken",
+  "nb": "Denne kanten er glatt: det er ikke noe hjørne å bearbeide",
+  "pl": "Ta krawędź jest gładka: nie ma tu narożnika do obróbki",
+  "ro": "Această muchie este netedă: nu există niciun colț de prelucrat",
+  "fi": "Tämä reuna on sileä: siinä ei ole kulmaa muokattavaksi",
+  "sv": "Den här kanten är jämn: det finns inget hörn att bearbeta",
+  "kk": "Бұл қыр тегіс: өңдейтін бұрыш жоқ",
+  "ka": "ეს წიბო გლუვია: დასამუშავებელი კუთხე არ არის",
+  "ar": "هذه الحافة ملساء: لا توجد زاوية للعمل عليها",
+  "hi": "यह किनारा चिकना है: यहाँ काम करने के लिए कोई कोना नहीं है",
+  "zh-Hans": "此边是平滑的：没有可处理的棱角",
+  "ja": "このエッジは滑らかです：加工する角がありません"
+ },
  "This face": {
   "uk": "Ця грань",
   "cs": "Tato plocha",

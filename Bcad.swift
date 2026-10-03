@@ -547,6 +547,16 @@ indirect enum Node: Codable, Hashable, Sendable {
         }
     }
 
+    // The same shape with its roundings, bevels and inward roundings left out, inside merged parts too (hollows and cuts
+    // kept).
+    var untreated: Node {
+        switch self {
+        case .round(let n, _, _), .cove(let n, _, _), .bevel(let n, _, _, _): n.untreated
+        case .group(let op, let parts): .group(op: op, parts: parts.map { var p = $0; p.node = p.node.untreated; return p })
+        default: inner.map { wrapping($0.untreated) } ?? self
+        }
+    }
+
     func replacingBase(_ f: (Node) -> Node) -> Node {
         if let n = inner { return wrapping(n.replacingBase(f)) }
         return f(self)
@@ -957,22 +967,37 @@ final class Kernel: @unchecked Sendable {
     // (as it was before, sharp) and its other edges. It is the first layer, outermost first, before which the clicked point
     // wasn't on the shape's surface (nor facing the same way); a merge's parts are looked into, the one whose surface the
     // point is on. Nil on a face the shape had before any treatment (or one a hollow or a cut made).
-    func treatedAt(_ node: Node, _ p: SIMD3<Double>) -> Spot? {
+    // With `edge`, p is a clicked edge's middle, and the layer is the first before which the shape had no edge there (a
+    // rounding's seams, a bevel's borders).
+    func treatedAt(_ node: Node, _ p: SIMD3<Double>, edge: Bool = false) -> Spot? {
         // On the finely meshed surface (a click lands on the coarser one shown), so faces kept as they were match closely.
-        guard let top = mesh(node, deflection: 0.01), let hit = Self.nearest(top, p) else { return nil }
+        guard let top = mesh(node, deflection: 0.01) else { return nil }
+        if edge {
+            guard let e = Self.nearestEdgeAt(top, p) else { return nil }
+            return treatedAt(node, e.point, nil, path: [])
+        }
+        guard let hit = Self.nearest(top, p) else { return nil }
         return treatedAt(node, hit.point, hit.normal, path: [])
     }
 
-    private func treatedAt(_ node: Node, _ p: SIMD3<Double>, _ facing: SIMD3<Double>, path: [Int]) -> Spot? {
+    // `facing` nil: p is on an edge, looked for as an edge.
+    private func treatedAt(_ node: Node, _ p: SIMD3<Double>, _ facing: SIMD3<Double>?, path: [Int]) -> Spot? {
         var level = 0
         var n: Node? = node
         while let c = n {
             if let inner = c.inner {
-                guard let m = mesh(inner, deflection: 0.01), let hit = Self.nearest(m, p) else { return nil }
-                if hit.distance > 0.04 || simd_dot(hit.normal, facing) < cos(5 * Double.pi / 180) {
+                guard let m = mesh(inner, deflection: 0.01) else { return nil }
+                let gone: Bool
+                if let facing {
+                    guard let hit = Self.nearest(m, p) else { return nil }
+                    gone = hit.distance > 0.04 || simd_dot(hit.normal, facing) < cos(5 * Double.pi / 180)
+                } else {
+                    gone = (Self.nearestEdgeAt(m, p)?.distance ?? .infinity) > 0.04
+                }
+                if gone {
                     switch c {
                     case .round, .cove, .bevel:
-                        guard let edge = Self.nearestEdge(m, p) else { return nil }
+                        guard let edge = madeOn(c, m, p) else { return nil }
                         return Spot(path: path, level: level, edges: [edge], rest: [], layer: c)
                     default:
                         return nil
@@ -982,8 +1007,10 @@ final class Kernel: @unchecked Sendable {
                 for (i, part) in parts.enumerated() {
                     // In the part's own frame (normals carried by the transpose).
                     let q = (part.place.matrix.inverse * SIMD4(p, 1)).xyz
-                    let f = simd_normalize((simd_transpose(part.place.matrix) * SIMD4(facing, 0)).xyz)
-                    guard let m = mesh(part.node, deflection: 0.01), let hit = Self.nearest(m, q), hit.distance < 0.06 else { continue }
+                    let f = facing.map { simd_normalize((simd_transpose(part.place.matrix) * SIMD4($0, 0)).xyz) }
+                    guard let m = mesh(part.node, deflection: 0.01) else { continue }
+                    let near = f == nil ? Self.nearestEdgeAt(m, q)?.distance : Self.nearest(m, q)?.distance
+                    guard (near ?? .infinity) < 0.06 else { continue }
                     if let s = treatedAt(part.node, q, f, path: path + [level, i]) { return s }
                 }
                 return nil
@@ -992,6 +1019,30 @@ final class Kernel: @unchecked Sendable {
             level += 1
         }
         return nil
+    }
+
+    // The edge a layer worked on nearest p, as it was before (sharp): among the edges the layer's picks name, so another
+    // edge of a narrow face beside it isn't taken for it.
+    private func madeOn(_ layer: Node, _ m: Mesh, _ p: SIMD3<Double>) -> Pick? {
+        let own = rest(of: layer, without: []).map(\.a)
+        return (Self.nearestEdgeAt(m, p, through: own) ?? Self.nearestEdgeAt(m, p))?.pick
+    }
+
+    // Whether the faces either side of a picked edge meet smoothly there: no corner to work on.
+    func smooth(_ node: Node, _ pick: Pick) -> Bool {
+        guard let m = mesh(node, deflection: 0.01), let e = Self.nearestEdgeAt(m, pick.a), e.distance < 0.1 else { return false }
+        let faces = m.edgeFaces[e.index]
+        // Each side's nearest point of the mesh on the edge, and which way the surface faces there.
+        var best = [Double.infinity, .infinity], normal = [SIMD3<Double>.zero, .zero]
+        for (i, v) in m.vertices.enumerated() {
+            let f = Int32(v.w), side = f == faces.x ? 0 : f == faces.y ? 1 : -1
+            let q = SIMD3<Double>(v.xyz)
+            guard side >= 0, simd_length(Self.onEdge(m.edges[e.index], q) - q) < 1e-3 else { continue }
+            let d = simd_length(q - e.point)
+            if d < best[side] { best[side] = d; normal[side] = SIMD3<Double>(m.normals[i].xyz) }
+        }
+        guard best.allSatisfy(\.isFinite), simd_length(normal[0]) > 0, simd_length(normal[1]) > 0 else { return false }
+        return simd_dot(simd_normalize(normal[0]), simd_normalize(normal[1])) > cos(2 * Double.pi / 180)
     }
 
     // A layer's edges (one edge pick each, on the shape before it) but the ones given.
@@ -1048,22 +1099,36 @@ final class Kernel: @unchecked Sendable {
         return a + ab * (vb * den) + ac * (vc * den)
     }
 
+    // The point of an edge's line nearest p.
+    static func onEdge(_ e: [SIMD3<Float>], _ p: SIMD3<Double>) -> SIMD3<Double> {
+        var best = Double.infinity, point = p
+        for k in 1..<e.count {
+            let a = SIMD3<Double>(e[k - 1]), b = SIMD3<Double>(e[k]), ab = b - a
+            let t = simd_dot(ab, ab) > 0 ? max(0, min(1, simd_dot(p - a, ab) / simd_dot(ab, ab))) : 0
+            let q = a + ab * t
+            if simd_length(p - q) < best { best = simd_length(p - q); point = q }
+        }
+        return point
+    }
+
     // The mesh's edge between two faces nearest p, as an edge pick.
-    static func nearestEdge(_ m: Mesh, _ p: SIMD3<Double>) -> Pick? {
-        var best = Double.infinity, hit = -1
+    static func nearestEdge(_ m: Mesh, _ p: SIMD3<Double>) -> Pick? { nearestEdgeAt(m, p)?.pick }
+
+    // The same, with which edge it is, how far and its point nearest p; with `through`, only edges passing within 0.04 of
+    // one of those points.
+    static func nearestEdgeAt(_ m: Mesh, _ p: SIMD3<Double>, through: [SIMD3<Double>]? = nil)
+        -> (index: Int, distance: Double, point: SIMD3<Double>, pick: Pick)? {
+        var best = Double.infinity, hit = -1, point = p
         for (i, e) in m.edges.enumerated() where e.count > 1 && i < m.edgeFaces.count {
             let f = m.edgeFaces[i]
             guard f.x >= 0, f.y >= 0, f.x != f.y else { continue }
-            for k in 1..<e.count {
-                let a = SIMD3<Double>(e[k - 1]), b = SIMD3<Double>(e[k]), ab = b - a
-                let t = simd_dot(ab, ab) > 0 ? max(0, min(1, simd_dot(p - a, ab) / simd_dot(ab, ab))) : 0
-                let d = simd_length(p - (a + ab * t))
-                if d < best { best = d; hit = i }
-            }
+            if let through, !through.contains(where: { simd_length(onEdge(e, $0) - $0) < 0.04 }) { continue }
+            let q = onEdge(e, p), d = simd_length(p - q)
+            if d < best { best = d; hit = i; point = q }
         }
         guard hit >= 0 else { return nil }
         let (mid, dir) = Picking.midpoint(m.edges[hit])
-        return Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3<Double>(mid), b: SIMD3<Double>(dir))
+        return (hit, best, point, Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3<Double>(mid), b: SIMD3<Double>(dir)))
     }
 
     // The shape cut across a picked edge, for the 2D angle editor.
@@ -2660,20 +2725,24 @@ final class Workbench: DesignHost {
             // Clicks on treated faces: the layers they lead to, each layer's clicked edges together.
             var spots: [Spot] = [], fresh: [Pick] = []
             for pk in picks {
-                guard let at = points[pk], let s = k.treatedAt(node, at) else { fresh.append(pk); continue }
+                // An edge clicked by its line, a face by the point clicked.
+                let edge = pk.kind == Int32(BK_PICK_EDGE)
+                guard let at = edge ? pk.a : points[pk], let s = k.treatedAt(node, at, edge: edge) else { fresh.append(pk); continue }
                 if let i = spots.firstIndex(where: { $0.path == s.path && $0.level == s.level }) { spots[i].edges += s.edges } else { spots.append(s) }
             }
             for i in spots.indices { spots[i].rest = k.rest(of: spots[i].layer, without: spots[i].edges) }
             // The cut: across the first clicked edge, as it was (sharp) when it's an earlier treatment's.
             let sharp = fresh.first != first ? spots.first : nil
-            let section = sharp.flatMap { s in s.layer.inner.flatMap { k.section($0, s.edges[0]) } } ?? (sharp == nil ? k.section(node, first) : nil)
+            // A smooth seam no treatment made has no corner to cut across.
+            let smooth = sharp == nil && first.kind == Int32(BK_PICK_EDGE) && k.smooth(node, first)
+            let section = smooth ? nil : sharp.flatMap { s in s.layer.inner.flatMap { k.section($0, s.edges[0]) } } ?? (sharp == nil ? k.section(node, first) : nil)
             let frame = sharp.map { Self.frame(node, $0.path) } ?? matrix_identity_double4x4
             let edits = spots, sharpPicks = fresh
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let section, self.mode == .angles, let b = self.body(id) else {
                         self.angleOpening = false
-                        if section == nil { self.flash(L("This edge can't be shown in a cut")) }
+                        if section == nil { self.flash(L(smooth ? "This edge is smooth: there's no corner to work on" : "This edge can't be shown in a cut")) }
                         return
                     }
                     let m = b.place.matrix * frame
@@ -2772,12 +2841,12 @@ final class Workbench: DesignHost {
     }
 
     // Every edge treated: each run of treatments one over another (between hollows and cuts) made this one, of every
-    // edge, in their place; with none, on top.
+    // edge, in their place; with none, on top. Merged parts' own treatments are left out (this one takes their edges).
     func everyEdge(_ node: Node, _ e: AngleEdit) -> Node {
         var layers: [Node] = []
         var n: Node? = node
         while let c = n { layers.append(c); n = c.inner }
-        guard var result = layers.last else { return node }
+        guard var result = layers.last?.untreated else { return node }
         var pending = false, any = false
         for layer in layers.dropLast().reversed() {
             switch layer {

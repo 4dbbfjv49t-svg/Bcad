@@ -1091,6 +1091,38 @@ enum SelfTest {
         settle()
         check("all edges: an earlier rounding is replaced, not rounded over", lib.body(once.id)?.node == .round(of: box, picks: [everyPick], radius: 1))
 
+        // A click on the line where a rounding meets a face (smoothly), or on a bevel's border, finds that treatment and the
+        // edge it was made on; an edge no treatment made is worked on as it is.
+        let seam = k.queue.sync { k.treatedAt(once.node, SIMD3(0, -8, 10), edge: true) }
+        check("a click on a rounding's seam finds the rounding and its sharp edge", seam?.level == 0 && seam?.path.isEmpty == true
+              && simd_length((seam?.edges.first?.a ?? .zero) - SIMD3(0, -10, 10)) < 0.5, "\(String(describing: seam?.edges))")
+        let bevelled = Node.bevel(of: box, picks: [roundEdge], legs: SIMD2(2, 2), corner: 0)
+        let border = k.queue.sync { k.treatedAt(bevelled, SIMD3(0, -10, 8), edge: true) }
+        check("a click on a bevel's border finds the bevel and its sharp edge", border?.layer == bevelled
+              && simd_length((border?.edges.first?.a ?? .zero) - SIMD3(0, -10, 10)) < 0.5, "\(String(describing: border?.edges))")
+        let untouched = k.queue.sync { k.treatedAt(once.node, SIMD3(0, 10, 10), edge: true) }
+        check("an edge no treatment made is worked on as it is", untouched == nil)
+        let seamPick = Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3(0, -8, 10), b: SIMD3(1, 0, 0)), backPick = Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3(0, 10, 10), b: SIMD3(1, 0, 0))
+        let smoothSeam = k.queue.sync { k.smooth(once.node, seamPick) }, sharpBack = k.queue.sync { k.smooth(once.node, backPick) }
+        check("a smooth seam is told from a corner", smoothSeam && !sharpBack, "seam \(smoothSeam), corner \(sharpBack)")
+
+        // "All edges" of a merge of two rounded boxes: the parts' own roundings are left out, the merge rounded all round.
+        let roundedBox = Node.round(of: box, picks: [everyPick], radius: 2)
+        let pair = Solid(name: "Pair", color: Palette.colors[1], node: .group(op: Int32(BK_UNION), parts: [Part(node: roundedBox, place: Placement()),
+                         Part(node: roundedBox, place: Placement(move: SIMD3(15, 0, 0)))]), place: Placement(move: SIMD3(0, 0, 10)))
+        use([pair])
+        var pairEdges = AngleEdit(body: pair.id, picks: [everyPick], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(1, 0, 0)))
+        pairEdges.radius = 1
+        lib.angleEdit = pairEdges
+        lib.note = nil
+        lib.applyAngles(whole: true)
+        settle()
+        let plainParts: Bool = {
+            guard case .round(.group(_, let parts), _, let r) = lib.body(pair.id)?.node else { return false }
+            return r == 1 && parts.count == 2 && parts.allSatisfy { $0.node == box }
+        }()
+        check("all edges of a merge: its parts' roundings are replaced too", plainParts && lib.note == nil, lib.note ?? "")
+
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")
