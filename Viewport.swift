@@ -769,9 +769,11 @@ enum Picking {
         return hit
     }
 
-    // A face that meets no other face along any edge: the whole surface of its shape (a sphere's, a torus's).
+    // A face that meets no other face along any edge: the whole surface of its shape (a sphere's, a torus's). A shape of
+    // one face is one, edges or none (Bcad's own engine draws no seam round a ball).
     static func alone(_ m: Mesh, _ face: Int) -> Bool {
         let f = Int32(face)
+        if m.faceInfo.count == 1 { return true }
         return !m.edgeFaces.isEmpty && !m.edgeFaces.contains { ($0.x == f && $0.y >= 0 && $0.y != f) || ($0.y == f && $0.x >= 0 && $0.x != f) }
     }
 

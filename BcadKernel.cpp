@@ -1400,10 +1400,23 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
       TopExp::MapShapes(x, TopAbs_FACE, faces);
       double tol = pickTolerance(x);
       auto face = [&](const double *q) { return findFace(faces, gp_Vec(q[0], q[1], q[2]), gp_Pnt(q[3], q[4], q[5]), tol); };
+      // A face meeting no other along any edge is the whole surface of its piece (a ball's, a ring's): opened, nothing of
+      // the piece would be left, so it stays shut.
+      TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+      TopExp::MapShapesAndAncestors(x, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+      auto bounded = [&](const TopoDS_Face &f) {
+        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+          int i = edgeFaces.FindIndex(ex.Current());
+          if (i == 0) continue;
+          for (const TopoDS_Shape &g : edgeFaces(i))
+            if (!g.IsSame(f)) return true;
+        }
+        return false;
+      };
       for (int i = 0; i < openCount; i++) {
         TopoDS_Face f = face(open + i * 6);
         if (f.IsNull()) lost++;
-        else openings.push_back(f);
+        else if (bounded(f)) openings.push_back(f);
       }
       for (int i = 0; i < wallCount; i++) {
         TopoDS_Face f = face(walls + i * 6);

@@ -33,6 +33,13 @@ FaceGeom flipped(FaceGeom g) {
   return g;
 }
 
+// Whether face f meets another face along some edge (else it's the whole surface of its piece).
+bool bounded(const Solid &s, int f) {
+  for (const auto &e : s.edges)
+    if ((e.f0 == f && e.f1 >= 0 && e.f1 != f) || (e.f1 == f && e.f0 >= 0 && e.f0 != f)) return true;
+  return false;
+}
+
 // How far a part's face moves in (less than zero: out). Growing (a part taken away), every face moves out by its wall;
 // in a merge, common part or cut (`inBool`), a face that doesn't show in the shape moves out.
 double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inBool) {
@@ -502,7 +509,9 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
   for (size_t i = 0; i + 5 < h.open.size(); i += 6) {
     int f = faceAt(whole, &h.open[i]);
     if (f < 0) lost++;
-    else rules.open.push_back(whole.faces[f].geom);
+    // A face meeting no other along any edge is the whole surface of its piece (a ball's, a ring's): opened, nothing of
+    // the piece would be left, so it stays shut.
+    else if (bounded(whole, f)) rules.open.push_back(whole.faces[f].geom);
   }
   for (size_t i = 0; i + 5 < h.walls.size() && i / 6 < h.wallThickness.size(); i += 6) {
     int f = faceAt(whole, &h.walls[i]);

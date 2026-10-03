@@ -844,6 +844,11 @@ int main() {
     is("hollow: a cylinder open at the top", hollow(cyl, top, 1, nullptr, nullptr, 0, 1.5), PI * (100 * 20 - 8.5 * 8.5 * 18.5), 1e-3, 5);
     double s20[1] = {20};
     is("hollow: a ball", hollow(keep(bk_primitive(BK_SPHERE, s20)), nullptr, 0, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);
+    // A ball's one face is its whole surface: opened, nothing would be left, so it stays shut (a round torus's alike).
+    double ballFace[6] = {0, 0, 1, 0, 0, 10}, ring[3] = {0, 30, 8}, ringFace[6] = {0, 0, 1, 11, 0, 4};
+    is("hollow: a ball's face picked to open stays shut", hollow(keep(bk_primitive(BK_SPHERE, s20)), ballFace, 1, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);
+    is("hollow: a round torus's face picked to open stays shut", hollow(keep(bk_primitive(BK_TORUS, ring)), ringFace, 1, nullptr, nullptr, 0, 1),
+       2 * PI * PI * 11 * (16 - 9), 0.05, 2);
     BKShape *thick = hollow(box, top, 1, nullptr, nullptr, 0, 12);
     check("hollow: walls too thick are refused", !thick, thick ? "made" : bk_last_error());
     BKShape *roundAll = keep(bk_fillet(box, &kb, body, 1, 2, &mr, &miss));
