@@ -2537,6 +2537,12 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
             outlines.push_back(pointsOf(per[i][k], chords, i == 0 ? &runOf : nullptr));
             radii.push_back(radiiOf(per[i][k], runOf));
           }
+          // Sections that change their make along the run (a run more or fewer somewhere): no tool sweeps between them.
+          for (const auto &o : outlines)
+            if (o.size() != outlines[0].size()) {
+              tooLarge();
+              return false;
+            }
           if (!c.closed) {
             for (int end = 0; end < 2; end++) {
               size_t i = end == 0 ? 0 : n - 1;
