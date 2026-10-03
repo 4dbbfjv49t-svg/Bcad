@@ -129,14 +129,26 @@ Solid cut(const Solid &s, V3 p, V3 n, int side) {
       global[i] = q;
     }
     for (auto &e : outline) fillIn.keep(local[e.first], local[e.second]);
+    // Points the triangulation made where two pieces of the outline crossed (pieces a hair apart, crossed by rounding):
+    // put on the first piece in space too, in the order they were made (one can lie on another).
+    if (fillIn.count() > (int)global.size()) global.resize(fillIn.count(), UINT32_MAX);
+    for (int i = 0; i < fillIn.count(); i++) {
+      auto it = fillIn.made().find(i);
+      if (it == fillIn.made().end()) continue;
+      V3 r = out.pts[global[it->second.r]], l = out.pts[global[it->second.l]];
+      global[i] = (uint32_t)out.pts.size();
+      out.pts.push_back(r + (l - r) * it->second.s);
+    }
     std::vector<int> tris = fillIn.insideKept();
     int f = (int)result.faces.size();
     Solid::Face face;
     face.normal = c;
     face.geom.kind = FaceGeom::Flat, face.geom.flat = true, face.geom.pn = c, face.geom.pd = dot(c, p);
     result.faces.push_back(face);
-    for (size_t k = 0; k < tris.size(); k += 3)
-      emit(global[tris[k]], global[tris[k + 1]], global[tris[k + 2]], c, c, c, (uint32_t)f, -1);
+    for (size_t k = 0; k < tris.size(); k += 3) {
+      uint32_t a = global[tris[k]], b = global[tris[k + 1]], d = global[tris[k + 2]];
+      if (a != UINT32_MAX && b != UINT32_MAX && d != UINT32_MAX) emit(a, b, d, c, c, c, (uint32_t)f, -1);
+    }
   }
   unweld(out, result);
   return result;

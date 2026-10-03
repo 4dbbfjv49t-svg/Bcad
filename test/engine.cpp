@@ -820,6 +820,54 @@ int main() {
     // OpenCascade's 3309.562 mm³: the cube rounded 1 mm up its sides, 2 mm round its top, its top open.
     is("hollow: sides and top rounded differently, the top open", hollow(keep(bk_fillet(up1, &kf, top, 1, 2, &mr, &miss)), top, 1, nullptr, nullptr, 0, 2, box), 3309.562, 1);
     printf("  hollows in %.0f ms\n", ms(t0));
+
+    // Found by running random shapes through this engine and OpenCascade's side by side.
+    {
+      // Where three smooth edges meet: no run walked twice (it read past an empty one).
+      double ball[1] = {21.0713}, p[3] = {-1.25366, -0.358263, -1.36067}, n[3] = {-0.965991, -0.691866, -0.395964};
+      double pick[6] = {-4.14527, -2.43209, 9.31728, -0.576288, 0.816962, -0.0215704};
+      BKShape *half = keep(bk_split(keep(bk_primitive(BK_SPHERE, ball)), p, n, 0));
+      BKShape *rounded = keep(bk_fillet(half, &ke, pick, 1, 1.64806, &mr, &miss));
+      BKShape *bevelled = rounded ? bk_chamfer(rounded, &kb, body, 1, 1.38121, 0.93435, 0, &miss) : nullptr;
+      check("a rounded half ball bevelled all round: made or said no, never a crash", rounded != nullptr, bevelled ? "made" : bk_last_error());
+      if (bevelled) bk_free(bevelled);
+      // A rounding's tool touching a face along a line: its crossings there come out loosely, and are made one.
+      double cone[3] = {24.7353, 18.4702, 11.8902};
+      is("round: a cone's rims at a radius whose crossings come out a hair apart (OpenCascade's 4357.4627)", bk_fillet(keep(bk_primitive(BK_CONE, cone)), &kb, body, 1, 0.937602, &mr, &miss), 4357.4627, 0.01, 5);
+      // A wedge's edges: how much they may take, from its faces shrunk by the roundings (the end's in-circle), not halves.
+      double wedge[3] = {21.7653, 9.62249, 13.3893};
+      BKShape *w = keep(bk_primitive(BK_WEDGE, wedge));
+      is("round: a wedge all round, close to the most it takes (OpenCascade's 493.5294)", bk_fillet(w, &kb, body, 1, 3.79, &mr, &miss), 493.5294, 1e-3);
+      BKShape *over = bk_fillet(w, &kb, body, 1, 3.85, &mr, &miss);
+      check("round: a wedge's ends hold no more than their in-circle", !over && near(mr, 3.79, 0.011), over ? "made" : fmt("most %.2f", mr));
+      if (over) bk_free(over);
+      // A ring's face curved in its cut (a half ball's dome): the rounding meets the dome, not its tangent at the rim.
+      double dome[1] = {21.8554}, R = dome[0] / 2, r = 2.02357, cx = std::sqrt((R - r) * (R - r) - r * r), tz = r * R / std::hypot(cx, r);
+      double cut = 0;
+      for (int i = 0, n = 200000; i < n; i++) {
+        double z = (i + 0.5) * tz / n, xs = std::sqrt(std::max(R * R - z * z, 0.0)), xf = cx + std::sqrt(std::max(r * r - (z - r) * (z - r), 0.0));
+        if (xs > xf) cut += PI * (xs * xs - xf * xf) * tz / n;
+      }
+      is("round: a half ball's rim", bk_fillet(keep(bk_primitive(BK_HEMISPHERE, dome)), &kb, body, 1, r, &mr, &miss), 2 * PI / 3 * R * R * R - cut, 0.05, 3);
+      // Walls moved in by their thickness along the face's own normal (a dome's or a cone's slant too).
+      double h21[1] = {21.4096}, Rh = h21[0] / 2, th = 2.403, cap = Rh - 2 * th;
+      is("hollow: a half ball", hollow(keep(bk_primitive(BK_HEMISPHERE, h21)), nullptr, 0, nullptr, nullptr, 0, th),
+         2 * PI / 3 * Rh * Rh * Rh - PI * cap * cap * (3 * (Rh - th) - cap) / 3, 1e-3);
+      // An oval's side moved in: no oval, but its exact area all the same (the oval's, less the wall times its length round,
+      // plus π times the wall squared).
+      double ov[4] = {17.8737, 10.0376, 90, 17.6743}, a = ov[0] / 2, b = ov[1] / 2, h = ov[3], t = 0.910856, round = 0;
+      for (int k = 0, n = 100000; k < n; k++) round += std::hypot(a * std::sin(2 * PI * (k + 0.5) / n), b * std::cos(2 * PI * (k + 0.5) / n)) * 2 * PI / n;
+      is("hollow: an oval", hollow(keep(bk_primitive(BK_OVAL, ov)), nullptr, 0, nullptr, nullptr, 0, t), PI * a * b * h - (PI * a * b - t * round + PI * t * t) * (h - 2 * t), 1e-3);
+      // A face both opened and given a wall of its own: open (as OpenCascade's kernel takes it).
+      double cy[2] = {25.0234, 25.4184}, cyTop[6] = {0, 0, 1, 0, 0, 12.7092}, three = 3.03;
+      is("hollow: a face both opened and walled is open (OpenCascade's 2680.0055)", hollow(keep(bk_primitive(BK_CYLINDER, cy)), cyTop, 1, cyTop, &three, 1, 1.15996), 2680.0055, 1e-3);
+      // Rounded all round, then bevelled all round: nothing left to bevel (the roundings meet their faces smoothly, a bowl's
+      // inside a hair off its mesh), so as it was.
+      double bowl[2] = {28.7095, 2.81855};
+      BKShape *rb = keep(bk_fillet(keep(bk_primitive(BK_BOWL, bowl)), &kb, body, 1, 0.402626, &mr, &miss));
+      Got before = look(rb);
+      is("bevel: a rounded bowl, every edge (none left sharp)", bk_chamfer(rb, &kb, body, 1, 0.383957, 1.12174, 0, &miss), before.volume, 1e-6);
+    }
     for (BKShape *s : made) bk_free(s);
     bk_free(box);
   }

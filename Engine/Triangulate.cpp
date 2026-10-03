@@ -18,6 +18,9 @@ int Tri2::orient(int a, int b, int c) const { return orient2d(x[a], y[a], x[b], 
 int Tri2::orientPt(int a, int b, double px, double py) const { return orient2d(x[a], y[a], x[b], y[b], px, py); }
 
 int Tri2::add(int a, int b, int c) {
+  // A corner twice (a hole whose outline came back through a point, never expected): no triangle; the hole stays a hair
+  // open rather than the triangulation holding one that isn't.
+  if (a == b || b == c || c == a) return -1;
   int t = (int)tris.size();
   tris.push_back({{a, b, c}, true});
   half.set(key(a, b), t), half.set(key(b, c), t), half.set(key(c, a), t);
@@ -113,7 +116,7 @@ void Tri2::splitEdge(int t, int k, int p) {
       if (tris[u].v[j] != a && tris[u].v[j] != b) d = tris[u].v[j];
   remove(t);
   add(a, p, c), add(p, b, c);
-  if (u >= 0) {
+  if (u >= 0 && d >= 0) {
     remove(u);
     add(b, p, d), add(p, a, d);
   }
@@ -154,9 +157,10 @@ int Tri2::insertOnEdge(int u, int v, double px, double py) {
     t = half.find(key(v, u));
     std::swap(u, v);
   }
-  if (t < 0) return insert(px, py);
+  if (t < 0 || !tris[t].alive) return insert(px, py);
   int k = 0;
-  while (tris[t].v[k] != u) k++;
+  while (k < 3 && tris[t].v[k] != u) k++;
+  if (k == 3) return insert(px, py);
   int p = (int)x.size();
   x.push_back(px), y.push_back(py);
   splitEdge(t, k, p);

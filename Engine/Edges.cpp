@@ -368,6 +368,7 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
         }
       e = next, from = nextEnd;
     }
+    if (parts.empty()) return;
     // Points, and each point's faces: those of the edge it belongs to, A kept on the side of the face the edges share.
     int prevA = -1, prevB = -1;
     for (size_t k = 0; k < parts.size(); k++) {
@@ -412,8 +413,9 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
     std::set<int> seen{e};
     for (;;) {
       int prev = -1, prevEnd = 0;
+      // Not back into a run already walked: where three smooth edges meet, the third starts a run of its own.
       for (int o : onward(cur, end))
-        if (chosen.count(o) && !seen.count(o)) {
+        if (chosen.count(o) && !seen.count(o) && !walked.count(o)) {
           const auto &op = s.edges[o].pts;
           const auto &cp = s.edges[cur].pts;
           V3 at = end == 0 ? cp.front() : cp.back();
@@ -429,10 +431,6 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
   return out;
 }
 
-namespace {
-
-// A point of its own on the run `along` its length (its faces' directions taken between its neighbours'), so a cut there
-// has the run's frame there; its index.
 size_t pointAt(Crease &c, double along) {
   double run = 0;
   for (size_t i = 0; i + 1 < c.pts.size(); i++) {
@@ -453,8 +451,6 @@ size_t pointAt(Crease &c, double along) {
   }
   return c.pts.size() / 2;
 }
-
-}  // namespace
 
 bool creaseAt(const Solid &s, int kind, const double *pick, Crease &out, size_t &at) {
   int missing = 0;

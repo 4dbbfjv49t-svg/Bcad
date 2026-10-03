@@ -72,6 +72,8 @@ struct Solid {
     // The volume between this face's mesh and the exact surface (the mesh lies inside a convex surface): what the mesh's
     // own volume misses here.
     double deficit = 0;
+    // Made by a rounding or an inward rounding: it meets the faces beside it smoothly, however its mesh bends there.
+    bool blend = false;
   };
   std::vector<Face> faces;
   struct Edge {
@@ -230,7 +232,8 @@ bool inside(const Solid &s, V3 q);
 
 // Merges and splits of meshes (Boolean.cpp, Split.cpp), and what's made of their results afterwards (Csg.cpp): faces on
 // one surface joined, edges, corners and circles found again.
-Solid combine(const Solid &a, const Solid &b, int op);
+// merge: crossing points this close (a part of the shapes' size) are one.
+Solid combine(const Solid &a, const Solid &b, int op, double merge = 1e-11);
 Solid cut(const Solid &s, V3 p, V3 n, int side);
 // Whether two faces lie on one surface (one plane facing one way; one turned profile piece in one place).
 bool sameForm(const FaceGeom &a, const FaceGeom &b);

@@ -576,7 +576,7 @@ Welded gridded(const Solid &s, double step) {
 
 }  // namespace
 
-Solid combine(const Solid &sa, const Solid &sb, int op) {
+Solid combine(const Solid &sa, const Solid &sb, int op, double merge) {
   Cutter c;
   {
     double scale = 1;
@@ -612,13 +612,15 @@ Solid combine(const Solid &sa, const Solid &sb, int op) {
   }
   // Crossing points made a hair apart by different roads (an edge through a triangle beside another edge through a
   // triangle, at what is one place) are one point: the triangulations would otherwise have to keep them apart at the
-  // scale of rounding, which they can't.
+  // scale of rounding, which they can't. A hair is `merge` of the shapes' size: 10⁻¹¹ by default; where a rounding's
+  // tool meets a face along the line it touches, its edges lie almost in the face, and where they cross comes out as
+  // loosely as 10⁻⁹.
   {
     size_t made = c.A.w.pts.size() + c.B.w.pts.size();
     if (c.P.size() > made) {
       double scale = 0;
       for (V3 q : c.P) scale = std::max({scale, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
-      double tol = 1e-11 * (1 + scale);
+      double tol = merge * (1 + scale);
       using Cell = std::array<int64_t, 3>;
       auto cell = [&](V3 q) { return Cell{(int64_t)std::floor(q.x / tol), (int64_t)std::floor(q.y / tol), (int64_t)std::floor(q.z / tol)}; };
       std::vector<std::pair<Cell, uint32_t>> grid;

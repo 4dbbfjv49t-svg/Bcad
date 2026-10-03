@@ -19,6 +19,7 @@ namespace {
 constexpr double pi = M_PI;
 
 V3 p2(double u, double v) { return {u, v, 0}; }
+double cross2(V3 a, V3 b) { return a.x * b.y - a.y * b.x; }
 
 // What each face of the shape becomes: its form in place, and how far it moves in.
 struct Rules {
@@ -35,11 +36,13 @@ FaceGeom flipped(FaceGeom g) {
 // How far a part's face moves in (less than zero: out). Growing (a part taken away), every face moves out by its wall.
 double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inMerge) {
   FaceGeom g = flip ? flipped(g0) : g0;
+  // An opening before a wall of its own, should a face be picked as both (as OpenCascade's kernel takes it).
+  if (sign > 0)
+    for (const auto &o : r.open)
+      if (sameForm(o, g)) return -r.out;
   for (const auto &[w, t] : r.own)
     if (sameForm(w, g)) return sign * t;
   if (sign < 0) return -r.t;
-  for (const auto &o : r.open)
-    if (sameForm(o, g)) return -r.out;
   if (inMerge) {
     bool shown = false;
     for (const auto &f : r.shown) shown = shown || sameForm(f, g);
@@ -235,6 +238,68 @@ struct Ctx {
 
 bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out);
 
+// An oval cylinder's void: its ends moved in by `bottom` and `top`, its side by `side` — the side's inward offset, which
+// isn't an oval, as points close enough to it, the area it misses kept as its face's deficit (the oval's area, less the
+// side times its length, plus π times its square). C its middle, X and Y its semi-axes, Z half its height (all placed).
+bool ovalVoid(V3 C, V3 X, V3 Y, V3 Z, double bottom, double side, double top, double d, Solid &out) {
+  double a = norm(X), b = norm(Y), hz = norm(Z);
+  V3 ex = X / a, ey = Y / b, ez = Z / hz;
+  if (a < b) std::swap(a, b), std::swap(ex, ey);
+  // The offset turns back on itself where it's moved past the tightest bend (b²/a); its ends must not meet.
+  double z0 = -hz + bottom, z1 = hz - top, tight = b * b / a - side;
+  if (!(tight > 0) || !(z1 > z0) || side < 0) return false;
+  int n = (int)std::ceil(2 * pi * a / std::sqrt(8 * tight * std::max(d, 1e-6)));
+  n = std::clamp(n + (n & 1), 32, 1024);
+  if (std::fabs(dot(ex, ey)) > 1e-9 || std::fabs(dot(ex, ez)) > 1e-9 || std::fabs(dot(ey, ez)) > 1e-9) return false;
+  // Facing out of the void either way round: x × y along z.
+  if (dot(cross(ex, ey), ez) < 0) ey = -ey;
+  std::vector<V3> ring(n), nrm(n);
+  double polyArea = 0, perimeter = 0;
+  for (int j = 0; j < n; j++) {
+    double th = 2 * pi * j / n, c = std::cos(th), sn = std::sin(th);
+    V3 nn = unit(p2(b * c, a * sn));
+    ring[j] = p2(a * c, b * sn) - nn * side, nrm[j] = nn;
+  }
+  for (int j = 0; j < n; j++) polyArea += cross2(ring[j], ring[(j + 1) % n]) / 2;
+  // The oval's length round, closely (its arc summed finely).
+  for (int k = 0, m = 4096; k < m; k++) {
+    double th = 2 * pi * (k + 0.5) / m;
+    perimeter += std::hypot(a * std::sin(th), b * std::cos(th)) * 2 * pi / m;
+  }
+  double exact = pi * a * b - side * perimeter + pi * side * side;
+  auto at = [&](V3 q, double z) { return C + ex * q.x + ey * q.y + ez * z; };
+  auto dir = [&](V3 q) { return ex * q.x + ey * q.y; };
+  out = Solid();
+  out.faces.resize(3);
+  for (int e = 0; e < 2; e++) {
+    V3 nn = e == 0 ? -ez : ez;
+    double z = e == 0 ? z0 : z1;
+    auto &f = out.faces[e];
+    f.geom.kind = FaceGeom::Flat, f.geom.flat = true, f.geom.pn = nn, f.geom.pd = dot(nn, at(p2(0, 0), z));
+    uint32_t mid = out.vertex(at(p2(0, 0), z), nn), first = (uint32_t)out.p.size();
+    for (int j = 0; j < n; j++) out.vertex(at(ring[j], z), nn);
+    for (int j = 0; j < n; j++) {
+      uint32_t u = first + j, v = first + (j + 1) % n;
+      if (e == 0) out.triangle(mid, v, u, 0);
+      else out.triangle(mid, u, v, 1);
+    }
+  }
+  out.faces[2].geom.kind = FaceGeom::Curved;
+  uint32_t lo = (uint32_t)out.p.size();
+  for (int j = 0; j < n; j++) out.vertex(at(ring[j], z0), dir(nrm[j]));
+  uint32_t hi = (uint32_t)out.p.size();
+  for (int j = 0; j < n; j++) out.vertex(at(ring[j], z1), dir(nrm[j]));
+  for (int j = 0; j < n; j++) {
+    uint32_t a0 = lo + j, a1 = lo + (j + 1) % n, b0 = hi + j, b1 = hi + (j + 1) % n;
+    out.triangle(a0, a1, b1, 2), out.triangle(a0, b1, b0, 2);
+  }
+  out.faces[2].deficit = (exact - polyArea) * (z1 - z0);
+  out.centroids();
+  out.faces[0].normal = -ez, out.faces[1].normal = ez;
+  out.slivers();
+  return true;
+}
+
 // A primitive moved in: each of its faces by its rule.
 bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out) {
   const Model &m = *node.model;
@@ -248,7 +313,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     for (const auto &f : placed.faces) move.push_back(moveOf(r, f.geom, sign, flip, inMerge));
     return flatInset(m, Wn, move, r.d, r.size, out);
   }
-  // Turned or a tube: each piece's move in the model's own units (a stretch taken by its least along the piece's normal).
+  // Turned or a tube: each piece's move in the model's own units (under a stretch, enough all along the piece).
   const std::vector<Elem> &prof = m.kind == Model::Turned ? m.profile : m.section;
   double sx = norm(Wn.column(0)), sy = norm(Wn.column(1)), sz = norm(Wn.column(2)), across = std::min(sx, sy);
   std::vector<double> move(prof.size(), 0);
@@ -256,10 +321,24 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
   for (size_t k = 0; k < prof.size(); k++) {
     if (m.kind == Model::Turned && prof[k].onAxis()) continue;
     if (face >= placed.faces.size()) return false;
-    double world = moveOf(r, placed.faces[face++].geom, sign, flip, inMerge), nr, nz;
-    prof[k].normalAt(0.5, nr, nz);
-    double scale = std::fabs(nr) * across + std::fabs(nz) * sz;
-    move[k] = world / std::max(scale, 1e-12);
+    // A move m along the piece's normal (nr, nz) moves its face m / |(nr / across, nz / sz)| in place: the inverse, at its
+    // most along the piece (an arc's normal turns), for a wall at least as thick as asked.
+    double world = moveOf(r, placed.faces[face++].geom, sign, flip, inMerge), most = 0, nr, nz;
+    for (double at : {0.0, 0.5, 1.0}) {
+      prof[k].normalAt(at, nr, nz);
+      most = std::max(most, std::hypot(nr / std::max(across, 1e-12), nz / std::max(sz, 1e-12)));
+    }
+    move[k] = world * most;
+  }
+  // An oval cylinder (a cylinder stretched unevenly across): its side's offset is no oval, so made as such.
+  if (m.kind == Model::Turned && std::fabs(sx - sy) > 1e-9 * std::max(sx, sy) && prof.size() == 4 && !prof[0].arc && !prof[1].arc && !prof[2].arc &&
+      prof[0].flat() && prof[2].flat() && prof[1].r0 == prof[1].r1 && prof[1].r0 > 0 && prof[3].onAxis() && prof[0].r0 == 0 && prof[2].r1 == 0) {
+    double R = prof[1].r0, zlo = prof[0].z0, zhi = prof[2].z0;
+    // The moves as asked in place (the pieces' faces in order: bottom, side, top).
+    std::vector<double> world;
+    for (size_t k = 0; k < 3; k++) world.push_back(moveOf(r, placed.faces[k].geom, sign, flip, inMerge));
+    V3 C = Wn.point(p2(0, 0) + V3{0, 0, (zlo + zhi) / 2}), X = Wn.vector(V3{R, 0, 0}), Y = Wn.vector(V3{0, R, 0}), Z = Wn.vector(V3{0, 0, (zhi - zlo) / 2});
+    return ovalVoid(C, X, Y, Z, world[0], world[1], world[2], r.d, out);
   }
   std::vector<Elem> moved;
   if (!outlineInset(prof, move, moved)) return false;

@@ -28,6 +28,7 @@ constexpr double pi = M_PI;
 struct PKey {
   uint64_t x, y, z;
   bool operator==(const PKey &o) const { return x == o.x && y == o.y && z == o.z; }
+  bool operator<(const PKey &o) const { return x != o.x ? x < o.x : y != o.y ? y < o.y : z < o.z; }
 };
 struct PKeyHash {
   size_t operator()(const PKey &k) const { return (size_t)(k.x * 0x9E3779B97F4A7C15ull ^ (k.y + 0x7F4A7C159E3779B9ull) * 31 ^ k.z * 0xBF58476D1CE4E5B9ull); }
@@ -202,6 +203,86 @@ Section2 roundCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double r, int which) {
   out.runs = {lineRun(k.a), lineRun(k.a + na * m), lineRun(outerCorner(e, na, nb, m)), lineRun(k.b + nb * m), arcRun(k, k.b, e, r)};
   ccw(out);
   return out;
+}
+
+// A face as cut through a ring's axis at E, in the section's frame (x along U, y along N, origin E): straight (through E
+// along `dir`, outward `n`) or, for a face turned from an arc, that arc's circle (centre q, radius rad; `away` when its
+// outward normal points away from the centre). Points `by` out from it along its outward normal: a line, or a circle
+// rad ± by.
+struct Cut2 {
+  bool circle = false;
+  V3 dir, n, q;
+  double rad = 0;
+  bool away = true;
+};
+
+Cut2 cutOf(const FaceGeom &g, V3 E, V3 U, V3 N, V3 dir2, V3 n2) {
+  Cut2 c;
+  c.dir = dir2, c.n = n2;
+  if (g.flat || g.kind != FaceGeom::Turned || !g.exact || !g.elem.arc) return c;
+  V3 L = g.place.inverse().point(E);
+  double lr = std::hypot(L.x, L.y);
+  if (lr < 1e-12) return c;
+  V3 Q = g.place.point(V3{L.x / lr * g.elem.cr, L.y / lr * g.elem.cr, g.elem.cz});
+  c.circle = true, c.q = p2(dot(Q - E, U), dot(Q - E, N)), c.rad = g.elem.rad * norm(g.place.vector({1, 0, 0}));
+  c.away = dot(n2, p2(0, 0) - c.q) > 0;
+  return c;
+}
+
+// Rounding the corner at the origin where a face is curved in the cut (a ring's face turned from an arc): the circle's
+// middle where both faces moved into the material by r meet (out of it at an inside corner), its touch points on the
+// faces themselves; the rest as roundCorner. False when they don't meet.
+bool roundCurved(const Cut2 &A, const Cut2 &B, double r, int which, Section2 &out) {
+  V3 e = p2(0, 0), da = A.dir, na = A.n, db = B.dir, nb = B.n;
+  Touch k = touchAt(e, da, na, db, r);
+  double by = k.convex ? -r : r;
+  // Candidates for the middle: on both moved faces.
+  std::vector<V3> cand;
+  auto lineCircle = [&](const Cut2 &L, const Cut2 &C) {
+    double rr = C.rad + (C.away ? by : -by);
+    V3 foot = L.n * by, w = foot - C.q;
+    double bq = dot(L.dir, w), cq = dot(w, w) - rr * rr, disc = bq * bq - cq;
+    if (!(rr > 0) || disc < 0) return;
+    for (double sg : {-1.0, 1.0}) cand.push_back(foot + L.dir * (-bq + sg * std::sqrt(disc)));
+  };
+  if (A.circle && B.circle) {
+    double ra = A.rad + (A.away ? by : -by), rb = B.rad + (B.away ? by : -by);
+    V3 dq = B.q - A.q;
+    double dd = norm(dq);
+    if (!(ra > 0 && rb > 0) || dd < 1e-12) return false;
+    double x = (dd * dd + ra * ra - rb * rb) / (2 * dd), h2 = ra * ra - x * x;
+    if (h2 < 0) return false;
+    V3 u = dq / dd, v = p2(-u.y, u.x);
+    for (double sg : {-1.0, 1.0}) cand.push_back(A.q + u * x + v * (sg * std::sqrt(h2)));
+  } else if (A.circle) {
+    lineCircle(B, A);
+  } else if (B.circle) {
+    lineCircle(A, B);
+  } else {
+    return false;
+  }
+  if (cand.empty()) return false;
+  V3 C = cand[0];
+  for (V3 q : cand)
+    if (norm(q - k.centre) < norm(C - k.centre)) C = q;
+  // Where it touches each face, and the face's outward normal there.
+  auto touch = [&](const Cut2 &F, V3 &T, V3 &n) {
+    if (!F.circle) {
+      T = C - F.n * by, n = F.n;
+      return;
+    }
+    V3 u = unit(C - F.q);
+    T = F.q + u * F.rad, n = F.away ? u : -u;
+  };
+  V3 TA, TB, nA, nB;
+  touch(A, TA, nA), touch(B, TB, nB);
+  double m = reachOut(r, which) * (k.convex ? 1 : -1);
+  Touch exact{TA, TB, C, k.convex};
+  out = Section2();
+  out.fill = !k.convex;
+  out.runs = {lineRun(TA), lineRun(TA + nA * m), lineRun(outerCorner(e, na, nb, m)), lineRun(TB + nB * m), arcRun(exact, TB, e, r)};
+  ccw(out);
+  return true;
 }
 
 // Bevelling the corner at e: legs la along face A and lb along face B; taken away at an outside corner, added at an inside
@@ -450,6 +531,9 @@ bool closed(const Solid &s) {
 struct Runs {
   double a = INFINITY, b = INFINITY;
   bool aShared = false, bShared = false;
+  // Where shared: how far the other crease's rounding reaches along this run, for a radius of 1 (cot of its half angle,
+  // over the sine at which the run meets it).
+  double aOther = 1, bOther = 1;
 };
 
 double distanceTo(const std::vector<V3> &pts, V3 q) {
@@ -462,7 +546,7 @@ double distanceTo(const std::vector<V3> &pts, V3 q) {
   return best;
 }
 
-Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease> &treated, double tol) {
+Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease> &treated, double tol, const Crease *self = nullptr) {
   Runs out;
   auto loops = sliceAcross(s, c, i);
   // The loop and point nearest the edge.
@@ -505,10 +589,32 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
   bool firstIsA = d1.x < d2.x;
   out.a = firstIsA ? l1 : l2, out.b = firstIsA ? l2 : l1;
   V3 endA = firstIsA ? e1 : e2, endB = firstIsA ? e2 : e1;
+  V3 dirA = firstIsA ? d1 : d2, dirB = firstIsA ? d2 : d1;
+  // The other crease's reach along the run: r·cot(half its angle) square to it, longer where the run meets it aslant.
+  auto reach = [&](const Crease &o, V3 end, V3 dir) {
+    size_t j = 0;
+    double best = INFINITY;
+    for (size_t q = 0; q < o.pts.size(); q++)
+      if (norm(o.pts[q] - end) < best) best = norm(o.pts[q] - end), j = q;
+    double phi = o.angleAt(j) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+    V3 along = o.pts[std::min(j + 1, o.pts.size() - 1)] - o.pts[j > 0 ? j - 1 : 0], world = X * dir.x + Y * dir.y;
+    double sine = norm(along) > 0 ? norm(cross(unit(along), unit(world))) : 1;
+    return 1 / std::tan(half) / std::max(sine, 0.2);
+  };
+  const Crease &me = self ? *self : c;
+  // One meeting this one at a corner is beside it, not across the face: how those two share the face is the face's own
+  // measure (faceRoom).
+  auto besides = [&](const Crease &o) {
+    if (me.closed || o.closed) return false;
+    for (V3 p : {me.pts.front(), me.pts.back()})
+      for (V3 q : {o.pts.front(), o.pts.back()})
+        if (norm(p - q) < tol) return true;
+    return false;
+  };
   for (const auto &o : treated) {
-    if (&o == &c) continue;
-    if (distanceTo(o.pts, endA) < tol) out.aShared = true;
-    if (distanceTo(o.pts, endB) < tol) out.bShared = true;
+    if (&o == &me || besides(o)) continue;
+    if (distanceTo(o.pts, endA) < tol) out.aShared = true, out.aOther = reach(o, endA, dirA);
+    if (distanceTo(o.pts, endB) < tol) out.bShared = true, out.bOther = reach(o, endB, dirB);
   }
   return out;
 }
@@ -1159,6 +1265,115 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
   return out.meshVolume() > 0;
 }
 
+// How far a flat face's sides can move in before the face is gone: each side moves in by k times its own setback
+// (`setback` per mesh edge, 0 for an edge left as it is), and the largest k that leaves some of the face. Moved in, a side
+// shortens by how its neighbours move (its ends slide along it); one shortened to nothing drops out and its neighbours
+// meet; the face is gone when fewer than three sides are left, or two facing each other meet. (Each outer outline alone;
+// how far a hole's sides are from the outline is the cut across each crease's to tell.)
+double faceRoom(const Solid &s, int f, const std::vector<double> &setback) {
+  V3 n = s.faces[f].geom.pn, e1 = unit(std::fabs(n.x) < 0.9 ? cross(n, V3{1, 0, 0}) : cross(n, V3{0, 1, 0})), e2 = cross(n, e1);
+  // The face's triangles' sides, each the way it runs round its triangle (the face to its left).
+  std::set<std::pair<PKey, PKey>> sides;
+  for (size_t t = 0; t < s.triFace.size(); t++) {
+    if ((int)s.triFace[t] != f) continue;
+    for (int k = 0; k < 3; k++) sides.insert({pkey(s.p[s.tri[3 * t + k]]), pkey(s.p[s.tri[3 * t + (k + 1) % 3]])});
+  }
+  struct Side {
+    V3 a, b;  // in place; in a loop, in the face's plane (x, y)
+    double t;
+  };
+  auto flat2 = [&](V3 q) { return p2(dot(q, e1), dot(q, e2)); };
+  std::vector<Side> segs;
+  for (size_t e = 0; e < s.edges.size(); e++) {
+    const auto &edge = s.edges[e];
+    if ((edge.f0 != f && edge.f1 != f) || edge.pts.size() < 2) continue;
+    std::vector<V3> pts = edge.pts;
+    if (!sides.count({pkey(pts[0]), pkey(pts[1])})) std::reverse(pts.begin(), pts.end());
+    for (size_t i = 0; i + 1 < pts.size(); i++) segs.push_back({pts[i], pts[i + 1], setback[e]});
+  }
+  std::map<PKey, size_t> from;
+  for (size_t i = 0; i < segs.size(); i++) from[pkey(segs[i].a)] = i;
+  std::vector<char> seen(segs.size(), 0);
+  double room = INFINITY;
+  for (size_t first = 0; first < segs.size(); first++) {
+    if (seen[first]) continue;
+    // A loop, sides running straight on (and moving in alike) taken as one.
+    std::vector<Side> loop;
+    for (size_t i = first; !seen[i];) {
+      seen[i] = 1;
+      Side sd{flat2(segs[i].a), flat2(segs[i].b), segs[i].t};
+      if (!loop.empty() && loop.back().t == sd.t && std::fabs(cross2(unit(loop.back().b - loop.back().a), unit(sd.b - sd.a))) < 1e-9 &&
+          dot(loop.back().b - loop.back().a, sd.b - sd.a) > 0)
+        loop.back().b = sd.b;
+      else
+        loop.push_back(sd);
+      auto it = from.find(pkey(segs[i].b));
+      if (it == from.end()) break;
+      i = it->second;
+    }
+    std::vector<V3> outline;
+    for (auto &sd : loop) outline.push_back(sd.a);
+    if (loop.size() < 3 || area2(outline) <= 0) continue;
+    // Each side as a line: a point, its way along, and inward (to its left); moved in by k·t at time k.
+    struct L {
+      V3 a, d, in;
+      double t;
+    };
+    std::vector<L> lines;
+    for (auto &sd : loop) {
+      V3 d = unit(sd.b - sd.a);
+      lines.push_back({sd.a, d, p2(-d.y, d.x), sd.t});
+    }
+    bool moves = false;
+    for (auto &l : lines) moves = moves || l.t > 0;
+    if (!moves) continue;
+    // Where lines i and j meet at time k (false when they run alongside each other).
+    auto corner = [&](const L &i, const L &j, double k, V3 &out) {
+      V3 pi = i.a + i.in * (k * i.t), pj = j.a + j.in * (k * j.t);
+      double den = cross2(i.d, j.d);
+      if (std::fabs(den) < 1e-12) return false;
+      out = pi + i.d * (cross2(pj - pi, j.d) / den);
+      return true;
+    };
+    double k = 0;
+    for (int guard = 0; lines.size() >= 3 && guard < 10000; guard++) {
+      size_t m = lines.size();
+      // Each side's length now and a unit of time on; the first to reach nothing.
+      double soonest = INFINITY;
+      bool gone = false;
+      for (size_t j = 0; j < m && !gone; j++) {
+        const L &pr = lines[(j + m - 1) % m], &me = lines[j], &nx = lines[(j + 1) % m];
+        V3 s0, e0, s1, e1v;
+        if (!corner(pr, me, k, s0) || !corner(me, nx, k, e0) || !corner(pr, me, k + 1, s1) || !corner(me, nx, k + 1, e1v)) {
+          gone = true;
+          break;
+        }
+        double now = dot(e0 - s0, me.d), later = dot(e1v - s1, me.d), shrink = now - later;
+        if (shrink > 1e-12) soonest = std::min(soonest, k + std::max(now, 0.0) / shrink);
+      }
+      if (gone || !std::isfinite(soonest)) {
+        if (gone) room = std::min(room, k);
+        break;
+      }
+      k = soonest;
+      // Sides gone by now dropped; two facing each other left side by side: the face is gone.
+      std::vector<L> left;
+      for (size_t j = 0; j < m; j++) {
+        const L &pr = lines[(j + m - 1) % m], &me = lines[j], &nx = lines[(j + 1) % m];
+        V3 s0, e0;
+        bool ok = corner(pr, me, k, s0) && corner(me, nx, k, e0);
+        if (ok && dot(e0 - s0, me.d) > 1e-9 * (1 + k)) left.push_back(me);
+      }
+      if (left.size() == lines.size()) break;  // never expected: nothing dropped
+      lines.swap(left);
+      for (size_t j = 0; j < lines.size(); j++)
+        if (dot(lines[j].d, lines[(j + 1) % lines.size()].d) < -1 + 1e-9) lines.clear();
+    }
+    if (lines.size() < 3) room = std::min(room, k);
+  }
+  return room;
+}
+
 }  // namespace
 
 Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
@@ -1166,30 +1381,82 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   const Solid &base = onto ? *onto : s;
   std::vector<Crease> creases = creasesOf(s, t.kinds.data(), t.picks.data(), (int)t.kinds.size(), &fit.missing);
   // Bevels and coves skip edges where the faces meet flat (and coves inside corners too).
+  double size = 0;
+  for (V3 q : s.p) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+  double tol = 1e-7 * (1 + size);
   std::vector<Crease> work;
   for (auto &c : creases) {
     if (t.kind == Treatment::Cove && c.angle >= 179) continue;
     if (std::fabs(c.angle - 180) <= 1) continue;
+    // Beside a rounding made before: an edge near flat is where the rounding meets a face smoothly (its mesh bends there by
+    // as much as a step round the rounding), and one beside a part of it no wider than a few chord errors is where it met
+    // a face curving away from it (whose mesh lies that far off the face itself).
+    bool blendA = false, blendB = false;
+    for (size_t k = 0; k < c.pts.size(); k++) blendA = blendA || s.faces[c.fa[k]].blend, blendB = blendB || s.faces[c.fb[k]].blend;
+    if ((blendA || blendB) && std::fabs(c.angle - 180) < 35) continue;
+    if (blendA || blendB) {
+      Crease m = c;
+      Runs r = runsAt(s, m, pointAt(m, m.length / 2), {}, std::max(tol, d));
+      if ((blendA && r.a < 4 * d) || (blendB && r.b < 4 * d)) continue;
+    }
     work.push_back(c);
   }
-  double size = 0;
-  for (V3 q : s.p) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
-  double tol = 1e-7 * (1 + size);
   if (work.empty() || (t.kind != Treatment::Bevel && t.radius < 0.005) || (t.kind == Treatment::Bevel && std::min(t.legA, t.legB) < 0.005)) return base;
 
-  // Will it fit: each face beside a crease must hold what the treatment takes of it (half of it when another treated edge
-  // ends the face across from this one), measured in the cut across the crease's middle.
+  // Will it fit: each face beside a crease must hold what the treatment takes of it: in the cut across the crease's middle,
+  // as far as the face runs (with another treated crease across it, what both take together); and a flat face, its sides
+  // all moved in by what each treatment takes, must keep some of itself (faceRoom).
   double most = INFINITY;
+  std::vector<double> setback(s.edges.size(), 0), legs(s.edges.size(), 0);
+  std::set<int> flats;
   for (const auto &c : work) {
-    size_t mid = c.pts.size() / 2;
-    Runs r = runsAt(s, c, mid, work, std::max(tol, d));
+    for (size_t q = 0; q < c.edges.size(); q++) {
+      int e = c.edges[q];
+      const auto &pts = s.edges[e].pts;
+      V3 at = pts[pts.size() / 2];
+      size_t j = 0;
+      for (size_t k = 1; k < c.pts.size(); k++)
+        if (norm(c.pts[k] - at) < norm(c.pts[j] - at)) j = k;
+      double phi = c.angleAt(j) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+      setback[e] = t.kind == Treatment::Round ? 1 / std::tan(half) : 1;
+    }
+    for (size_t k = 0; k < c.pts.size(); k++)
+      for (int f : {c.fa[k], c.fb[k]})
+        if (s.faces[f].geom.flat) flats.insert(f);
+  }
+  for (const auto &whole : work) {
+    // Measured across its middle (a point of its own there: a straight edge has only its ends).
+    Crease c = whole;
+    size_t mid = pointAt(c, c.length / 2);
+    Runs r = runsAt(s, c, mid, work, std::max(tol, d), &whole);
     double la = r.aShared ? r.a / 2 : r.a, lb = r.bShared ? r.b / 2 : r.b;
     double phi = c.angleAt(mid) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
     if (t.kind == Treatment::Round) {
-      most = std::min(most, std::min(la, lb) * std::tan(half));
+      // Along a face shared with another rounding, the two reaches together (r·cot of each half angle) fill it at most.
+      double own = 1 / std::tan(half);
+      double ra = r.a / (own + (r.aShared ? r.aOther : 0)), rb = r.b / (own + (r.bShared ? r.bOther : 0));
+      most = std::min(most, std::min(ra, rb));
     } else if (t.kind == Treatment::Cove) {
       most = std::min(most, std::min(la, lb));
     } else if (t.legA > la * (1 - 1e-9) || t.legB > lb * (1 - 1e-9)) {
+      fit.fits = false;
+      fit.why = "bevel: too large for these edges";
+      return s;
+    }
+  }
+  for (int f : flats) {
+    if (t.kind != Treatment::Bevel) {
+      most = std::min(most, faceRoom(s, f, setback));
+      continue;
+    }
+    // A bevel's legs: each edge's on this face (A's or B's by which side of its crease the face is).
+    std::fill(legs.begin(), legs.end(), 0.0);
+    for (const auto &c : work)
+      for (size_t q = 0; q < c.edges.size(); q++) {
+        int e = c.edges[q];
+        if (s.edges[e].f0 == f || s.edges[e].f1 == f) legs[c.edges[q]] = c.fa[0] == f || (c.fa.size() > 1 && c.fa[c.fa.size() / 2] == f) ? t.legA : t.legB;
+      }
+    if (faceRoom(s, f, legs) < 1 - 1e-9) {
       fit.fits = false;
       fit.why = "bevel: too large for these edges";
       return s;
@@ -1651,6 +1918,13 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           return false;
         }
         V3 U = cr.ia[0], N = unit(c.na[0] - U * dot(c.na[0], U));
+        // A face turned from an arc is curved in this cut: the rounding meets it there, not its tangent at the edge.
+        if (t.kind == Treatment::Round && secs.size() == 1) {
+          auto in2 = [&](V3 v) { return unit(p2(dot(v, U), dot(v, N))); };
+          Cut2 A = cutOf(s.faces[c.fa[0]].geom, E, U, N, in2(cr.ia[0]), in2(c.na[0])), B = cutOf(s.faces[c.fb[0]].geom, E, U, N, in2(cr.ib[0]), in2(c.nb[0]));
+          Section2 exact;
+          if ((A.circle || B.circle) && roundCurved(A, B, tw.radius, which, exact)) secs[0] = exact;
+        }
         // The circle's steps in the solid's mesh: its points on the circle itself, evenly round it (else the tool's own).
         int around = 0;
         V3 x0;
@@ -1814,6 +2088,16 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
   }
 
+  // One merge or cut; should it leave a hole, again with crossing points a little farther apart made one (a tool touching
+  // a face along a line crosses it only roughly there).
+  auto step = [](const Solid &a, const Solid &b, int op) {
+    Solid r = combine(a, b, op);
+    for (double merge : {1e-9, 1e-7}) {
+      if (closed(r)) break;
+      r = combine(a, b, op, merge);
+    }
+    return r;
+  };
   // The tools taken away one by one, then those added; failing that, each kind all together.
   auto made = [&](bool together) {
     Solid r = base;
@@ -1822,14 +2106,14 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       if (tools.empty()) continue;
       if (!together) {
         for (const auto &tool : tools) {
-          r = combine(r, tool, op);
+          r = step(r, tool, op);
           if (!closed(r)) return r;
         }
         continue;
       }
       Solid all = tools[0];
-      for (size_t i = 1; i < tools.size(); i++) all = combine(all, tools[i], BK_UNION);
-      r = combine(r, all, op);
+      for (size_t i = 1; i < tools.size(); i++) all = step(all, tools[i], BK_UNION);
+      r = step(r, all, op);
     }
     // The corners cut off, each only where all it cuts lies near its corner.
     for (const auto &k : corners) {
@@ -1846,6 +2130,12 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   for (double shadeBy : {0.0, 1e-4, 2e-3}) {
     if (shadeBy > 0 && t.kind != Treatment::Cove) break;
     if (!tools(shadeBy)) return s;
+    // A rounding's faces (its tools' curved ones) meet the faces beside them smoothly: so marked for what's done next.
+    if (t.kind != Treatment::Bevel)
+      for (auto *list : {&take, &add})
+        for (auto &tool : *list)
+          for (auto &f : tool.faces)
+            if (!f.geom.flat) f.blend = true;
     result = made(false);
     if (!closed(result) && take.size() + add.size() > 1) result = made(true);
     if ((done = !result.tri.empty() && closed(result))) break;

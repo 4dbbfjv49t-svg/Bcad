@@ -38,6 +38,10 @@ int faceAt(const Solid &s, const double *pick);
 // when there is none.
 bool creaseAt(const Solid &s, int kind, const double *pick, Crease &out, size_t &at);
 
+// A point of its own on the run `along` its length (its faces' directions taken between its neighbours'), so a cut there
+// has the run's frame there; its index.
+size_t pointAt(Crease &c, double along);
+
 // The cut across a crease at point i: the outlines of the solid in the plane square to the edge, in the end-on frame
 // (origin on the edge, face A leaving along -x, y its outward normal), outlines counter-clockwise, holes clockwise.
 std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i);
