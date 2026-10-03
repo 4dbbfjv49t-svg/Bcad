@@ -1726,7 +1726,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   // a face along a line crosses it only roughly there).
   auto step = [](const Solid &a, const Solid &b, int op) {
     Solid r = combine(a, b, op);
-    for (double merge : {1e-9, 1e-7}) {
+    for (double merge : {1e-9, 1e-7, 1e-6}) {
       if (closed(r)) break;
       r = combine(a, b, op, merge);
     }
@@ -2354,7 +2354,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
     for (size_t f = 0; f < s.faces.size(); f++) {
       bool touched = std::fabs(after[f] - before[f]) > 1e-9 * (1 + before[f]);
-      if (beside.count((int)f) ? after[f] <= 1e-9 * (1 + before[f]) : touched && !near.count((int)f)) return tooWide();
+      // (A speck of a face far smaller than the mesh tells apart, where a cut grazed a corner, may go.)
+      bool gone = after[f] <= 1e-9 * (1 + before[f]) && before[f] > 0.1 * d * d;
+      if (beside.count((int)f) ? gone : touched && !near.count((int)f)) return tooWide();
     }
   }
   foldAux(result, d);

@@ -140,6 +140,16 @@ void describe(const Index &ix, Crease &c, size_t from) {
     size_t a = i + 1 < n ? i : i - 1, b = a + 1;
     if (c.closed && i + 1 == n) a = i - 1, b = i;
     V3 dir = unit(c.pts[b] - c.pts[a]), t = c.tangent(i);
+    V3 exact = ix.onBoth(c.fa[i], c.fb[i], p);
+    c.na[i] = ix.normal(c.fa[i], p, exact), c.nb[i] = ix.normal(c.fb[i], p, exact);
+    // The way along it: square to both faces' normals where they meet at an angle (a line of mesh points crossing a
+    // curved face zigzags by a chord's sag, turning its own way by degrees from point to point).
+    V3 along = cross(c.na[i], c.nb[i]);
+    if (norm(along) > 0.05) {
+      along = unit(along);
+      if (dot(along, t) < 0) along = -along;
+      t = along;
+    }
     auto side = [&](int f, V3 nrm) {
       int r = ix.runs(f, c.pts[a], c.pts[b]);
       V3 into = cross(nrm, dir) * (r < 0 ? -1.0 : 1.0);
@@ -151,8 +161,6 @@ void describe(const Index &ix, Crease &c, size_t from) {
       }
       return unit(into - t * dot(into, t));
     };
-    V3 exact = ix.onBoth(c.fa[i], c.fb[i], p);
-    c.na[i] = ix.normal(c.fa[i], p, exact), c.nb[i] = ix.normal(c.fb[i], p, exact);
     c.ia[i] = side(c.fa[i], c.na[i]), c.ib[i] = side(c.fb[i], c.nb[i]);
   }
 }

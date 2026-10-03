@@ -975,6 +975,12 @@ int main() {
       double slab741[3] = {25.3699, 11.1879, 14.3455}, notch741[3] = {8.05339, 15.9867, 18.1881}, face741[6] = {0, 1, 0, 2.91354, 5.59395, -0.473284};
       BKShape *notched = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, slab741)), keep(at(keep(bk_primitive(BK_BOX, notch741)), -8.43071, 7.58588, 4.66032))));
       is("cove: wider than a face beside it is across", bk_cove(notched, &kf, face741, 1, 2.13207, &mr, &miss), 3264.7941, 0.05);
+      // A ring cut aslant, bevelled all round: the cut's line of mesh points zigzags across the ring's facets; each cross-
+      // section is square to where the faces meet, not to that zigzag (else neighbours cross and the tool folds onto
+      // itself). OpenCascade's 1099.5708 (its legs on the curved face measured to points on it).
+      double ring623[3] = {0, 37.9599, 5.10573}, at623[3] = {1.75048, 0.957164, 1.17883}, n623[3] = {0.481551, 0.64596, -0.246432};
+      BKShape *cutRing = keep(bk_split(keep(bk_primitive(BK_TORUS, ring623)), at623, n623, 1));
+      is("bevel: a ring cut aslant, all round", bk_chamfer(cutRing, &kb, body, 1, 0.87252, 1.4573, 0, &miss), 1099.5708, 2);
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
     }
