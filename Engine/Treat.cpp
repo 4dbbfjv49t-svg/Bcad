@@ -682,6 +682,12 @@ struct Runs {
   // Where shared: how far the other crease's rounding reaches along this run, for a radius of 1 (cot of its half angle,
   // over the sine at which the run meets it).
   double aOther = 1, bOther = 1;
+  // Whether a rounding may run on past the face's end (spill over): the face ends at a corner turning into the material,
+  // and the outline beyond keeps to the material's side of the face's plane as far as the tool reaches (what it reaches
+  // past the face there is all air; it ends on the next face as that face cuts across it). And that next face's line
+  // in the cut (its start, and its way on), to see it does.
+  bool aOpen = false, bOpen = false;
+  V3 aNext, aWay, bNext, bWay;
 };
 
 double distanceTo(const std::vector<V3> &pts, V3 q) {
@@ -714,6 +720,8 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
   size_t n = L.size();
   V3 E = c.pts[i], X = -c.ia[i], Y = unit(c.na[i] - X * dot(c.na[i], X));
   // As far as the face it leaves along runs (where the cut knows its sides' faces), else until it has turned by 30°.
+  size_t jEnd = k;
+  V3 lastHeading;
   auto run = [&](int step, V3 &dir, V3 &end, int &face) {
     double length = 0, turned = 0;
     V3 heading{};
@@ -744,17 +752,46 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
       j = nx;
     }
     end = E + X * L[j].first + Y * L[j].second;
+    jEnd = j, lastHeading = heading;
     return length;
+  };
+  // Past a run's end (at point j, coming in heading `h`; `out` its face's outward normal in the cut): the next side turns
+  // into the material, and the outline keeps behind the face's plane as far as `within` from the edge.
+  auto open = [&](int step, size_t j, V3 h, V3 out, double within, V3 &at, V3 &way) {
+    size_t nx = (j + n + step) % n;
+    V3 next = p2(L[nx].first - L[j].first, L[nx].second - L[j].second);
+    if (norm(next) < 1e-12 || norm(h) < 0.5 || dot(unit(next), out) > -1e-3) return false;
+    // (In the end-on frame of the sections: u into face A, v its normal; the cut's x runs the other way.)
+    at = p2(-L[j].first, L[j].second), way = unit(p2(-next.x, next.y));
+    for (size_t g = 0; g < n; g++) {
+      j = (j + n + step) % n;
+      V3 p = p2(L[j].first, L[j].second);
+      if (norm(p) > within) break;
+      if (dot(p, out) > tol) return false;
+    }
+    return true;
   };
   V3 d1, d2, e1, e2;
   int f1, f2;
-  double l1 = run(1, d1, e1, f1), l2 = run(-1, d2, e2, f2);
+  double l1 = run(1, d1, e1, f1);
+  size_t j1 = jEnd;
+  V3 h1 = lastHeading;
+  double l2 = run(-1, d2, e2, f2);
+  size_t j2 = jEnd;
+  V3 h2 = lastHeading;
   // Face A leaves along -x.
   bool firstIsA = d1.x < d2.x;
   out.a = firstIsA ? l1 : l2, out.b = firstIsA ? l2 : l1;
   V3 endA = firstIsA ? e1 : e2, endB = firstIsA ? e2 : e1;
   V3 dirA = firstIsA ? d1 : d2, dirB = firstIsA ? d2 : d1;
   int faceA = firstIsA ? f1 : f2, faceB = firstIsA ? f2 : f1;
+  if (radius > 0) {
+    // As far as a rounding of the radius asked reaches: past its circle, and its tool's reach out past it.
+    double within = std::max(out.a, out.b) + 4 * radius;
+    V3 nB2 = unit(p2(dot(c.nb[i], X), dot(c.nb[i], Y)));
+    out.aOpen = open(firstIsA ? 1 : -1, firstIsA ? j1 : j2, firstIsA ? h1 : h2, p2(0, 1), within, out.aNext, out.aWay);
+    out.bOpen = open(firstIsA ? -1 : 1, firstIsA ? j2 : j1, firstIsA ? h2 : h1, nB2, within, out.bNext, out.bWay);
+  }
   // The other crease's reach along the run (`face`), for a radius of 1: r·cot(half its angle) square to it, longer where
   // the run meets it aslant; where a face beside it is curved in its cut, where its circle (of the radius asked) touches.
   auto reach = [&](const Crease &o, V3 end, V3 dir, int face) {
@@ -1746,7 +1783,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   // all moved in by what each treatment takes, must keep some of itself (faceRoom).
   double most = INFINITY;
   std::vector<double> setback(s.edges.size(), 0), legs(s.edges.size(), 0);
-  std::set<int> flats;
+  std::set<int> flats, consumed;
   for (const auto &c : work) {
     for (size_t q = 0; q < c.edges.size(); q++) {
       int e = c.edges[q];
@@ -1773,6 +1810,22 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       // Along a face shared with another rounding, the two reaches together (r·cot of each half angle) fill it at most.
       double own = 1 / std::tan(half);
       double ra = r.a / (own + (r.aShared ? r.aOther : 0)), rb = r.b / (own + (r.bShared ? r.bOther : 0));
+      // A face too narrow for it, open past its end and no other rounding's: the rounding runs on past it (spills over),
+      // taking all of it, and ends on the next face as that face cuts across its circle. One side at most, at an outside
+      // corner (one taken away), the other side holding it as it is.
+      bool spillA = false, spillB = false;
+      if (phi < pi && (ra < t.radius) != (rb < t.radius)) {
+        // Its circle in the end-on frame (u into face A, v A's normal; B's way in at the corner's angle).
+        V3 C = p2(t.radius / std::tan(half), -t.radius);
+        auto crosses = [&](V3 at, V3 way) {
+          V3 w = C - at;
+          return std::fabs(w.x * way.y - w.y * way.x) < t.radius * (1 - 1e-6);
+        };
+        spillA = ra < t.radius && r.aOpen && !r.aShared && crosses(r.aNext, r.aWay);
+        spillB = rb < t.radius && r.bOpen && !r.bShared && crosses(r.bNext, r.bWay);
+      }
+      if (spillA) ra = INFINITY, consumed.insert(c.fa[mid]);
+      if (spillB) rb = INFINITY, consumed.insert(c.fb[mid]);
       // A face curved in the cut: where the rounding's circle touches it as it bends (not r·cot along its tangent), within
       // its share of the run; the largest radius that does, by halving. Measured at a point of the edge's own (one put
       // between two lies a chord's sag off the edge, and so does where it measures from).
@@ -1790,8 +1843,8 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
         auto fitsAt = [&](double rr) {
           V3 C, TA, TB, nA, nB;
           bool convex;
-          return rollAt(A, B, rr, C, TA, TB, nA, nB, convex) && alongCut(A, TA) + (r.aShared ? r.aOther * rr : 0) <= r.a &&
-                 alongCut(B, TB) + (r.bShared ? r.bOther * rr : 0) <= r.b;
+          return rollAt(A, B, rr, C, TA, TB, nA, nB, convex) && (spillA || alongCut(A, TA) + (r.aShared ? r.aOther * rr : 0) <= r.a) &&
+                 (spillB || alongCut(B, TB) + (r.bShared ? r.bOther * rr : 0) <= r.b);
         };
         double lo = 0, hi = std::max({ra, rb, 1e-6}) * 4;
         while (fitsAt(hi) && hi < 1e6) lo = hi, hi *= 2;
@@ -1812,7 +1865,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   }
   for (int f : flats) {
     if (t.kind != Treatment::Bevel) {
-      most = std::min(most, faceRoom(s, f, setback));
+      if (!consumed.count(f)) most = std::min(most, faceRoom(s, f, setback));
       continue;
     }
     // A bevel's legs: each edge's on this face (A's or B's by which side of its crease the face is).

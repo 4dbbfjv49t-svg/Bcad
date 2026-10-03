@@ -938,6 +938,21 @@ int main() {
       int ke2[2] = {BK_PICK_EDGE, BK_PICK_EDGE};
       BKShape *corner = keep(bk_fillet(keep(bk_primitive(BK_BOX, cube20)), ke2, twoTop, 2, 3, &mr, &miss));
       is("bevel: an edge running on into the seam between two roundings", bk_chamfer(corner, &ke, upright, 1, 1, 1, 0, &miss), 7914.7425, 0.4);
+      // A D: a disc cut by a flat. Its two edges rounded where the circle truly touches the round side, not a mesh point
+      // a chord's sag off (exact: 2521.7830).
+      double disc[2] = {20, 10}, slab3[3] = {20, 20, 10}, dEdges[12] = {5, 8.66025, 0, 0, 0, 1, 5, -8.66025, 0, 0, 0, 1};
+      BKShape *dee = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_CYLINDER, disc)), keep(at(keep(bk_primitive(BK_BOX, slab3)), -5, 0, 0))));
+      is("round: a D's two edges, beside its round side", bk_fillet(dee, ke2, dEdges, 2, 2, &mr, &miss), 2521.7830, 0.01);
+      // A plate bevelled on one edge, leaving a strip narrower than the rounding then asked for on the edge below: the
+      // rounding runs on over the strip to the bevel (exact: 2212.534).
+      double plate[3] = {20, 20, 6}, topFront[6] = {0, -10, 3, 1, 0, 0}, bottomFront[6] = {0, -10, -3, 1, 0, 0};
+      BKShape *bevelled1 = keep(bk_chamfer(keep(bk_primitive(BK_BOX, plate)), &ke, topFront, 1, 4.5, 3, 0, &miss));
+      is("round: wider than the strip beside it, running on over it", bk_fillet(bevelled1, &ke, bottomFront, 1, 3.5, &mr, &miss), 2212.534, 0.02, 7);
+      // A wall thinner than the rounding on its top's edge: the rounding runs on over the top, down the inside to where the
+      // circle meets it (exact: 724 less 0.214435 a unit of length).
+      double blockA[3] = {10, 20, 20}, blockB[3] = {10.1, 30, 20}, wallTop[6] = {5, 0, 10, 0, 1, 0};
+      BKShape *wall = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, blockA)), keep(at(keep(bk_primitive(BK_BOX, blockB)), -0.95, 0, 2))));
+      is("round: a thin wall's top edge, wider than the wall", bk_fillet(wall, &ke, wallTop, 1, 1, &mr, &miss), 724 - 0.214435 * 20, 0.01);
       // A top rounded, then bevelled all round: each upright edge's bevel runs on up its seam (OpenCascade's 6303.9067; its
       // four alike corners come out up to 1.2 apart, by which of its faces takes which leg).
       double b30[3] = {13.2815, 20.7227, 23.1038}, top30[6] = {0, 0, 1, 0, 0, b30[2] / 2};
