@@ -958,8 +958,9 @@ final class Kernel: @unchecked Sendable {
     // wasn't on the shape's surface (nor facing the same way); a merge's parts are looked into, the one whose surface the
     // point is on. Nil on a face the shape had before any treatment (or one a hollow or a cut made).
     func treatedAt(_ node: Node, _ p: SIMD3<Double>) -> Spot? {
+        // On the finely meshed surface (a click lands on the coarser one shown), so faces kept as they were match closely.
         guard let top = mesh(node, deflection: 0.01), let hit = Self.nearest(top, p) else { return nil }
-        return treatedAt(node, p, hit.normal, path: [])
+        return treatedAt(node, hit.point, hit.normal, path: [])
     }
 
     private func treatedAt(_ node: Node, _ p: SIMD3<Double>, _ facing: SIMD3<Double>, path: [Int]) -> Spot? {
@@ -968,7 +969,7 @@ final class Kernel: @unchecked Sendable {
         while let c = n {
             if let inner = c.inner {
                 guard let m = mesh(inner, deflection: 0.01), let hit = Self.nearest(m, p) else { return nil }
-                if hit.distance > 0.06 || simd_dot(hit.normal, facing) < cos(5 * Double.pi / 180) {
+                if hit.distance > 0.04 || simd_dot(hit.normal, facing) < cos(5 * Double.pi / 180) {
                     switch c {
                     case .round, .cove, .bevel:
                         guard let edge = Self.nearestEdge(m, p) else { return nil }
@@ -1008,22 +1009,24 @@ final class Kernel: @unchecked Sendable {
         return edges
     }
 
-    // The nearest triangle of a mesh to p: how far, and which way it faces.
-    static func nearest(_ m: Mesh, _ p: SIMD3<Double>) -> (distance: Double, normal: SIMD3<Double>)? {
-        var best = Double.infinity, normal = SIMD3<Double>(0, 0, 1)
+    // The nearest triangle of a mesh to p: how far, which way it faces, and the point on it.
+    static func nearest(_ m: Mesh, _ p: SIMD3<Double>) -> (distance: Double, normal: SIMD3<Double>, point: SIMD3<Double>)? {
+        var best = Double.infinity, normal = SIMD3<Double>(0, 0, 1), point = p
         var t = 0
         while t + 2 < m.indices.count {
             let a = SIMD3<Double>(m.vertices[Int(m.indices[t])].xyz), b = SIMD3<Double>(m.vertices[Int(m.indices[t + 1])].xyz),
                 c = SIMD3<Double>(m.vertices[Int(m.indices[t + 2])].xyz)
-            let d = simd_length(p - Self.closest(p, a, b, c))
+            let q = Self.closest(p, a, b, c)
+            let d = simd_length(p - q)
             if d < best {
                 best = d
+                point = q
                 let n = simd_cross(b - a, c - a)
                 if simd_length(n) > 0 { normal = simd_normalize(n) }
             }
             t += 3
         }
-        return best.isFinite ? (best, normal) : nil
+        return best.isFinite ? (best, normal, point) : nil
     }
 
     // The point of triangle abc nearest p.
@@ -2149,7 +2152,7 @@ final class Workbench: DesignHost {
         let first = parts[0]
         let name = op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect")
         let members = parts.flatMap { b -> [Part] in
-            if op == BK_UNION, case .group(BK_UNION, let inner) = b.node {
+            if op == BK_UNION, case .group(let inOp, let inner) = b.node, inOp == op {
                 return inner.map { p in Part(node: p.node, place: Placement.from(b.place.matrix * p.place.matrix), name: p.name, color: p.color ?? b.color) }
             }
             return [Part(node: b.node, place: b.place, name: b.name, color: b.color)]
@@ -2662,13 +2665,10 @@ final class Workbench: DesignHost {
             }
             for i in spots.indices { spots[i].rest = k.rest(of: spots[i].layer, without: spots[i].edges) }
             // The cut: across the first clicked edge, as it was (sharp) when it's an earlier treatment's.
-            var section: Section?, frame = matrix_identity_double4x4
-            if let s = spots.first, points[first] != nil, let inner = s.layer.inner {
-                section = k.section(inner, s.edges[0])
-                frame = Self.frame(node, s.path)
-            } else {
-                section = k.section(node, first)
-            }
+            let sharp = fresh.first != first ? spots.first : nil
+            let section = sharp.flatMap { s in s.layer.inner.flatMap { k.section($0, s.edges[0]) } } ?? (sharp == nil ? k.section(node, first) : nil)
+            let frame = sharp.map { Self.frame(node, $0.path) } ?? matrix_identity_double4x4
+            let edits = spots, sharpPicks = fresh
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let section, self.mode == .angles, let b = self.body(id) else {
@@ -2682,9 +2682,9 @@ final class Workbench: DesignHost {
                     self.cameraBeforeAngles = self.camera
                     self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
                         var e = AngleEdit(body: id, picks: picks, section: section)
-                        e.edits = spots
-                        e.fresh = fresh
-                        if let l = spots.first?.layer { e.adopt(l) }
+                        e.edits = edits
+                        e.fresh = sharpPicks
+                        if let l = edits.first?.layer { e.adopt(l) }
                         withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) { self.angleEdit = e }
                         self.angleOpening = false
                     }
