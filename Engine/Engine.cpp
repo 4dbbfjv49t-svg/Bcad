@@ -276,9 +276,40 @@ BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int co
   return treat(s, kinds, picks, count, t, maxRadius, missing, "cove");
 }
 
-BKShape *bk_hollow(const BKShape *, const BKShape *const *, int, const double *, int, const double *, const double *, int, double, int *missing) {
+BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount, const double *open, int openCount, const double *walls,
+                   const double *wallThickness, int wallCount, double thickness, int *missing) {
   if (missing) *missing = 0;
-  return later("hollow");
+  if (!s) return nullptr;
+  if (openCount < 0 || wallCount < 0 || sharpCount < 0 || (openCount > 0 && !open) || (wallCount > 0 && (!walls || !wallThickness)) ||
+      !finite(open, openCount * 6) || !finite(walls, wallCount * 6) || !finite(wallThickness, wallCount) || !std::isfinite(thickness)) {
+    lastError = "hollow: walls must be numbers";
+    return nullptr;
+  }
+  Hollowing h;
+  h.thickness = thickness;
+  if (openCount > 0) h.open.assign(open, open + openCount * 6);
+  if (wallCount > 0) h.walls.assign(walls, walls + wallCount * 6), h.wallThickness.assign(wallThickness, wallThickness + wallCount);
+  // Made now at the detail shown (so whether the walls fit is known at once, and that mesh kept): the shape itself, or
+  // failing that each of the shapes without its roundings, hollowed and kept to what lies inside the shape.
+  const double d = 0.05;
+  Solid made;
+  int miss = 0;
+  bool ok = hollowed(s->shape, h, d, made, &miss);
+  for (int k = 0; k < sharpCount && !ok; k++) {
+    if (!sharp || !sharp[k]) continue;
+    Hollowing via = h;
+    via.viaSharp = true, via.sharp = sharp[k]->shape;
+    if ((ok = hollowed(s->shape, via, d, made))) h = via;
+  }
+  if (missing) *missing = miss;
+  if (!ok) {
+    lastError = "hollow: the walls don't fit this shape";
+    return nullptr;
+  }
+  auto node = std::make_shared<Node>();
+  node->kind = Node::Hollow, node->a = s->shape, node->hollow = std::make_shared<Hollowing>(h);
+  node->made.push_back({d, std::make_shared<Solid>(std::move(made))});
+  return new BKShape{{node, Affine()}};
 }
 
 BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) {

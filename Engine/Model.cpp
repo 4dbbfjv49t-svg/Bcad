@@ -800,6 +800,30 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   return true;
 }
 
+std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<Elem> section) {
+  auto m = std::make_shared<Model>();
+  m->kind = Model::Swept;
+  m->a = a, m->b = b, m->phi = phi;
+  closeUp(section);
+  // The volume: each piece's area about the oval's line (its centroid's offset off that line bends the length a little;
+  // taken as the line's length, as the primitives are made).
+  double area = 0;
+  for (const auto &e : section) {
+    if (!e.arc) {
+      area += e.r0 * e.z1 - e.r1 * e.z0;
+      continue;
+    }
+    for (int k = 0; k < 64; k++) {
+      double r0, z0, r1, z1;
+      e.at(k / 64.0, r0, z0), e.at((k + 1) / 64.0, r1, z1);
+      area += r0 * z1 - r1 * z0;
+    }
+  }
+  m->section = std::move(section);
+  m->volume = std::fabs(area) / 2 * ellipseLength(a, b);
+  return m;
+}
+
 double profileMoment(const Elem &e) { return moment(e); }
 
 }  // namespace bce

@@ -219,6 +219,33 @@ V3 Crease::tangent(size_t i) const {
 
 double Crease::angleAt(size_t i) const { return materialAngle(ia[i], na[i], ib[i]); }
 
+int faceAt(const Solid &s, const double *pick) {
+  V3 a{pick[0], pick[1], pick[2]}, b{pick[3], pick[4], pick[5]};
+  double tol = tolOf(s);
+  // The face whose middle is nearest with a normal facing the same way; failing that, the face the point lies on.
+  V3 n = norm(a) > 1e-9 ? unit(a) : V3{};
+  double best = tol;
+  int hit = -1;
+  for (size_t f = 0; f < s.faces.size(); f++) {
+    bool facing = norm(n) == 0 || dot(s.faces[f].normal, n) >= 0.7;
+    double dist = norm(s.faces[f].centroid - b) + (facing ? 0 : tol);
+    if (dist < best) best = dist, hit = (int)f;
+  }
+  if (hit >= 0) return hit;
+  double close = std::min(tol, 0.05);
+  for (size_t t = 0; t < s.triFace.size(); t++) {
+    int f = (int)s.triFace[t];
+    if (norm(n) > 0 && dot(s.faces[f].normal, n) < 0.7) continue;
+    V3 A = s.p[s.tri[3 * t]], B = s.p[s.tri[3 * t + 1]], C = s.p[s.tri[3 * t + 2]], nn = unit(cross(B - A, C - A));
+    double h = std::fabs(dot(b - A, nn));
+    // Inside the triangle (by its sides' turns) and on its plane.
+    V3 p = b - nn * dot(b - A, nn);
+    bool in = dot(cross(B - A, p - A), nn) >= 0 && dot(cross(C - B, p - B), nn) >= 0 && dot(cross(A - C, p - C), nn) >= 0;
+    if (in && h < close) close = h, hit = f;
+  }
+  return hit;
+}
+
 std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *picks, int count, int *missing) {
   Index ix(s);
   double tol = tolOf(s);
@@ -282,28 +309,7 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
       break;
     }
     case BK_PICK_FACE: {
-      // The face whose middle is nearest with a normal facing the same way; failing that, the face the point lies on.
-      V3 n = norm(a) > 1e-9 ? unit(a) : V3{};
-      double best = tol;
-      int hit = -1;
-      for (size_t f = 0; f < s.faces.size(); f++) {
-        bool facing = norm(n) == 0 || dot(s.faces[f].normal, n) >= 0.7;
-        double dist = norm(s.faces[f].centroid - b) + (facing ? 0 : tol);
-        if (dist < best) best = dist, hit = (int)f;
-      }
-      if (hit < 0) {
-        double close = std::min(tol, 0.05);
-        for (size_t t = 0; t < s.triFace.size(); t++) {
-          int f = (int)s.triFace[t];
-          if (norm(n) > 0 && dot(s.faces[f].normal, n) < 0.7) continue;
-          V3 A = s.p[s.tri[3 * t]], B = s.p[s.tri[3 * t + 1]], C = s.p[s.tri[3 * t + 2]], nn = unit(cross(B - A, C - A));
-          double h = std::fabs(dot(b - A, nn));
-          // Inside the triangle (by its sides' turns) and on its plane.
-          V3 p = b - nn * dot(b - A, nn);
-          bool in = dot(cross(B - A, p - A), nn) >= 0 && dot(cross(C - B, p - B), nn) >= 0 && dot(cross(A - C, p - C), nn) >= 0;
-          if (in && h < close) close = h, hit = f;
-        }
-      }
+      int hit = faceAt(s, q);
       if (hit >= 0) {
         for (size_t e = 0; e < s.edges.size(); e++)
           if (usable[e] && (s.edges[e].f0 == hit || s.edges[e].f1 == hit)) chosen.insert((int)e);

@@ -1161,8 +1161,9 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
 
 }  // namespace
 
-Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
+Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
   fit = TreatFit();
+  const Solid &base = onto ? *onto : s;
   std::vector<Crease> creases = creasesOf(s, t.kinds.data(), t.picks.data(), (int)t.kinds.size(), &fit.missing);
   // Bevels and coves skip edges where the faces meet flat (and coves inside corners too).
   std::vector<Crease> work;
@@ -1174,7 +1175,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
   double size = 0;
   for (V3 q : s.p) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
   double tol = 1e-7 * (1 + size);
-  if (work.empty() || (t.kind != Treatment::Bevel && t.radius < 0.005) || (t.kind == Treatment::Bevel && std::min(t.legA, t.legB) < 0.005)) return s;
+  if (work.empty() || (t.kind != Treatment::Bevel && t.radius < 0.005) || (t.kind == Treatment::Bevel && std::min(t.legA, t.legB) < 0.005)) return base;
 
   // Will it fit: each face beside a crease must hold what the treatment takes of it (half of it when another treated edge
   // ends the face across from this one), measured in the cut across the crease's middle.
@@ -1296,7 +1297,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
   }
 
   // Every edge rounded on a solid of flat faces meeting only at balls: the rounded solid made outright.
-  if (t.kind == Treatment::Round && !lines.empty() && lines.size() == work.size()) {
+  if (!onto && t.kind == Treatment::Round && !lines.empty() && lines.size() == work.size()) {
     size_t edgesHere = 0;
     for (const auto &e : s.edges)
       if (e.f0 >= 0 && e.f1 >= 0 && e.f0 != e.f1) edgesHere++;
@@ -1815,7 +1816,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
 
   // The tools taken away one by one, then those added; failing that, each kind all together.
   auto made = [&](bool together) {
-    Solid r = s;
+    Solid r = base;
     for (int op : {BK_SUBTRACT, BK_UNION}) {
       const std::vector<Solid> &tools = op == BK_SUBTRACT ? take : add;
       if (tools.empty()) continue;
@@ -1851,7 +1852,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
   }
   if (!done) return tooLarge();
   finish(result, d);
-  if (pieces(result) != pieces(s)) return tooLarge();
+  if (pieces(result) != pieces(base)) return tooLarge();
   return result;
 }
 

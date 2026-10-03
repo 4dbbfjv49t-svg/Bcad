@@ -32,6 +32,9 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
     mesh(node.a, d, a);
     TreatFit fit;
     *out = treated(a, *node.treat, d, fit);
+  } else if (node.kind == Node::Hollow) {
+    // Made once already (it fitted); at another detail failing after all, the shape as it is.
+    if (!hollowed(node.a, *node.hollow, d, *out)) mesh(node.a, d, *out);
   } else {
     Solid a;
     mesh(node.a, d, a);
@@ -329,6 +332,8 @@ void tidy(Welded &w, double eps) {
 
 }  // namespace
 
+bool sameForm(const FaceGeom &a, const FaceGeom &b) { return sameSurface(a, b); }
+
 // Triangles thinner than anything told apart (a point a hair off the line between two others, where a cut grazes a side)
 // done away with: the long side swapped for one from that point to the corner across it, the two triangles there taking
 // the neighbour's face, normals and slivers. Swaps that would fold or double a side are left.
@@ -622,6 +627,7 @@ Reach reach(const Node &node, V3 d, bool prove) {
     a.exact = false;
     return a;
   }
+  if (node.kind == Node::Hollow) return a;  // the outside kept (an opening's rim as far as its face was)
   if (node.kind == Node::Split) {
     // Exact while the farthest point stays on the kept side (or on the plane, the edge of it).
     a.exact = a.exact && planeSide(a.point, node.p, node.n) * (node.side == 0 ? 1 : -1) >= 0;

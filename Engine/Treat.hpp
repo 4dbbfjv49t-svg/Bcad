@@ -31,6 +31,9 @@ struct Crease {
 // that don't meet smoothly. Runs meeting smoothly are taken whole. `missing` counts picks that match nothing.
 std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *picks, int count, int *missing);
 
+// The face a face pick (normal, a point on it) stands for (as OpenCascade's kernel finds it), or -1.
+int faceAt(const Solid &s, const double *pick);
+
 // The crease one pick stands for, described at the pick's point (an edge pick) or the middle of the longest edge; false
 // when there is none.
 bool creaseAt(const Solid &s, int kind, const double *pick, Crease &out, size_t &at);
@@ -57,7 +60,21 @@ struct TreatFit {
   int missing = 0;
 };
 
-// The solid treated along the picked edges, at a chord error of d (its tools made to the same detail).
-Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit);
+// The solid treated along the picked edges, at a chord error of d (its tools made to the same detail). With `onto`, the
+// tools made for s's edges are taken from (or added to) that solid instead (a hollow's inside, cut where s's edges are).
+Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto = nullptr);
+
+// Hollowing: walls of `thickness` (faces picked as openings left out, others with walls of their own), and the shape
+// without its roundings to hollow instead when the shape itself won't (only what lies inside the shape kept).
+struct Hollowing {
+  double thickness = 2;
+  std::vector<double> open, walls, wallThickness;
+  bool viaSharp = false;
+  Shape sharp;
+};
+
+// The shape (as placed) hollowed, at a chord error of d; false when the walls don't fit (`missing` the picks that match
+// no face).
+bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing = nullptr);
 
 }  // namespace bce

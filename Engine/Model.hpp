@@ -158,6 +158,7 @@ struct Model {
 
 struct Node;
 struct Treatment;
+struct Hollowing;
 
 // A shape as the C API holds it: what it is and where it's placed (shared, so copies cost nothing).
 struct Shape {
@@ -167,11 +168,12 @@ struct Shape {
 
 // What a shape is: a primitive, a merge (union, subtract, intersect as BK_UNION …) of two placed shapes, the side of a
 // plane (point p, normal n; side 0 is where n points) of a placed shape, or a placed shape with its edges treated
-// (rounded, bevelled; Treat.hpp). Its meshes are made when asked, at the detail asked, and the last few kept.
+// (rounded, bevelled) or hollowed (Treat.hpp). Its meshes are made when asked, at the detail asked, and the last few kept.
 struct Node {
-  enum Kind { Prim, Bool, Split, Treat } kind = Prim;
+  enum Kind { Prim, Bool, Split, Treat, Hollow } kind = Prim;
   std::shared_ptr<const Model> model;
   std::shared_ptr<const Treatment> treat;
+  std::shared_ptr<const Hollowing> hollow;
   int op = 0;
   Shape a, b;
   V3 p, n;
@@ -189,6 +191,9 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why);
 std::shared_ptr<Model> turnedModel(std::vector<Elem> profile);
 // ∮ r²/2 dz along a profile piece: its share of the area moment about the axis (times the angle turned: the volume).
 double profileMoment(const Elem &e);
+// A tube along an oval (semi-axes a, b, turned phi): its section (r along the oval's outward normal, z up), volume worked
+// out.
+std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<Elem> section);
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
 // A shape of a model, or of two shapes merged (op as BK_UNION …).
 Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place = Affine());
@@ -227,6 +232,8 @@ bool inside(const Solid &s, V3 q);
 // one surface joined, edges, corners and circles found again.
 Solid combine(const Solid &a, const Solid &b, int op);
 Solid cut(const Solid &s, V3 p, V3 n, int side);
+// Whether two faces lie on one surface (one plane facing one way; one turned profile piece in one place).
+bool sameForm(const FaceGeom &a, const FaceGeom &b);
 void finish(Solid &s, double deflection);
 // Closed shells of a mesh that enclose material (an inner void isn't one).
 int pieces(const Solid &s);
