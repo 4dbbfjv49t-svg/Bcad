@@ -33,8 +33,9 @@ FaceGeom flipped(FaceGeom g) {
   return g;
 }
 
-// How far a part's face moves in (less than zero: out). Growing (a part taken away), every face moves out by its wall.
-double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inMerge) {
+// How far a part's face moves in (less than zero: out). Growing (a part taken away), every face moves out by its wall;
+// in a merge, common part or cut (`inBool`), a face that doesn't show in the shape moves out.
+double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inBool) {
   FaceGeom g = flip ? flipped(g0) : g0;
   // An opening before a wall of its own, should a face be picked as both (as OpenCascade's kernel takes it).
   if (sign > 0)
@@ -43,7 +44,7 @@ double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inMe
   for (const auto &[w, t] : r.own)
     if (sameForm(w, g)) return sign * t;
   if (sign < 0) return -r.t;
-  if (inMerge) {
+  if (inBool) {
     bool shown = false;
     for (const auto &f : r.shown) shown = shown || sameForm(f, g);
     if (!shown) return -r.t;
@@ -236,7 +237,7 @@ struct Ctx {
   const Rules &rules;
 };
 
-bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out);
+bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inBool, Ctx &ctx, Solid &out);
 
 // An oval cylinder's void: its ends moved in by `bottom` and `top`, its side by `side` — the side's inward offset, which
 // isn't an oval, as points close enough to it, the area it misses kept as its face's deficit (the oval's area, less the
@@ -301,7 +302,7 @@ bool ovalVoid(V3 C, V3 X, V3 Y, V3 Z, double bottom, double side, double top, do
 }
 
 // A primitive moved in: each of its faces by its rule.
-bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out) {
+bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inBool, Ctx &ctx, Solid &out) {
   const Model &m = *node.model;
   const Rules &r = ctx.rules;
   // Its faces as meshed in place (forms exactly as the shape's own).
@@ -310,7 +311,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
   if (m.kind == Model::Poly) {
     if (placed.faces.size() != m.loops.size()) return false;
     std::vector<double> move;
-    for (const auto &f : placed.faces) move.push_back(moveOf(r, f.geom, sign, flip, inMerge));
+    for (const auto &f : placed.faces) move.push_back(moveOf(r, f.geom, sign, flip, inBool));
     return flatInset(m, Wn, move, r.d, r.size, out);
   }
   // Turned or a tube: each piece's move in the model's own units (under a stretch, enough all along the piece).
@@ -323,7 +324,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     if (face >= placed.faces.size()) return false;
     // A move m along the piece's normal (nr, nz) moves its face m / |(nr / across, nz / sz)| in place: the inverse, at its
     // most along the piece (an arc's normal turns), for a wall at least as thick as asked.
-    double world = moveOf(r, placed.faces[face++].geom, sign, flip, inMerge), most = 0, nr, nz;
+    double world = moveOf(r, placed.faces[face++].geom, sign, flip, inBool), most = 0, nr, nz;
     for (double at : {0.0, 0.5, 1.0}) {
       prof[k].normalAt(at, nr, nz);
       most = std::max(most, std::hypot(nr / std::max(across, 1e-12), nz / std::max(sz, 1e-12)));
@@ -336,7 +337,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     double R = prof[1].r0, zlo = prof[0].z0, zhi = prof[2].z0;
     // The moves as asked in place (the pieces' faces in order: bottom, side, top).
     std::vector<double> world;
-    for (size_t k = 0; k < 3; k++) world.push_back(moveOf(r, placed.faces[k].geom, sign, flip, inMerge));
+    for (size_t k = 0; k < 3; k++) world.push_back(moveOf(r, placed.faces[k].geom, sign, flip, inBool));
     V3 C = Wn.point(p2(0, 0) + V3{0, 0, (zlo + zhi) / 2}), X = Wn.vector(V3{R, 0, 0}), Y = Wn.vector(V3{0, R, 0}), Z = Wn.vector(V3{0, 0, (zhi - zlo) / 2});
     return ovalVoid(C, X, Y, Z, world[0], world[1], world[2], r.d, out);
   }
@@ -356,8 +357,8 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
 
 // A treated shape's void: its shape's void, its edges treated there too (roundings narrower by the walls round the same
 // middles, bevels moved in, inward roundings wider round the same edges).
-bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out) {
-  if (!voidOf(node.a, Wn, sign, flip, inMerge, ctx, out)) return false;
+bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inBool, Ctx &ctx, Solid &out) {
+  if (!voidOf(node.a, Wn, sign, flip, inBool, ctx, out)) return false;
   if (sign < 0) return true;
   const Treatment &t = *node.treat;
   const Rules &r = ctx.rules;
@@ -390,7 +391,7 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
   for (const auto &c : creases) {
     if (c.pts.size() < 2) continue;
     size_t m = c.pts.size() / 2;
-    double oA = moveOf(r, child.faces[c.fa[m]].geom, 1, flip, inMerge), oB = moveOf(r, child.faces[c.fb[m]].geom, 1, flip, inMerge);
+    double oA = moveOf(r, child.faces[c.fa[m]].geom, 1, flip, inBool), oB = moveOf(r, child.faces[c.fb[m]].geom, 1, flip, inBool);
     V3 na = c.na[m], nb = c.nb[m];
     double kk = dot(na, nb), det = 1 - kk * kk;
     if (std::fabs(det) < 1e-9) continue;
@@ -439,37 +440,39 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
   return true;
 }
 
-bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out) {
+bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inBool, Ctx &ctx, Solid &out) {
   Affine Wn = s.place.then(W);
   const Node &node = *s.node;
   const Rules &r = ctx.rules;
   switch (node.kind) {
   case Node::Prim:
-    return primitiveVoid(node, Wn, sign, flip, inMerge, ctx, out);
+    return primitiveVoid(node, Wn, sign, flip, inBool, ctx, out);
   case Node::Treat:
-    return treatedVoid(node, Wn, sign, flip, inMerge, ctx, out);
+    return treatedVoid(node, Wn, sign, flip, inBool, ctx, out);
   case Node::Hollow:
     // Hollowed already: the void of its shape (what it holds inside stays held).
-    return voidOf(node.a, Wn, sign, flip, inMerge, ctx, out);
+    return voidOf(node.a, Wn, sign, flip, inBool, ctx, out);
   case Node::Split: {
-    if (!voidOf(node.a, Wn, sign, flip, inMerge, ctx, out)) return false;
+    if (!voidOf(node.a, Wn, sign, flip, inBool, ctx, out)) return false;
     // The cut's face (facing out of the kept side) moved in by its rule.
     V3 p = Wn.point(node.p), n = unit(Wn.normal(node.n));
     if (node.side != 0) n = -n;
     FaceGeom g;
     g.kind = FaceGeom::Flat, g.flat = true, g.pn = -n, g.pd = dot(-n, p);
-    double o = moveOf(r, g, sign, flip, inMerge);
+    double o = moveOf(r, g, sign, flip, inBool);
     out = cut(out, p + n * o, n, 0);
     return !out.tri.empty();
   }
   case Node::Bool: {
+    // A part's faces that don't show in the shape wall nothing in (moved out instead): merged, what each adds of itself
+    // is all the void needs from it; in a common part or one cut away from, such a face walls in only what the faces
+    // shown wall in already, and an opening in a face shown beside it must pass it.
     Solid a, b;
-    bool merge = node.op == BK_UNION;
-    if (!voidOf(node.a, Wn, sign, flip, merge || inMerge, ctx, a)) return false;
+    if (!voidOf(node.a, Wn, sign, flip, true, ctx, a)) return false;
     if (node.op == BK_SUBTRACT) {
       // What's taken away grows by the walls (its faces in the result face the other way).
       if (!voidOf(node.b, Wn, -sign, !flip, false, ctx, b)) return false;
-    } else if (!voidOf(node.b, Wn, sign, flip, merge || inMerge, ctx, b)) {
+    } else if (!voidOf(node.b, Wn, sign, flip, true, ctx, b)) {
       return false;
     }
     out = combine(a, b, node.op);

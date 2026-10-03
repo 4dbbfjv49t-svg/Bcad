@@ -951,6 +951,14 @@ int main() {
       std::vector<std::pair<double, double>> bev{{e470 - leg, h470}, {e470, h470}};
       arcTo(bev, 0, 0, R470, std::atan2(h470, e470), PI / 2 - a470);
       bev.push_back({e470 - leg, h470});
+      // Two boxes' common part, open at the top and at one side: that side the second box's face, with the first box's own
+      // face just past it (not in the shape, so no wall). OpenCascade's 641.7472.
+      double big79[3] = {29.1248, 28.4093, 13.6934}, small79[3] = {15.4352, 8.28922, 11.1492}, wall79 = 1.59593;
+      BKShape *common79 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, big79)), keep(at(keep(bk_primitive(BK_BOX, small79)), -6.91055, 9.93607, -0.716893))));
+      double open79[12] = {0, 0, 1, -6.87767, 9.93607, 4.85771, 0, 1, 0, -6.87767, 14.0807, -0.716893};
+      double x79 = (-6.91055 + small79[0] / 2) + big79[0] / 2, y79 = small79[1], z79 = small79[2];
+      is("hollow: two boxes' common part, open at the top and a side", hollow(common79, open79, 2, nullptr, nullptr, 0, wall79),
+         x79 * y79 * z79 - (x79 - 2 * wall79) * (y79 - wall79) * (z79 - wall79), 1e-3);
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
     }
