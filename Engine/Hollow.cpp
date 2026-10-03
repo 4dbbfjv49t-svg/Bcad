@@ -361,6 +361,8 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
   if (sign < 0) return true;
   const Treatment &t = *node.treat;
   const Rules &r = ctx.rules;
+  // Its edges, to treat them (a cut one comes without).
+  if (out.edges.empty()) finish(out, r.d);
   Solid child;
   mesh(node.a, r.d, child);
   child.transform(Wn);

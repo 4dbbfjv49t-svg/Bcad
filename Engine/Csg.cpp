@@ -161,6 +161,9 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
   // In the face's own frame: the circle's middle and axis, the line's points about it, and the radius.
   V3 mid, ax{0, 0, 1};
   double r;
+  // How far in from the circle the mesh's points may lie, per unit of the surface's chord error: the surface leans across
+  // the circle's plane, a point that far under it lies farther in along the plane (1 / the radial part of its normal).
+  double lean = 1;
   if (level) {
     mid = {0, 0, z};
     if (!el.arc) {
@@ -168,6 +171,7 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
       double t = (z - el.z0) / (el.z1 - el.z0);
       if (t < -1e-9 || t > 1 + 1e-9) return false;
       r = el.r0 + std::clamp(t, 0.0, 1.0) * (el.r1 - el.r0);
+      lean = std::hypot(el.r1 - el.r0, el.z1 - el.z0) / std::fabs(el.z1 - el.z0);
     } else {
       double rho = 0;
       for (V3 v : q) rho += std::hypot(v.x, v.y);
@@ -175,6 +179,7 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
       double a = std::asin(std::clamp((z - el.cz) / el.rad, -1.0, 1.0));
       double r1 = el.cr + el.rad * std::cos(a), r2 = el.cr - el.rad * std::cos(a);
       r = std::fabs(r1 - rho) <= std::fabs(r2 - rho) ? r1 : r2;
+      lean = 1 / std::max(std::cos(a), 1e-9);
     }
   } else {
     // A sphere: any flat line on it is a circle.
@@ -192,13 +197,16 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
     mid = ball - ax * h;
     if (el.rad * el.rad - h * h <= 0) return false;
     r = std::sqrt(el.rad * el.rad - h * h);
+    lean = el.rad / r;
   }
+  // Not so steep that points a chord's error under the surface could be anywhere.
+  lean = std::min(lean, 8.0);
   // The mesh's points lie on chords inside the circle, by no more than the chord error.
   double turn = 0;
   V3 e1 = unit(std::fabs(ax.x) < 0.9 ? cross(ax, V3{1, 0, 0}) : cross(ax, V3{0, 1, 0})), e2 = cross(ax, e1);
   for (size_t i = 0; i < q.size(); i++) {
     double rho = norm((q[i] - mid) - ax * dot(q[i] - mid, ax));
-    if (r <= tol || rho > r + tol || rho < r - 2 * deflection / scale - tol) return false;
+    if (r <= tol || rho > r + tol || rho < r - 2 * lean * deflection / scale - tol) return false;
     if (i == 0) continue;
     V3 u = q[i - 1] - mid, v = q[i] - mid;
     double d = std::atan2(dot(v, e2), dot(v, e1)) - std::atan2(dot(u, e2), dot(u, e1));

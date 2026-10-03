@@ -229,6 +229,25 @@ Cut2 cutOf(const FaceGeom &g, V3 E, V3 U, V3 N, V3 dir2, V3 n2) {
   return c;
 }
 
+// Where a bevel's leg `len` long from the corner (the origin) ends on a face as cut: along a straight one, on a curved
+// one's circle (the way it runs into the face).
+bool legOn(const Cut2 &F, double len, V3 &out) {
+  if (!F.circle) {
+    out = F.dir * len;
+    return true;
+  }
+  // |P| = len and |P - q| = rad: on the line both circles share, len²/2 from the origin along q (the origin is on the face's
+  // circle: |q| = rad).
+  double qq = dot(F.q, F.q);
+  if (!(qq > 0) || len >= 2 * std::sqrt(qq)) return false;
+  V3 u = F.q / std::sqrt(qq), v = p2(-u.y, u.x);
+  double x = len * len / (2 * std::sqrt(qq)), h2 = len * len - x * x;
+  if (h2 < 0) return false;
+  V3 P = u * x + v * std::sqrt(h2), Q = u * x - v * std::sqrt(h2);
+  out = dot(P, F.dir) >= dot(Q, F.dir) ? P : Q;
+  return dot(out, F.dir) > 0;
+}
+
 // Rounding the corner at the origin where a face is curved in the cut (a ring's face turned from an arc): the circle's
 // middle where both faces moved into the material by r meet (out of it at an inside corner), its touch points on the
 // faces themselves; the rest as roundCorner. False when they don't meet.
@@ -287,23 +306,36 @@ bool roundCurved(const Cut2 &A, const Cut2 &B, double r, int which, Section2 &ou
 
 // Bevelling the corner at e: legs la along face A and lb along face B; taken away at an outside corner, added at an inside
 // one. With `soft` above zero its two edges with the faces rounded too.
-Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, double soft, int which, bool &fits) {
+Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, double soft, int which, bool &fits, const Cut2 *A = nullptr,
+                     const Cut2 *B = nullptr) {
   bool convex = cornerAngle(da, na, db) < pi;
   double m = reachOut(std::max(la, lb), which) * (convex ? 1 : -1);
-  V3 PA = e + da * la, PB = e + db * lb, dP = unit(PB - PA), nP = p2(-dP.y, dP.x);
+  Section2 out;
+  out.fill = !convex;
+  fits = true;
+  // Each leg's end on its face, and the face's way on and outward normal there: along a straight face; on a face curved in
+  // the cut (`A`, `B`; the corner at the origin), that far from the corner in a straight line, the face's tangent there.
+  V3 PA = e + da * la, PB = e + db * lb, ta = da, tna = na, tb = db, tnb = nb;
+  auto onCurve = [&](const Cut2 *F, double len, V3 &P, V3 &t, V3 &n) {
+    if (!F || !F->circle) return true;
+    if (!legOn(*F, len, P)) return false;
+    n = unit(P - F->q) * (F->away ? 1.0 : -1.0);
+    t = p2(-n.y, n.x);
+    if (dot(t, P) < 0) t = -t;
+    return true;
+  };
+  if (!onCurve(A, la, PA, ta, tna) || !onCurve(B, lb, PB, tb, tnb)) return fits = false, out;
+  V3 dP = unit(PB - PA), nP = p2(-dP.y, dP.x);
   if (dot(nP, e - PA) < 0) nP = -nP;
   V3 O = outerCorner(e, na, nb, m);
   // The bevel's line run on past each face, out to the tool's sides.
   auto past = [&](V3 from, V3 dir, V3 n) { return from + dir * (m / dot(dir, n)); };
-  Section2 out;
-  out.fill = !convex;
-  fits = true;
   if (!(soft > 0.005) || !convex) {
     out.runs = {lineRun(past(PA, PA - PB, na)), lineRun(O), lineRun(past(PB, PB - PA, nb))};
   } else {
-    Touch kA = touchAt(PA, da, na, dP, soft), kB = touchAt(PB, -dP, nP, db, soft);
+    Touch kA = touchAt(PA, ta, tna, dP, soft), kB = touchAt(PB, -dP, nP, tb, soft);
     fits = dot(kB.a - kA.b, dP) > 0;
-    out.runs = {lineRun(kA.a), lineRun(kA.a + na * m), lineRun(O), lineRun(kB.b + nb * m), arcRun(kB, kB.b, PB, soft), lineRun(kB.a),
+    out.runs = {lineRun(kA.a), lineRun(kA.a + tna * m), lineRun(O), lineRun(kB.b + tnb * m), arcRun(kB, kB.b, PB, soft), lineRun(kB.a),
                 arcRun(kA, kA.b, PA, soft)};
   }
   ccw(out);
@@ -1274,6 +1306,62 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
   return out.meshVolume() > 0;
 }
 
+// What's left of tools' faces meant to lie outside what they cut (`aux`): thin bits (no wider than a few chord errors `d`,
+// where meshes meet near tangent) taken into the face beside each they share most of their outline with.
+void foldAux(Solid &r, double d) {
+  bool any = false;
+  for (const auto &f : r.faces) any = any || f.aux;
+  if (!any) return;
+  std::unordered_map<PKey, uint32_t, PKeyHash> id;
+  std::vector<uint32_t> at(r.p.size());
+  for (size_t i = 0; i < r.p.size(); i++) at[i] = id.emplace(pkey(r.p[i]), (uint32_t)id.size()).first->second;
+  size_t nt = r.triFace.size();
+  std::unordered_map<uint64_t, std::vector<uint32_t>> sides;
+  for (size_t t = 0; t < nt; t++)
+    for (int k = 0; k < 3; k++) {
+      uint32_t a = at[r.tri[3 * t + k]], b = at[r.tri[3 * t + (k + 1) % 3]];
+      sides[(uint64_t)std::min(a, b) << 32 | std::max(a, b)].push_back((uint32_t)t);
+    }
+  for (int round = 0; round < 8; round++) {
+    std::vector<std::vector<uint32_t>> of(r.faces.size());
+    for (size_t t = 0; t < nt; t++) of[r.triFace[t]].push_back((uint32_t)t);
+    // Each such face's sides shared with other faces, by length; and how wide it is (twice its area over its outline's
+    // length).
+    std::map<int, std::map<int, double>> beside;
+    std::map<int, double> outline;
+    for (const auto &[key, ts] : sides) {
+      if (ts.size() != 2) continue;
+      int fa = (int)r.triFace[ts[0]], fb = (int)r.triFace[ts[1]];
+      if (fa == fb) continue;
+      V3 p = r.p[r.tri[3 * ts[0]]];
+      for (int k = 0; k < 3; k++) {
+        uint32_t a = at[r.tri[3 * ts[0] + k]], b = at[r.tri[3 * ts[0] + (k + 1) % 3]];
+        if (((uint64_t)std::min(a, b) << 32 | std::max(a, b)) == key) p = r.p[r.tri[3 * ts[0] + k]] - r.p[r.tri[3 * ts[0] + (k + 1) % 3]];
+      }
+      double len = norm(p);
+      outline[fa] += len, outline[fb] += len;
+      if (r.faces[fa].aux && !r.faces[fb].aux) beside[fa][fb] += len;
+      if (r.faces[fb].aux && !r.faces[fa].aux) beside[fb][fa] += len;
+    }
+    bool changed = false;
+    for (const auto &[f, near] : beside) {
+      double area = 0;
+      for (uint32_t t : of[f]) {
+        V3 a = r.p[r.tri[3 * t]], b = r.p[r.tri[3 * t + 1]], c = r.p[r.tri[3 * t + 2]];
+        area += norm(cross(b - a, c - a)) / 2;
+      }
+      if (!(outline[f] > 0) || 2 * area / outline[f] > 4 * d) continue;
+      int into = near.begin()->first;
+      for (const auto &[g, len] : near)
+        if (len > near.at(into)) into = g;
+      for (uint32_t t : of[f]) r.triFace[t] = (uint32_t)into;
+      r.faces[into].deficit += r.faces[f].deficit, r.faces[f].deficit = 0;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+}
+
 // How far a flat face's sides can move in before the face is gone: each side moves in by k times its own setback
 // (`setback` per mesh edge, 0 for an edge left as it is), and the largest k that leaves some of the face. Moved in, a side
 // shortens by how its neighbours move (its ends slide along it); one shortened to nothing drops out and its neighbours
@@ -1907,6 +1995,16 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           } else if (g.kind == FaceGeom::Turned && g.exact) {
             V3 ax = unit(g.place.vector({0, 0, 1})), o = g.place.point({0, 0, 0});
             V3 off = (o - centre) - axis * dot(o - centre, axis);
+            // A ball's face is turned round any line through its middle.
+            V3 gx = g.place.vector({1, 0, 0}), gy = g.place.vector({0, 1, 0}), gz = g.place.vector({0, 0, 1});
+            bool even = std::fabs(norm(gx) - norm(gz)) < 1e-12 * norm(gz) && std::fabs(norm(gy) - norm(gz)) < 1e-12 * norm(gz) &&
+                        std::fabs(dot(gx, gy)) + std::fabs(dot(gy, gz)) + std::fabs(dot(gz, gx)) < 1e-12 * dot(gz, gz);
+            if (g.elem.arc && g.elem.cr == 0 && even) {
+              V3 m = g.place.point({0, 0, g.elem.cz});
+              V3 offM = (m - centre) - axis * dot(m - centre, axis);
+              ring = ring && norm(offM) < tol * 10;
+              continue;
+            }
             ring = ring && norm(cross(ax, axis)) < 1e-9 && norm(off) < tol * 10;
           } else {
             ring = false;
@@ -1976,12 +2074,18 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           return false;
         }
         V3 U = cr.ia[0], N = unit(c.na[0] - U * dot(c.na[0], U));
-        // A face turned from an arc is curved in this cut: the rounding meets it there, not its tangent at the edge.
-        if (t.kind == Treatment::Round && secs.size() == 1) {
+        // A face turned from an arc is curved in this cut: the rounding meets it there, not its tangent at the edge; a bevel's
+        // leg ends on it (that far from the edge in a straight line), not on its tangent.
+        if (t.kind != Treatment::Cove && secs.size() == 1) {
           auto in2 = [&](V3 v) { return unit(p2(dot(v, U), dot(v, N))); };
           Cut2 A = cutOf(s.faces[c.fa[0]].geom, E, U, N, in2(cr.ia[0]), in2(c.na[0])), B = cutOf(s.faces[c.fb[0]].geom, E, U, N, in2(cr.ib[0]), in2(c.nb[0]));
           Section2 exact;
-          if ((A.circle || B.circle) && roundCurved(A, B, tw.radius, which, exact)) secs[0] = exact;
+          if (t.kind == Treatment::Round && (A.circle || B.circle) && roundCurved(A, B, tw.radius, which, exact)) secs[0] = exact;
+          if (t.kind == Treatment::Bevel && (A.circle || B.circle)) {
+            bool ok;
+            exact = bevelCorner(p2(0, 0), A.dir, A.n, B.dir, B.n, tw.legA, tw.legB, tw.corner, which, ok, &A, &B);
+            if (ok) secs[0] = exact;
+          }
         }
         // The circle's steps in the solid's mesh: its points on the circle itself, evenly round it (else the tool's own).
         int around = 0;
@@ -2186,23 +2290,47 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
     return r;
   };
+  // Each tool's faces that lie wholly outside the solid where it takes away (inside it where it adds): there only to close
+  // the tool (sampled at points within some of each face's triangles; a tool's triangles may run its whole length).
+  auto markAux = [&](std::vector<Solid> &tools, bool fill) {
+    static const double within[7][3] = {{1 / 3.0, 1 / 3.0, 1 / 3.0}, {0.45, 0.45, 0.1}, {0.45, 0.1, 0.45}, {0.1, 0.45, 0.45},
+                                        {0.7, 0.15, 0.15}, {0.15, 0.7, 0.15}, {0.15, 0.15, 0.7}};
+    for (auto &tool : tools) {
+      std::vector<std::vector<size_t>> of(tool.faces.size());
+      for (size_t t = 0; t < tool.triFace.size(); t++) of[tool.triFace[t]].push_back(t);
+      for (size_t f = 0; f < tool.faces.size(); f++) {
+        if (of[f].empty()) continue;
+        bool aux = true;
+        size_t step = std::max<size_t>(1, of[f].size() / 8);
+        for (size_t i = 0; i < of[f].size() && aux; i += step) {
+          size_t t = of[f][i];
+          V3 a = tool.p[tool.tri[3 * t]], b = tool.p[tool.tri[3 * t + 1]], c = tool.p[tool.tri[3 * t + 2]];
+          for (int k = 0; k < 7 && aux; k++) aux = inside(s, a * within[k][0] + b * within[k][1] + c * within[k][2]) == fill;
+        }
+        tool.faces[f].aux = aux;
+      }
+    }
+  };
   // Inward roundings exact first; where their cylinders only touch at a corner, a little wider each there.
   Solid result;
   bool done = false;
   for (double shadeBy : {0.0, 1e-4, 2e-3}) {
     if (shadeBy > 0 && t.kind != Treatment::Cove) break;
     if (!tools(shadeBy)) return s;
-    // A rounding's faces (its tools' curved ones) meet the faces beside them smoothly: so marked for what's done next.
+    markAux(take, false), markAux(add, true);
+    // A rounding's faces (its tools' curved ones that are left) meet the faces beside them smoothly: so marked for what's
+    // done next.
     if (t.kind != Treatment::Bevel)
       for (auto *list : {&take, &add})
         for (auto &tool : *list)
           for (auto &f : tool.faces)
-            if (!f.geom.flat) f.blend = true;
+            if (!f.geom.flat && !f.aux) f.blend = true;
     result = made(false);
     if (!closed(result) && take.size() + add.size() > 1) result = made(true);
     if ((done = !result.tri.empty() && closed(result))) break;
   }
   if (!done) return tooLarge();
+  foldAux(result, d);
   finish(result, d);
   if (pieces(result) != pieces(base)) return tooLarge();
   return result;

@@ -74,6 +74,9 @@ struct Solid {
     double deficit = 0;
     // Made by a rounding or an inward rounding: it meets the faces beside it smoothly, however its mesh bends there.
     bool blend = false;
+    // A tool's face meant to lie outside what it takes away (inside what it adds): any of it left is a sliver where meshes
+    // meet near tangent, to be taken into the face beside it.
+    bool aux = false;
   };
   std::vector<Face> faces;
   struct Edge {

@@ -901,6 +901,58 @@ int main() {
       double b1509[3] = {11.3016, 19.6324, 27.8478}, side[6] = {-b1509[0] / 2, 0, b1509[2] / 2, 0, 1, 0};
       BKShape *oneEdge = keep(bk_fillet(keep(bk_primitive(BK_BOX, b1509)), &ke, side, 1, 1.40145, &mr, &miss));
       is("bevel: a box with one edge rounded, all round", bk_chamfer(oneEdge, &kb, body, 1, 1.06377, 0.715423, 0, &miss), 6092.0459, 0.5);
+
+      // A ball cut off-centre by a slanted plane: its rim a circle round the plane's normal (a ball is turned round any line
+      // through its middle); three faces, as OpenCascade's (bits of the tool's outer faces left a hair inside the ball's mesh
+      // taken into the faces beside them). Exact volumes by turning the cut's outline (ρ, z) round that normal; kept: the side the normal
+      // points to (0) or away from (1).
+      auto turned = [](const std::vector<std::pair<double, double>> &loop) {
+        double v = 0;
+        for (size_t i = 0; i + 1 < loop.size(); i++) {
+          auto [x1, y1] = loop[i];
+          auto [x2, y2] = loop[i + 1];
+          v += (x1 * x1 + x1 * x2 + x2 * x2) / 3 * (y2 - y1);
+        }
+        return std::fabs(PI * v);
+      };
+      auto arcTo = [](std::vector<std::pair<double, double>> &loop, double cx, double cz, double rad, double a0, double a1) {
+        for (int i = 1, n = 20000; i <= n; i++) {
+          double a = a0 + (a1 - a0) * i / n;
+          loop.push_back({cx + rad * std::cos(a), cz + rad * std::sin(a)});
+        }
+      };
+      // The cap above z = h of a ball of radius R, its rim rounded r.
+      auto capRounded = [&](double R, double h, double r) {
+        double cap = PI * (R - h) * (R - h) * (2 * R + h) / 3, zc = h + r, rc = std::sqrt((R - r) * (R - r) - zc * zc);
+        std::vector<std::pair<double, double>> loop{{rc, h}, {std::sqrt(R * R - h * h), h}};
+        double ts = std::atan2(zc, rc);
+        arcTo(loop, 0, 0, R, std::atan2(h, std::sqrt(R * R - h * h)), ts);
+        arcTo(loop, rc, zc, r, ts, -PI / 2);
+        return cap - turned(loop);
+      };
+      double ball774[1] = {17.5967}, cutAt[3] = {-0.5319, -1.11591, -1.111}, cutN[3] = {0.318081, 0.797479, 0.814279};
+      double h774 = (cutAt[0] * cutN[0] + cutAt[1] * cutN[1] + cutAt[2] * cutN[2]) / std::hypot(cutN[0], cutN[1], cutN[2]);
+      BKShape *capped = keep(bk_split(keep(bk_primitive(BK_SPHERE, ball774)), cutAt, cutN, 1));
+      is("round: a ball cut aslant, its rim (OpenCascade's 901.9012)", bk_fillet(capped, &kb, body, 1, 2.11565, &mr, &miss), capRounded(ball774[0] / 2, -h774, 2.11565), 0.15, 3);
+      // Hollowed: the void a ball cut and rounded as well, each smaller by the wall (it was left sharp: a cut shape's void came
+      // without its edges). OpenCascade's 423.5560.
+      double ball85[1] = {17.3662}, at85[3] = {1.01316, 1.55386, 0.529631}, n85[3] = {0.382081, 0.566047, -0.504127}, wall85 = 0.890721;
+      double h85 = (at85[0] * n85[0] + at85[1] * n85[1] + at85[2] * n85[2]) / std::hypot(n85[0], n85[1], n85[2]), R85 = ball85[0] / 2;
+      BKShape *rounded85 = keep(bk_fillet(keep(bk_split(keep(bk_primitive(BK_SPHERE, ball85)), at85, n85, 0)), &kb, body, 1, 1.9793, &mr, &miss));
+      is("hollow: a ball cut aslant and rounded", hollow(rounded85, nullptr, 0, nullptr, nullptr, 0, wall85),
+         capRounded(R85, h85, 1.9793) - capRounded(R85 - wall85, h85 + wall85, 1.9793 - wall85), 0.1);
+      // A ball cut flat, its rim bevelled: the leg on the ball a straight line to a point on it, not along its tangent
+      // (OpenCascade's 1301.5833; the cut ball itself comes out 0.03 mm³ over, its curved face's missed volume shared out
+      // by area).
+      double slab470[3] = {20.0164, 24.817, 24.8619}, ball470[1] = {14.8439}, rim470[6] = {0, 1, 0, 2.4948, 12.4085, -1.54868};
+      BKShape *dome470 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, slab470)), keep(at(keep(bk_primitive(BK_SPHERE, ball470)), 2.4948, 9.16612, -1.54868))));
+      double R470 = ball470[0] / 2, h470 = slab470[1] / 2 - 9.16612, e470 = std::sqrt(R470 * R470 - h470 * h470), leg = 2.02392;
+      double a470 = std::acos(h470 / R470) + 2 * std::asin(leg / (2 * R470));
+      std::vector<std::pair<double, double>> bev{{e470 - leg, h470}, {e470, h470}};
+      arcTo(bev, 0, 0, R470, std::atan2(h470, e470), PI / 2 - a470);
+      bev.push_back({e470 - leg, h470});
+      is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
+         4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
     }
     for (BKShape *s : made) bk_free(s);
     bk_free(box);
