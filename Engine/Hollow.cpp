@@ -388,17 +388,17 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
   std::vector<Crease> creases = creasesOf(child, t.kinds.data(), picks.data(), (int)t.kinds.size(), &missing);
   // Each edge's own: where it lies on the void (moved in by each face's wall), and its rounding or bevel there.
   std::map<std::tuple<long, long, long>, std::vector<double>> groups;  // (radius or legs, in 1e-9) → edge picks
-  for (const auto &c : creases) {
-    if (c.pts.size() < 2) continue;
-    size_t m = c.pts.size() / 2;
+  for (const auto &whole : creases) {
+    if (whole.pts.size() < 2) continue;
+    // Taken at its middle by length (a point of its own there; one by count may lie near an end).
+    Crease c = whole;
+    size_t m = pointAt(c, c.length / 2);
     double oA = moveOf(r, child.faces[c.fa[m]].geom, 1, flip, inBool), oB = moveOf(r, child.faces[c.fb[m]].geom, 1, flip, inBool);
     V3 na = c.na[m], nb = c.nb[m];
     double kk = dot(na, nb), det = 1 - kk * kk;
     if (std::fabs(det) < 1e-9) continue;
     double alpha = (-oA + oB * kk) / det, beta = (-oB + oA * kk) / det;
-    // Picked at the edge's middle (an edge of two points: halfway along it, not at its end).
-    V3 mid = c.pts.size() == 2 ? (c.pts[0] + c.pts[1]) / 2.0 : c.pts[m];
-    V3 at = mid + na * alpha + nb * beta, dir = c.tangent(m);
+    V3 at = c.pts[m] + na * alpha + nb * beta, dir = c.tangent(m);
     std::tuple<long, long, long> key;
     if (t.kind == Treatment::Round) {
       double rad = t.radius - std::max(oA, oB);

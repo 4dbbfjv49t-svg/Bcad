@@ -959,6 +959,17 @@ int main() {
       double x79 = (-6.91055 + small79[0] / 2) + big79[0] / 2, y79 = small79[1], z79 = small79[2];
       is("hollow: two boxes' common part, open at the top and a side", hollow(common79, open79, 2, nullptr, nullptr, 0, wall79),
          x79 * y79 * z79 - (x79 - 2 * wall79) * (y79 - wall79) * (z79 - wall79), 1e-3);
+      // Rounded all round, then hollowed: the void rounded too, narrower by the wall, each edge picked on it at its middle by
+      // length (one of an edge's points by count could lie near its end, past the void's corner). OpenCascade's 347.6992.
+      double big250[3] = {13.4032, 29.4925, 10.5391}, small250[3] = {11.2809, 16.3106, 20.0836}, r250 = 2.18804, t250 = 0.887828;
+      BKShape *common250 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, big250)), keep(at(keep(bk_primitive(BK_BOX, small250)), -6.93709, 5.51232, -5.8938))));
+      double l250[3] = {(-6.93709 + small250[0] / 2) + big250[0] / 2, small250[1], (-5.8938 + small250[2] / 2) + big250[2] / 2};
+      auto roundedBox = [](const double *l, double r, double in) {
+        double a = l[0] - 2 * in - 2 * r, b = l[1] - 2 * in - 2 * r, c = l[2] - 2 * in - 2 * r;
+        return a * b * c + 2 * r * (a * b + b * c + a * c) + PI * r * r * (a + b + c) + 4 * PI / 3 * r * r * r;
+      };
+      is("hollow: two boxes' common part rounded all round", hollow(keep(bk_fillet(common250, &kb, body, 1, r250, &mr, &miss)), nullptr, 0, nullptr, nullptr, 0, t250),
+         roundedBox(l250, r250, 0) - roundedBox(l250, r250 - t250, t250), 1e-3);
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
     }
