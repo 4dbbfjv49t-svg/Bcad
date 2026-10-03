@@ -403,16 +403,18 @@ jobs:
           shot ui-01-angles 1
           $U tree | grep -E "Angles|Work with angles|All edges|Click an edge" | head -6 || true
           $U key 0; sleep 1
-          $U button "Work with angles"; sleep 5
+          $U press "Work with angles"; shot ui-02a-opening 0.5
+          $U tree | grep -iE "can't|cut|fail" | head -4 || true
+          sleep 5
           shot ui-02-editor 1
           $U tree | grep -E "Rounded corner|Angled corner|Radius|picks" | head -6 || true
-          $U button "Apply"; sleep 5
+          $U press Apply; sleep 8
           shot ui-03-rounded 2
           said
-          echo "— hollowed: O, then Enter (closed, 2 mm walls)"
+          echo "— hollowed: O, then Apply (closed, 2 mm walls)"
           $U key 31; sleep 2
           shot ui-04-hollow-mode 1
-          $U key 36; sleep 5
+          $U press Apply; sleep 8
           shot ui-05-hollowed 2
           said
           echo "— a cylinder: R, A, Work with angles, Angled corner, Apply"
@@ -420,10 +422,10 @@ jobs:
           $U hold Cylinder 0.5 0.5 60; sleep 2
           $U key 15; sleep 2
           $U key 0; sleep 1
-          $U button "Work with angles"; sleep 5
-          $U axpress "Angled corner"; sleep 2
+          $U press "Work with angles"; sleep 6
+          $U press "Angled corner"; sleep 2
           shot ui-06-bevel-editor 1
-          $U button "Apply"; sleep 5
+          $U press Apply; sleep 8
           shot ui-07-bevelled 2
           said
           echo "— undo twice"
