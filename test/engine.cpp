@@ -822,6 +822,15 @@ int main() {
     for (double r : {1.0, 3.0})
       is(r == 1 ? "cove: every edge, 1 mm" : "cove: every edge, 3 mm", bk_cove(box, &kb, body, 1, r, &mr, &miss),
          8000 - 12 * r * r * PI / 4 * 20 + 8 * (3 * 2.0 / 3 - (2 - std::sqrt(2.0))) * r * r * r, 0.5, 18);
+    // Every edge of a five-sided prism at 0.5 mm, made or refused, in moments (once, tools going on being merged into a
+    // mesh already broken took 46 s to refuse it).
+    {
+      double five[3] = {5, 14.0654, 21.614};
+      auto t1 = std::chrono::steady_clock::now();
+      BKShape *coved = keep(bk_cove(keep(bk_primitive(BK_PRISM, five)), &kb, body, 1, 0.5, &mr, &miss));
+      double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+      check("cove: every edge of a prism, made or refused in moments", took < 5, fmt("%.1f s, ", took) + (coved ? "made" : bk_last_error()));
+    }
     is("bevel: 2 × 4 mm", bk_chamfer(box, &ke, edge, 1, 2, 4, 0, &miss), 8000 - 80, 1e-6, 7);
     // Softened: each of the bevel's edges (135°) rounded, ρ²(cot(φ/2) − (π − φ)/2) per edge.
     is("bevel: softened", bk_chamfer(box, &ke, edge, 1, 2, 2, 0.5, &miss), 8000 - 40 - 2 * 0.25 * (1 / std::tan(3 * PI / 8) - PI / 8) * 20, 1e-3, 9);

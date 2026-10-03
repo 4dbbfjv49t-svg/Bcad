@@ -1731,6 +1731,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   bool picked = false;
   for (int k : t.kinds) picked = picked || k == BK_PICK_EDGE || k == BK_PICK_CORNER;
   bool whole = spare;
+  // How many edges and faces were left as they are for that (none: nothing to try again for).
+  int spared = 0;
   // Each face's area (told when first asked).
   std::vector<double> areas;
   auto areaOf = [&](int f) {
@@ -1790,7 +1792,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       // edge of the shape's to treat either.
       Runs r = runsAt(s, m, at, {}, std::max(tol, d), nullptr, 0, false);
       if ((blendA && r.a < 4 * d) || (blendB && r.b < 4 * d)) continue;
-      if (whole && (r.a < 4 * d || r.b < 4 * d)) continue;
+      if (whole && (r.a < 4 * d || r.b < 4 * d)) {
+        spared++;
+        continue;
+      }
     }
     work.push_back(c);
   }
@@ -1883,7 +1888,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   }
   for (int f : flats) {
     // With every edge asked for, a hair's remnant of a face (where roundings met) may be used up.
-    if (whole && areaOf(f) < 16 * d * d) continue;
+    if (whole && areaOf(f) < 16 * d * d) {
+      spared++;
+      continue;
+    }
     if (t.kind != Treatment::Bevel) {
       if (!consumed.count(f)) most = std::min(most, faceRoom(s, f, setback));
       continue;
@@ -1905,6 +1913,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       fit.why = "bevel: too large for these edges";
       return s;
     }
+  }
+  if (spare && !spared) {
+    fit.fits = false;
+    return s;
   }
   // An inward rounding past that may still do (as OpenCascade's kernel takes it): cut, then checked (below).
   bool coveChecked = t.kind == Treatment::Cove && t.radius >= most * (1 - 1e-6);
@@ -2667,9 +2679,9 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         }
         continue;
       }
+      // A tool left open takes nothing away (or anything): no result, not the shape as it was (nor going on with it).
       Solid all = tools[0];
-      for (size_t i = 1; i < tools.size(); i++) all = step(all, tools[i], BK_UNION);
-      // A tool left open takes nothing away (or anything): no result, not the shape as it was.
+      for (size_t i = 1; i < tools.size() && closed(all); i++) all = step(all, tools[i], BK_UNION);
       if (!closed(all)) return Solid();
       r = step(r, all, op);
     }
