@@ -562,6 +562,11 @@ bool ringTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 centre, V3 axis, int aro
 Solid sweptTool(const std::vector<V3> &E, const std::vector<V3> &U, const std::vector<V3> &N, const std::vector<std::vector<V3>> &outlines,
                 bool closed, const std::vector<int> &runOf = {}, const std::vector<std::vector<double>> *radii = nullptr) {
   Solid out;
+  // (Nothing to sweep, or outlines that differ in size, never expected: no tool, which its maker takes as failing.)
+  if (E.size() < 2 || outlines.size() != E.size() || U.size() != E.size() || N.size() != E.size() || outlines[0].size() < 3) return out;
+  for (const auto &o : outlines)
+    if (o.size() != outlines[0].size()) return out;
+  if (!runOf.empty() && runOf.size() != outlines[0].size()) return out;
   size_t n = E.size(), k = outlines[0].size();
   for (size_t i = 0; i < n; i++)
     for (size_t j = 0; j < k; j++) out.p.push_back(at3(E[i], U[i], N[i], outlines[i][j]));
@@ -802,7 +807,7 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
     double best = INFINITY;
     for (size_t q = 0; q < o.pts.size(); q++)
       if (norm(o.pts[q] - end) < best) best = norm(o.pts[q] - end), j = q;
-    double phi = o.angleAt(j) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+    double phi = o.angleAt(j) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
     V3 along = o.pts[std::min(j + 1, o.pts.size() - 1)] - o.pts[j > 0 ? j - 1 : 0], world = X * dir.x + Y * dir.y;
     double sine = norm(along) > 0 ? norm(cross(unit(along), unit(world))) : 1, per = 1 / std::tan(half);
     if (radius > 0 && face >= 0 && (o.fa[j] == face || o.fb[j] == face)) {
@@ -1773,6 +1778,12 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   };
   std::vector<Crease> work;
   for (auto &c : creases) {
+    // (Malformed, never expected: too few points, no edges, or its faces not given at every point.)
+    size_t np = c.pts.size();
+    bool wellFormed = np >= 2 && !c.edges.empty() && c.fa.size() == np && c.fb.size() == np && c.na.size() == np && c.nb.size() == np &&
+                      c.ia.size() == np && c.ib.size() == np;
+    for (int e : c.edges) wellFormed = wellFormed && e >= 0 && e < (int)s.edges.size() && s.edges[e].pts.size() >= 2;
+    if (!wellFormed) continue;
     if (t.kind == Treatment::Cove && c.angle >= 179) continue;
     if (std::fabs(c.angle - 180) <= 1) continue;
     // Beside a rounding made before: an edge near flat is where the rounding meets a face smoothly (its mesh bends there by
@@ -1826,7 +1837,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       size_t j = 0;
       for (size_t k = 1; k < c.pts.size(); k++)
         if (norm(c.pts[k] - at) < norm(c.pts[j] - at)) j = k;
-      double phi = c.angleAt(j) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+      double phi = c.angleAt(j) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
       setback[e] = t.kind == Treatment::Round ? 1 / std::tan(half) : 1;
     }
     for (size_t k = 0; k < c.pts.size(); k++)
@@ -1841,7 +1852,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     Runs r = runsAt(s, c, mid, work, std::max(tol, d), &whole, t.kind == Treatment::Round ? t.radius : t.kind == Treatment::Bevel ? std::max(t.legA, t.legB) : 0,
                     true, t.kind == Treatment::Bevel ? 3 * std::max(t.legA, t.legB) : -1);
     double la = r.aShared ? r.a / 2 : r.a, lb = r.bShared ? r.b / 2 : r.b;
-    double phi = c.angleAt(mid) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+    double phi = c.angleAt(mid) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
     if (t.kind == Treatment::Round) {
       // Along a face shared with another rounding, the two reaches together (r·cot of each half angle) fill it at most.
       double own = 1 / std::tan(half);
@@ -2069,7 +2080,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       for (auto &f : whole.faces)
         if (!f.geom.flat) f.blend = true;
       finish(whole, d);
-      if (pieces(whole) == pieces(s)) return whole;
+      if (closed(whole) && pieces(whole) == pieces(s)) return whole;
     }
   }
 
@@ -2242,6 +2253,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           stations.push_back(ext[1] < 0 ? c.pts[b] + T * ext[1] : c.pts[b]);
           if (ext[1] > 0) stations.push_back(c.pts[b] + T * ext[1]);
           Solid tool = prismTool(sec, stations, in.U, in.N, T, d);
+          if (tool.tri.empty()) return false;
           for (int e = 0; e < 2; e++)
             if (endFace[e] >= 0) tool = cut(tool, c.pts[e == 0 ? a : b], -s.faces[endFace[e]].geom.pn, 0);
           put(sec.fill, q, std::move(tool));
@@ -2362,7 +2374,9 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           }
           if (folds) continue;
         }
-        put(per[0][q].fill, q, sweptTool(E, U, N, outlines, false, runOf, &radii));
+        Solid tool = sweptTool(E, U, N, outlines, false, runOf, &radii);
+        if (tool.tri.empty()) return false;
+        put(per[0][q].fill, q, std::move(tool));
       }
     }
     for (auto &[key, parts] : made) {
@@ -2466,9 +2480,17 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         for (const auto &sec : secs) {
           if (!sec.fill) {
             take.push_back(prismTool(sec, {E + T * s0, E + T * s1}, U, N, T, d));
+            if (take.back().tri.empty()) {
+              tooLarge();
+              return false;
+            }
             continue;
           }
           Solid tool = prismTool(sec, {E + T * f0, E + T * f1}, U, N, T, d);
+          if (tool.tri.empty()) {
+            tooLarge();
+            return false;
+          }
           for (int end = 0; end < 2; end++)
             if (endFace[end] >= 0) tool = cut(tool, end == 0 ? c.pts.front() : c.pts.back(), -s.faces[endFace[end]].geom.pn, 0);
           for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * (s.faces[f].geom.pd - (fillHair ? hair(t.radius) : 0)), -s.faces[f].geom.pn, 0);
@@ -2611,6 +2633,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
             }
           }
           Solid tool = sweptTool(E, U, N, outlines, c.closed, runOf, &radii);
+          if (tool.tri.empty()) {
+            tooLarge();
+            return false;
+          }
           if (per[0][k].fill && !c.closed)
             for (int end = 0; end < 2; end++) {
               size_t i = end == 0 ? 0 : n - 1;
@@ -2624,6 +2650,26 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           (per[0][k].fill ? add : take).push_back(tool);
         }
       }
+    }
+    // A tool cut down to nothing (a fill wholly past the face that ends it) has nothing to do; one left open would make
+    // nonsense of what it's merged with.
+    for (auto *list : {&take, &add}) {
+      bool fill = list == &add;
+      std::vector<Solid> keep;
+      std::map<std::pair<bool, size_t>, std::vector<Solid>> moved;
+      for (size_t i = 0; i < list->size(); i++) {
+        if ((*list)[i].tri.empty()) continue;
+        if (!closed((*list)[i])) {
+          tooLarge();
+          return false;
+        }
+        auto it = piecesOf.find({fill, i});
+        if (it != piecesOf.end()) moved[{fill, keep.size()}] = std::move(it->second);
+        keep.push_back(std::move((*list)[i]));
+      }
+      list->swap(keep);
+      for (auto it = piecesOf.begin(); it != piecesOf.end();) it = it->first.first == fill ? piecesOf.erase(it) : std::next(it);
+      for (auto &[k, v] : moved) piecesOf[k] = std::move(v);
     }
     return true;
   };
@@ -2842,7 +2888,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           for (int f : facesAt(s, end)) near.insert(f);
     }
     for (size_t f = 0; f < s.faces.size(); f++) {
-      bool touched = std::fabs(after[f] - before[f]) > 1e-9 * (1 + before[f]);
+      // (Changed by more than a merge's rounding: re-triangulated alone, a face keeps its area to about 1e-12 of it.)
+      bool touched = std::fabs(after[f] - before[f]) > 1e-6 * before[f] + 1e-3 * d * d;
       // (A speck of a face far smaller than the mesh tells apart, where a cut grazed a corner, may go.)
       bool gone = after[f] <= 1e-9 * (1 + before[f]) && before[f] > 0.1 * d * d;
       if (beside.count((int)f) ? gone : touched && !near.count((int)f)) return tooWide();

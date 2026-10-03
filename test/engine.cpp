@@ -4,6 +4,8 @@
 // c++ -std=c++17 -O2 -I. test/engine.cpp Engine/*.cpp -o engine-test && ./engine-test
 #include "BcadKernel.h"
 #include "Engine/Math.hpp"
+#include "Engine/Model.hpp"
+#include "Engine/Treat.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -1164,6 +1166,41 @@ int main() {
     check("meshing is quick", cylTook < 5 && sphTook < 2000);
     bk_mesh_free(m);
     bk_free(s), bk_free(c);
+  }
+
+  // Stability: what can't be made again, nothing to work on, and whether a mesh is a closed solid.
+  {
+    printf("— stability\n");
+    // A rounding made once (and shown) that fails at a finer detail: there it is as shown, not the shape untreated.
+    bce::Shape box, small;
+    std::string why;
+    double b20[3] = {20, 20, 20}, b10[3] = {10, 10, 10};
+    bce::primitive(BK_BOX, b20, box, why), bce::primitive(BK_BOX, b10, small, why);
+    auto node = std::make_shared<bce::Node>();
+    node->kind = bce::Node::Treat, node->a = box;
+    bce::Treatment tooBig;
+    tooBig.kind = bce::Treatment::Round, tooBig.radius = 40, tooBig.kinds = {BK_PICK_EDGE}, tooBig.picks = {0, -10, 10, 1, 0, 0};
+    node->treat = std::make_shared<bce::Treatment>(tooBig);
+    bce::Solid shownMesh;
+    bce::mesh(small, 0.05, shownMesh);
+    node->shown = std::make_shared<bce::Solid>(shownMesh);
+    auto fine = bce::evaluate(*node, 0.01);
+    check("a treatment that fails at another detail stands as it was shown", near(fine->meshVolume(), 1000, 1e-6), fmt("%.4f mm³", fine->meshVolume()));
+    // Nothing to hollow (two boxes apart, their common part): refused, not a crash.
+    double far[12] = {1, 0, 0, 100, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKShape *a = bk_primitive(BK_BOX, b20), *b0 = bk_primitive(BK_BOX, b20), *b = bk_transform(b0, far);
+    BKShape *none = bk_boolean(BK_INTERSECT, a, b);
+    BKShape *hollowNone = none ? bk_hollow(none, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr) : nullptr;
+    check("nothing to hollow is refused", none && !hollowNone);
+    bk_free(hollowNone), bk_free(none), bk_free(a), bk_free(b0), bk_free(b);
+    // A closed mesh says so; the result of every merge is one.
+    int kb = BK_PICK_BODY;
+    double body[6] = {0, 0, 0, 0, 0, 0}, mr;
+    int miss;
+    BKShape *cube = bk_primitive(BK_BOX, b20), *rounded = bk_fillet(cube, &kb, body, 1, 2, &mr, &miss);
+    BKMesh *m = rounded ? bk_mesh(rounded, 0.05) : nullptr;
+    check("a rounded box's mesh is a closed solid", m && m->valid == 1);
+    bk_mesh_free(m), bk_free(rounded), bk_free(cube);
   }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);

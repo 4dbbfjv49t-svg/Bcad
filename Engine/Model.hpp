@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -192,6 +193,11 @@ struct Node {
   int side = 0;
   mutable std::vector<std::pair<double, std::shared_ptr<const Solid>>> made;
   mutable std::vector<std::pair<double, int>> counted;  // its pieces at a detail, once counted
+  // A treatment's or hollow's result as made when asked for (what was shown): what it stands for at any other detail
+  // where it can't be made again.
+  std::shared_ptr<const Solid> shown;
+  // (The kept meshes, should two threads ask at once.)
+  mutable std::mutex lock;
 };
 
 // The model for a primitive (kinds and sizes as in BcadKernel.h) and the placement that centres it; empty with `why` set

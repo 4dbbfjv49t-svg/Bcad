@@ -93,8 +93,11 @@ void lathe(const Shape &s, const Lathe &l, const Affine &f, int count, const std
 }  // namespace
 
 std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
-  for (const auto &m : node.made)
-    if (std::fabs(m.first - d) <= 1e-12 * d) return m.second;
+  {
+    std::lock_guard<std::mutex> hold(node.lock);
+    for (const auto &m : node.made)
+      if (std::fabs(m.first - d) <= 1e-12 * d) return m.second;
+  }
   auto out = std::make_shared<Solid>();
   if (node.kind == Node::Prim) {
     node.model->build(*out, d);
@@ -105,9 +108,15 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
     mesh(node.a, d, a);
     TreatFit fit;
     *out = treated(a, *node.treat, d, fit);
+    // Made once already (it fitted); at another detail failing after all, as it was made then (not the shape untreated:
+    // what's saved must be what was shown).
+    if (!fit.fits && node.shown) *out = *node.shown;
   } else if (node.kind == Node::Hollow) {
-    // Made once already (it fitted); at another detail failing after all, the shape as it is.
-    if (!hollowed(node.a, *node.hollow, d, *out)) mesh(node.a, d, *out);
+    // Likewise; with nothing made before, the shape as it is.
+    if (!hollowed(node.a, *node.hollow, d, *out)) {
+      if (node.shown) *out = *node.shown;
+      else mesh(node.a, d, *out);
+    }
   } else if (node.kind == Node::Bool) {
     Solid a, b;
     // Turned parts on one axis line meshed alike: the finer count for both, each with rings where the other ends.
@@ -133,6 +142,7 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
     *out = cut(a, node.p, node.n, node.side);
     finish(*out, d);
   }
+  std::lock_guard<std::mutex> hold(node.lock);
   node.made.push_back({d, out});
   if (node.made.size() > 4) node.made.erase(node.made.begin());
   return out;
@@ -862,10 +872,14 @@ bool placedBounds(const Shape &s, V3 &lo, V3 &hi) {
 int pieceCount(const Shape &s) {
   if (s.node->kind == Node::Prim) return 1;
   double grow = s.place.stretch(), d = grow > 0 ? 0.05 / grow : 0.05;
-  for (const auto &c : s.node->counted)
-    if (std::fabs(c.first - d) <= 1e-12 * d) return c.second;
+  {
+    std::lock_guard<std::mutex> hold(s.node->lock);
+    for (const auto &c : s.node->counted)
+      if (std::fabs(c.first - d) <= 1e-12 * d) return c.second;
+  }
   // Pieces don't change with a placement: counted on the node's own mesh, no copy.
   int n = pieces(*evaluate(*s.node, d));
+  std::lock_guard<std::mutex> hold(s.node->lock);
   s.node->counted.push_back({d, n});
   if (s.node->counted.size() > 4) s.node->counted.erase(s.node->counted.begin());
   return n;

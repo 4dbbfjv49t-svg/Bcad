@@ -641,7 +641,8 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
   int missing = 0;
   std::vector<Crease> creases = creasesOf(child, t.kinds.data(), picks.data(), (int)t.kinds.size(), &missing);
   // Each edge's own: where it lies on the void (moved in by each face's wall), and its rounding or bevel there.
-  std::map<std::tuple<long, long, long>, std::vector<double>> groups;  // (radius or legs, in 1e-9) → edge picks
+  // Each edge: its radius (or legs) there and its pick; then those alike within rounding treated together.
+  std::vector<std::tuple<double, double, std::array<double, 6>>> each;
   for (const auto &whole : creases) {
     if (whole.pts.size() < 2) continue;
     // Taken at its middle by length (a point of its own there; one by count may lie near an end).
@@ -653,11 +654,11 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
     if (std::fabs(det) < 1e-9) continue;
     double alpha = (-oA + oB * kk) / det, beta = (-oB + oA * kk) / det;
     V3 at = c.pts[m] + na * alpha + nb * beta, dir = c.tangent(m);
-    std::tuple<long, long, long> key;
+    double keyA = 0, keyB = 0;
     if (t.kind == Treatment::Round) {
       double rad = t.radius - std::max(oA, oB);
       if (rad < 0.005) continue;
-      key = {std::lround(rad * 1e9), 0, 0};
+      keyA = rad;
     } else {
       // The bevel's line moved in by the walls too, in the cut across the edge.
       V3 U = c.ia[m], N = unit(c.na[m] - U * dot(c.na[m], U));
@@ -675,18 +676,23 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
       if (!meet2(nA, cA, nB, cB, e2) || !meet2(nA, cA, nP, cP, pa) || !meet2(nB, cB, nP, cP, pb)) continue;
       double la = norm(pa - e2), lb = norm(pb - e2);
       if (la < 0.005 || lb < 0.005) continue;
-      key = {std::lround(la * 1e9), std::lround(lb * 1e9), 0};
+      keyA = la, keyB = lb;
     }
-    double pick[6] = {at.x, at.y, at.z, dir.x, dir.y, dir.z};
-    auto &g = groups[key];
-    g.insert(g.end(), pick, pick + 6);
+    each.push_back({keyA, keyB, {at.x, at.y, at.z, dir.x, dir.y, dir.z}});
+  }
+  std::sort(each.begin(), each.end());
+  std::vector<std::pair<std::pair<double, double>, std::vector<double>>> groups;
+  auto alike = [](double x, double y) { return std::fabs(x - y) <= 1e-9 * (1 + std::fabs(x)); };
+  for (const auto &[a, b, pick] : each) {
+    if (groups.empty() || !alike(groups.back().first.first, a) || !alike(groups.back().first.second, b)) groups.push_back({{a, b}, {}});
+    groups.back().second.insert(groups.back().second.end(), pick.begin(), pick.end());
   }
   for (const auto &[key, edgePicks] : groups) {
     Treatment there = t;
     there.picks = edgePicks;
     there.kinds.assign(edgePicks.size() / 6, BK_PICK_EDGE);
-    if (t.kind == Treatment::Round) there.radius = std::get<0>(key) * 1e-9;
-    else there.legA = std::get<0>(key) * 1e-9, there.legB = std::get<1>(key) * 1e-9, there.corner = std::max(0.0, t.corner - r.t);
+    if (t.kind == Treatment::Round) there.radius = key.first;
+    else there.legA = key.first, there.legB = key.second, there.corner = std::max(0.0, t.corner - r.t);
     TreatFit fit;
     Solid made = treated(out, there, r.d, fit);
     if (fit.fits) out = made;
@@ -1236,6 +1242,7 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
   if (missing) *missing = 0;
   Solid whole;
   mesh(s, d, whole);
+  if (whole.tri.empty()) return false;
   Rules rules;
   rules.t = std::max(h.thickness, 0.01), rules.d = d;
   V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
@@ -1274,7 +1281,7 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     out = combine(whole, inner, BK_INTERSECT);
     finish(out, d);
     double v = out.meshVolume(), all = whole.meshVolume();
-    return v > 0 && v < all * 0.999 && pieces(out) == pieces(whole);
+    return shut(out) && v > 0 && v < all * 0.999 && pieces(out) == pieces(whole);
   }
   double all = whole.meshVolume();
   int parts = pieces(whole);
@@ -1284,7 +1291,7 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     if (!wallsFrom(whole, depth, rules.size, made)) return false;
     finish(made, d);
     double v = made.meshVolume();
-    if (!(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
+    if (!shut(made) || !(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
     out = std::move(made);
     return true;
   };
@@ -1301,7 +1308,8 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     // A hair's remnant of a face where the void was cleared just short of a wall: into the face beside it.
     if (cleared && foldThin(made, 0.05 * d)) finish(made, d);
     double v = made.meshVolume(), taken = all - v, inside = hole.meshVolume();
-    if (!(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
+    // (A result left open by a merge that went wrong is no result.)
+    if (!shut(made) || !(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
     // Shut, the void must lie wholly inside (walls too thick at a rounding would break through).
     if (rules.open.empty() && taken < inside * (1 - 1e-6) - 1e-9 * rules.size * rules.size * rules.size) return false;
     out = std::move(made);

@@ -149,7 +149,8 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
   if (solid.p.empty()) lo = hi = V3{0, 0, 0};
   m->bbox[0] = lo.x, m->bbox[1] = lo.y, m->bbox[2] = lo.z, m->bbox[3] = hi.x, m->bbox[4] = hi.y, m->bbox[5] = hi.z;
   m->volume = volume(s->shape, &solid);
-  m->valid = 1;
+  // Closed: every side of a triangle met by one running the other way (otherwise the app says it isn't a solid).
+  m->valid = solid.tri.empty() || shut(solid) ? 1 : 0;
   return m;
 }
 
@@ -276,7 +277,8 @@ static BKShape *treat(const BKShape *s, const int *kinds, const double *picks, i
   }
   auto node = std::make_shared<Node>();
   node->kind = Node::Treat, node->a = s->shape, node->treat = std::make_shared<Treatment>(t);
-  node->made.push_back({d, std::make_shared<Solid>(std::move(made))});
+  node->shown = std::make_shared<Solid>(std::move(made));
+  node->made.push_back({d, node->shown});
   return new BKShape{{node, Affine()}};
 }
 
@@ -330,7 +332,8 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
   }
   auto node = std::make_shared<Node>();
   node->kind = Node::Hollow, node->a = s->shape, node->hollow = std::make_shared<Hollowing>(h);
-  node->made.push_back({d, std::make_shared<Solid>(std::move(made))});
+  node->shown = std::make_shared<Solid>(std::move(made));
+  node->made.push_back({d, node->shown});
   return new BKShape{{node, Affine()}};
 }
 
