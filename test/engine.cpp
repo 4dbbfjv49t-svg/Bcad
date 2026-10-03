@@ -872,6 +872,13 @@ int main() {
       double base[6] = {0, 0, -1, 0, 0, -3.14088}, d12[1] = {12.5635}, Ro = d12[0] / 2, wallBase = 2.48502;
       is("hollow: a half ball open below, a thick wall picked there too", hollow(keep(bk_primitive(BK_HEMISPHERE, d12)), base, 1, base, &wallBase, 1, 1.60785),
          2 * PI / 3 * (Ro * Ro * Ro - (Ro - 1.60785) * (Ro - 1.60785) * (Ro - 1.60785)), 0.01);
+      // An edge where a turned face meets a flat one: its angle where they meet exactly, not at the mesh's point a chord's sag
+      // off (OpenCascade's 20.8083°).
+      double slab2[3] = {27.4638, 29.2663, 29.211}, hole2[2] = {8.74376, 19.6135}, seam[6] = {13.7319, -2.48913, -0.867683, 0, 0, 1};
+      BKShape *bitten = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, slab2)), keep(at(keep(bk_primitive(BK_CYLINDER, hole2)), 9.64518, -3.96658, -0.867683))));
+      BKSection *across = bk_section(bitten, ke, seam, 20);
+      check("section: where a cylinder's side meets a flat face, at their exact angle", across && near(across->angle, 20.8083, 1e-3), across ? fmt("%.4f°", across->angle) : bk_last_error());
+      if (across) bk_section_free(across);
       // Rounded all round, then bevelled all round: nothing left to bevel (the roundings meet their faces smoothly, a bowl's
       // inside a hair off its mesh), so as it was.
       double bowl[2] = {28.7095, 2.81855};

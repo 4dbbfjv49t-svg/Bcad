@@ -45,8 +45,10 @@ struct Index {
     auto it = corners.find(keyOf(p));
     return it == corners.end() ? nullptr : &it->second;
   }
-  // Face f's outward normal at p: its plane's; on a turned face its exact one; otherwise its mesh's there.
-  V3 normal(int f, V3 p) const {
+  // Face f's outward normal at p: its plane's; on a turned face its exact one (at `exact`, p's place on the face itself
+  // when known); otherwise its mesh's there.
+  V3 normal(int f, V3 p) const { return normal(f, p, p); }
+  V3 normal(int f, V3 p, V3 exact) const {
     const auto &face = s.faces[f];
     if (face.geom.flat) return face.geom.pn;
     V3 sum;
@@ -56,7 +58,7 @@ struct Index {
     V3 mesh = norm(sum) > 0 ? unit(sum) : face.normal;
     const FaceGeom &g = face.geom;
     if (g.kind == FaceGeom::Turned && g.exact) {
-      V3 q = g.place.inverse().point(p);
+      V3 q = g.place.inverse().point(exact);
       double r = std::hypot(q.x, q.y), nr, nz;
       g.elem.normalAt(g.elem.nearest(r, q.z), nr, nz);
       V3 local = r > 1e-12 ? V3{nr * q.x / r, nr * q.y / r, nz} : V3{0, 0, nz >= 0 ? 1.0 : -1.0};
@@ -64,6 +66,33 @@ struct Index {
       if (norm(w) > 0) return dot(w, mesh) < 0 ? -w : w;
     }
     return mesh;
+  }
+  // Where a flat face and a turned one meet near p, on both exactly (an edge's mesh point between them lies a chord's sag
+  // off it, a degree or so round a small turned face): p moved onto each in turn until it stays. p itself otherwise.
+  V3 onBoth(int fa, int fb, V3 p) const {
+    const FaceGeom *flat = nullptr, *turned = nullptr;
+    for (int f : {fa, fb}) {
+      const FaceGeom &g = s.faces[f].geom;
+      if (g.flat) flat = &g;
+      else if (g.kind == FaceGeom::Turned && g.exact) turned = &g;
+    }
+    if (!flat || !turned) return p;
+    Affine back = turned->place.inverse();
+    V3 q = p;
+    // Slow where they meet at a shallow angle (each round takes off the cosine squared of it): rounds enough for that.
+    for (int k = 0; k < 400; k++) {
+      V3 L = back.point(q);
+      double r = std::hypot(L.x, L.y), er, ez;
+      if (r < 1e-12) return p;
+      turned->elem.at(turned->elem.nearest(r, L.z), er, ez);
+      V3 on = turned->place.point(V3{L.x / r * er, L.y / r * er, ez});
+      V3 next = on - flat->pn * (dot(flat->pn, on) - flat->pd);
+      bool still = norm(next - q) < 1e-12 * (1 + norm(q));
+      q = next;
+      if (still) break;
+    }
+    // Only near: farther off than a mesh's sag, they don't meet here.
+    return norm(q - p) < 0.25 * (1 + std::sqrt(norm(p))) ? q : p;
   }
   // +1 when a triangle of face f runs from p0 to p1 (the face lies to the left of that way, seen from outside), -1 when one
   // runs back, 0 when none has that side.
@@ -122,7 +151,8 @@ void describe(const Index &ix, Crease &c, size_t from) {
       }
       return unit(into - t * dot(into, t));
     };
-    c.na[i] = ix.normal(c.fa[i], p), c.nb[i] = ix.normal(c.fb[i], p);
+    V3 exact = ix.onBoth(c.fa[i], c.fb[i], p);
+    c.na[i] = ix.normal(c.fa[i], p, exact), c.nb[i] = ix.normal(c.fb[i], p, exact);
     c.ia[i] = side(c.fa[i], c.na[i]), c.ib[i] = side(c.fb[i], c.nb[i]);
   }
 }
