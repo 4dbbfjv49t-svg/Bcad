@@ -169,7 +169,10 @@ jobs:
               AXValueGetValue(s as! AXValue, .cgSize, &sz)
               return CGRect(origin: pt, size: sz)
           }
-          func all(_ e: AXUIElement, _ depth: Int = 0) -> [(AXUIElement, Int)] { depth > 60 ? [] : [(e, depth)] + kids(e).flatMap { all($0, depth + 1) } }
+          // The menu bar left out: walking it costs the app most of the time and holds up everything else it does.
+          func all(_ e: AXUIElement, _ depth: Int = 0) -> [(AXUIElement, Int)] {
+              depth > 60 || (value(e, kAXRoleAttribute) as? String) == "AXMenuBar" ? [] : [(e, depth)] + kids(e).flatMap { all($0, depth + 1) }
+          }
           func find(_ label: String, _ n: Int) -> CGRect? {
               let hits = all(root).filter { texts($0.0).contains(label) }.compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 }
               return hits.count >= n ? hits[n - 1] : nil
@@ -259,11 +262,23 @@ jobs:
               post(.leftMouseUp, p)
               print("held \(a[1]) at \(p)")
           case "press":
-              guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
+              // Looked for again for a while: on a slow machine a control can take some seconds to appear.
+              var found: CGRect?
+              for _ in 0..<6 {
+                  found = find(a[1], a.count > 2 ? Int(a[2])! : 1)
+                  if found != nil { break }
+                  usleep(4_000_000)
+              }
+              guard let r = found else { print("✗ no \(a[1])"); exit(0) }
               var under: AXUIElement?
               AXUIElementCopyElementAtPosition(root, Float(r.midX), Float(r.midY), &under)
               click(CGPoint(x: r.midX, y: r.midY))
               print("pressed \(a[1]) at \(r), under the pointer: \(under.map { texts($0) + [(value($0, kAXRoleAttribute) as? String) ?? ""] } ?? [])")
+          case "gone":
+              // Waits (up to a minute) for a control to go: a tool or editor closing once what it does is done.
+              let start = Date()
+              while find(a[1], 1) != nil && Date().timeIntervalSince(start) < 60 { usleep(3_000_000) }
+              print("\(a[1]) \(find(a[1], 1) == nil ? "gone" : "still there") after \(Int(Date().timeIntervalSince(start))) s")
           case "slide":
               guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
               drag(CGPoint(x: r.midX, y: r.midY), CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.midY))
@@ -406,14 +421,14 @@ jobs:
           $U press "Work with angles"; shot ui-02a-opening 4
           shot ui-02-editor 1
           $U tree | grep -E "Rounded corner|Angled corner|Radius|picks" | head -6 || true
-          $U press Apply; sleep 15
+          $U press Apply; $U gone Apply
           shot ui-03-rounded 2
           said
           $U tree | grep -E "Rounding|All edges" | head -4 || true
           echo "— hollowed: O, then Apply (closed, 2 mm walls)"
           $U key 31; sleep 2
           shot ui-04-hollow-mode 1
-          $U press Apply; sleep 15
+          $U press Apply; $U gone Apply
           shot ui-05-hollowed 2
           said
           echo "— a cylinder: R, A, Work with angles, Angled corner, Apply"
@@ -424,7 +439,7 @@ jobs:
           $U press "Work with angles"; sleep 10
           $U press "Angled corner"; sleep 4
           shot ui-06-bevel-editor 1
-          $U press Apply; sleep 15
+          $U press Apply; $U gone Apply
           shot ui-07-bevelled 2
           said
           echo "— undo twice"
