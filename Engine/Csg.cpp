@@ -3,6 +3,7 @@
 // out, faces on one surface joined, edges, corners, circles); and how far a shape reaches and how much it holds — exactly
 // where that can be told.
 #include "Engine/Model.hpp"
+#include "Engine/Treat.hpp"
 #include "Engine/Weld.hpp"
 
 #include "BcadKernel.h"
@@ -26,6 +27,11 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
     node.model->build(*out, d);
     out->centroids();
     out->slivers();
+  } else if (node.kind == Node::Treat) {
+    Solid a;
+    mesh(node.a, d, a);
+    TreatFit fit;
+    *out = treated(a, *node.treat, d, fit);
   } else {
     Solid a;
     mesh(node.a, d, a);
@@ -321,8 +327,71 @@ void tidy(Welded &w, double eps) {
   if (!w.gap.empty()) w.gap.resize(6 * n);
 }
 
-
 }  // namespace
+
+// Triangles thinner than anything told apart (a point a hair off the line between two others, where a cut grazes a side)
+// done away with: the long side swapped for one from that point to the corner across it, the two triangles there taking
+// the neighbour's face, normals and slivers. Swaps that would fold or double a side are left.
+void unneedle(Welded &w, double eps) {
+  size_t nt = w.count();
+  for (int round = 0; round < 4; round++) {
+    std::unordered_map<uint64_t, uint32_t> side;
+    side.reserve(3 * nt);
+    for (size_t t = 0; t < nt; t++)
+      for (int k = 0; k < 3; k++) side[(uint64_t)w.tri[3 * t + k] << 32 | w.tri[3 * t + (k + 1) % 3]] = (uint32_t)t;
+    std::vector<char> done(nt, 0);
+    int swaps = 0;
+    for (size_t t = 0; t < nt; t++) {
+      if (done[t]) continue;
+      // The longest side a → b, and c across it.
+      int k = 0;
+      double best = -1;
+      for (int j = 0; j < 3; j++) {
+        double l2 = norm2(w.pts[w.tri[3 * t + (j + 1) % 3]] - w.pts[w.tri[3 * t + j]]);
+        if (l2 > best) best = l2, k = j;
+      }
+      uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3], c = w.tri[3 * t + (k + 2) % 3];
+      V3 A = w.pts[a], B = w.pts[b], C = w.pts[c], ab = B - A;
+      if (!(best > 0) || norm(cross(ab, C - A)) / std::sqrt(best) >= eps) continue;
+      double s = dot(C - A, ab) / best;
+      if (!(s > 0 && s < 1)) continue;
+      auto it = side.find((uint64_t)b << 32 | a);
+      if (it == side.end() || done[it->second] || it->second == t) continue;
+      uint32_t n = it->second;
+      int kn = 0;
+      while (w.tri[3 * n + kn] != b) kn++;
+      uint32_t d = w.tri[3 * n + (kn + 2) % 3];
+      V3 D = w.pts[d], up = cross(A - B, D - B);
+      if (norm(up) / std::sqrt(best) < eps || side.count((uint64_t)c << 32 | d) || side.count((uint64_t)d << 32 | c)) continue;
+      if (dot(cross(D - A, C - A), up) <= 0 || dot(cross(B - D, C - D), up) <= 0) continue;
+      // The neighbour's corners, normals and slivers, as they were.
+      V3 q[3] = {w.pts[w.tri[3 * n]], w.pts[w.tri[3 * n + 1]], w.pts[w.tri[3 * n + 2]]};
+      V3 nb = w.nrm[3 * n + kn], na = w.nrm[3 * n + (kn + 1) % 3], nd = w.nrm[3 * n + (kn + 2) % 3];
+      V3 nc = unit(na * (1 - s) + nb * s);
+      double g[6];
+      bool gaps = !w.gap.empty();
+      if (gaps) std::copy(&w.gap[6 * n], &w.gap[6 * n] + 6, g);
+      uint32_t f = w.face[n];
+      auto put = [&](size_t at, uint32_t x, uint32_t y, uint32_t z, V3 nx, V3 ny, V3 nz) {
+        w.tri[3 * at] = x, w.tri[3 * at + 1] = y, w.tri[3 * at + 2] = z;
+        w.nrm[3 * at] = nx, w.nrm[3 * at + 1] = ny, w.nrm[3 * at + 2] = nz;
+        w.face[at] = f;
+        if (gaps) {
+          V3 piece[3] = {w.pts[x], w.pts[y], w.pts[z]};
+          gapOfPiece(g, q[0], q[1], q[2], piece, &w.gap[6 * at]);
+        }
+        done[at] = 1;
+      };
+      put(t, a, d, c, na, nd, nc);
+      put(n, d, b, c, nd, nb, nc);
+      for (int j = 0; j < 3; j++)
+        for (size_t at : {t, (size_t)n}) side[(uint64_t)w.tri[3 * at + j] << 32 | w.tri[3 * at + (j + 1) % 3]] = (uint32_t)at;
+      side.erase((uint64_t)a << 32 | b), side.erase((uint64_t)b << 32 | a);
+      swaps++;
+    }
+    if (swaps == 0) break;
+  }
+}
 
 void finish(Solid &s, double deflection) {
   Welded w = weld(s);
@@ -330,6 +399,7 @@ void finish(Solid &s, double deflection) {
     double size = 0;
     for (V3 q : w.pts) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
     tidy(w, std::max(1e-4, 2e-7 * size));
+    unneedle(w, std::max(1e-4, 2e-7 * size));
   }
   size_t nt = w.count();
   // Edges between triangles: which triangles, so faces meeting on one surface can be joined and edges found.
@@ -547,6 +617,11 @@ Reach reach(const Node &node, V3 d, bool prove) {
     return inside(*evaluate(*s.node, grow > 0 ? 0.05 / grow : 0.05), s.place.inverse().point(q));
   };
   Reach a = support(node.a, d, prove);
+  if (node.kind == Node::Treat) {
+    // Edges taken off (or filled in): no farther than the shape, not exactly as far.
+    a.exact = false;
+    return a;
+  }
   if (node.kind == Node::Split) {
     // Exact while the farthest point stays on the kept side (or on the plane, the edge of it).
     a.exact = a.exact && planeSide(a.point, node.p, node.n) * (node.side == 0 ? 1 : -1) >= 0;

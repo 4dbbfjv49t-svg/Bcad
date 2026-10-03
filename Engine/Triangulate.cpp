@@ -207,17 +207,30 @@ bool Tri2::keep(int a, int b) {
       if (t.v[k] != a) continue;
       int c = t.v[(k + 1) % 3], d = t.v[(k + 2) % 3];
       int oc = orient(a, c, b), od = orient(a, d, b);
-      auto between = [&](int m) { return (x[m] - x[a]) * (x[b] - x[a]) + (y[m] - y[a]) * (y[b] - y[a]) > 0; };
+      // Strictly between a and b (one beyond b, on the same line, is no stop on the way).
+      double reach = (x[b] - x[a]) * (x[b] - x[a]) + (y[b] - y[a]) * (y[b] - y[a]);
+      auto between = [&](int m) {
+        double p = (x[m] - x[a]) * (x[b] - x[a]) + (y[m] - y[a]) * (y[b] - y[a]);
+        return p > 0 && p < reach;
+      };
       // A point of the triangulation on the segment: two kept edges in its place.
-      if (oc == 0 && between(c)) return keep(a, c) && keep(c, b);
-      if (od == 0 && between(d)) return keep(a, d) && keep(d, b);
+      if ((oc == 0 && between(c)) || (od == 0 && between(d))) {
+        if (depth > 64) return false;
+        int via = oc == 0 && between(c) ? c : d;
+        depth++;
+        bool ok = keep(a, via) && keep(via, b);
+        depth--;
+        return ok;
+      }
       if (oc > 0 && od < 0) t0 = i, R = c, L = d;
     }
   }
   if (t0 < 0) return false;
   std::vector<int> crossed{t0}, left{L}, right{R};
   int end = b;
-  for (int guard = 0; guard < 1000000; guard++) {
+  for (int guard = 0;; guard++) {
+    // A walk crossing more triangles than there are has lost its way (points a hair apart): no edge kept.
+    if (guard > (int)tris.size()) return false;
     if (kept(R, L)) {
       // Another kept edge crosses the segment (two cuts a hair apart, crossed by rounding): both go through the point where
       // they cross, so neither is broken.

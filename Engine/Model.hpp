@@ -142,6 +142,8 @@ struct Model {
   std::vector<std::vector<int>> loops;
   // Turned: a closed profile, counter-clockwise round its region.
   std::vector<Elem> profile;
+  // Turned: the steps round the axis when set (to meet another mesh point for point), else from the deflection.
+  int around = 0;
   // Swept: the oval's semi-axes along (cos phi, sin phi) and across it, and the tube's outline round the oval's line
   // (r along the oval's outward normal, z up), counter-clockwise.
   double a = 0, b = 0, phi = 0;
@@ -155,6 +157,7 @@ struct Model {
 };
 
 struct Node;
+struct Treatment;
 
 // A shape as the C API holds it: what it is and where it's placed (shared, so copies cost nothing).
 struct Shape {
@@ -162,12 +165,13 @@ struct Shape {
   Affine place;
 };
 
-// What a shape is: a primitive, a merge (union, subtract, intersect as BK_UNION …) of two placed shapes, or the side of a
-// plane (point p, normal n; side 0 is where n points) of a placed shape. Its meshes are made when asked, at the detail
-// asked, and the last few kept.
+// What a shape is: a primitive, a merge (union, subtract, intersect as BK_UNION …) of two placed shapes, the side of a
+// plane (point p, normal n; side 0 is where n points) of a placed shape, or a placed shape with its edges treated
+// (rounded, bevelled; Treat.hpp). Its meshes are made when asked, at the detail asked, and the last few kept.
 struct Node {
-  enum Kind { Prim, Bool, Split } kind = Prim;
+  enum Kind { Prim, Bool, Split, Treat } kind = Prim;
   std::shared_ptr<const Model> model;
+  std::shared_ptr<const Treatment> treat;
   int op = 0;
   Shape a, b;
   V3 p, n;
@@ -179,6 +183,14 @@ struct Node {
 // The model for a primitive (kinds and sizes as in BcadKernel.h) and the placement that centres it; empty with `why` set
 // when the sizes don't make one.
 bool primitive(int kind, const double *p, Shape &out, std::string &why);
+
+// Models made as tools (roundings, hollows): a turned outline (closed, counter-clockwise round its region), and a
+// flat-sided solid from its corners and faces (corner loops, turned outward when they come inward); volumes worked out.
+std::shared_ptr<Model> turnedModel(std::vector<Elem> profile);
+std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
+// A shape of a model, or of two shapes merged (op as BK_UNION …).
+Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place = Affine());
+Shape merged(int op, const Shape &a, const Shape &b);
 
 // A node's mesh in its own coordinates at a chord error of `deflection`.
 std::shared_ptr<const Solid> evaluate(const Node &n, double deflection);

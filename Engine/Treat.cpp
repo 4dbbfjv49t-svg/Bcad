@@ -1,0 +1,1343 @@
+// Roundings, inward roundings (coves) and bevels along edges, made the way a workshop would: for each run of picked edges a
+// tool of the right cross-section is swept along it and taken away (or, at an inside corner, added). Across the edge the
+// tool is exact: its arcs start on the faces exactly where the rounding's circle touches them, and it reaches a little out
+// past the faces. Along a straight edge the tool is a prism, round a circle a turned outline stepped as the solid's circle
+// is, otherwise a sweep of the cross-section from point to point. At an open end the tool runs on past the face there.
+// Straight edges between flat faces rounded outward are made as one piece per group of them, a ball rounding each corner
+// where three or more meet; a solid rounded on every edge so is made outright.
+#include "Engine/Treat.hpp"
+#include "Engine/Triangulate.hpp"
+
+#include "BcadKernel.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <map>
+#include <set>
+#include <tuple>
+#include <unordered_map>
+
+namespace bce {
+
+namespace {
+
+constexpr double pi = M_PI;
+
+// A point by its exact position.
+struct PKey {
+  uint64_t x, y, z;
+  bool operator==(const PKey &o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct PKeyHash {
+  size_t operator()(const PKey &k) const { return (size_t)(k.x * 0x9E3779B97F4A7C15ull ^ (k.y + 0x7F4A7C159E3779B9ull) * 31 ^ k.z * 0xBF58476D1CE4E5B9ull); }
+};
+PKey pkey(V3 p) {
+  PKey k;
+  double x = p.x + 0.0, y = p.y + 0.0, z = p.z + 0.0;
+  std::memcpy(&k.x, &x, 8), std::memcpy(&k.y, &y, 8), std::memcpy(&k.z, &z, 8);
+  return k;
+}
+
+
+V3 p2(double u, double v) { return {u, v, 0}; }
+double cross2(V3 a, V3 b) { return a.x * b.y - a.y * b.x; }
+double area2(const std::vector<V3> &poly) {
+  double a = 0;
+  for (size_t i = 0; i < poly.size(); i++) a += cross2(poly[i], poly[(i + 1) % poly.size()]);
+  return a / 2;
+}
+
+// The point on both lines n1 · p = c1 and n2 · p = c2 (false when they run alongside each other).
+bool meet(V3 n1, double c1, V3 n2, double c2, V3 &out) {
+  double det = n1.x * n2.y - n1.y * n2.x;
+  if (std::fabs(det) < 1e-12) return false;
+  out = p2((c1 * n2.y - c2 * n1.y) / det, (n1.x * c2 - n2.x * c1) / det);
+  return true;
+}
+
+// A tool's cross-section in a plane square to the edge, counter-clockwise: from each run's point to the next one's,
+// straight or round an arc (the way through `mid`) — or a whole disc (an inward rounding). `fill`: added to the solid
+// (an inside corner) rather than taken away.
+struct Section2 {
+  struct Run {
+    V3 p;
+    bool arc = false;
+    V3 centre, mid;
+    double radius = 0;
+  };
+  std::vector<Run> runs;
+  bool circle = false;
+  V3 centre;
+  double radius = 0;
+  bool fill = false;
+};
+
+// An arc run's start angle and its turn (signed) round its middle to the next point q, the way through its `mid`.
+void arcTurn(const Section2::Run &r, V3 q, double &a0, double &turn) {
+  a0 = std::atan2(r.p.y - r.centre.y, r.p.x - r.centre.x);
+  double a1 = std::atan2(q.y - r.centre.y, q.x - r.centre.x), am = std::atan2(r.mid.y - r.centre.y, r.mid.x - r.centre.x);
+  turn = std::remainder(a1 - a0, 2 * pi);
+  double half = std::remainder(am - a0, 2 * pi);
+  if (turn > 0 ? !(half > 0 && half < turn) : !(half < 0 && half > turn)) turn += turn > 0 ? -2 * pi : 2 * pi;
+}
+
+// Chords an arc takes for a chord error of d (and at least one per 20°).
+int chordsFor(double turn, double r, double d) {
+  int k = std::max(1, (int)std::ceil(std::fabs(turn) / (2 * std::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
+  return std::min(std::max(k, (int)std::ceil(std::fabs(turn) / 0.35 - 1e-9)), 64);
+}
+
+// Each run's chords (none for a straight one; for a disc, its one entry).
+std::vector<int> chordsOf(const Section2 &s, double d) {
+  if (s.circle) return {std::max(8, chordsFor(2 * pi, s.radius, d))};
+  std::vector<int> k(s.runs.size(), 0);
+  for (size_t i = 0; i < s.runs.size(); i++) {
+    if (!s.runs[i].arc) continue;
+    double a0, turn;
+    arcTurn(s.runs[i], s.runs[(i + 1) % s.runs.size()].p, a0, turn);
+    k[i] = chordsFor(turn, s.runs[i].radius, d);
+  }
+  return k;
+}
+
+// The outline as points, arcs as `chords` chords each, and for each point the run its side to the next lies in.
+std::vector<V3> pointsOf(const Section2 &s, const std::vector<int> &chords, std::vector<int> *runOf = nullptr) {
+  std::vector<V3> out;
+  if (runOf) runOf->clear();
+  if (s.circle) {
+    // Turned by an odd part of a step, so no corner lands on a face through the edge (a side lying in a face's plane).
+    for (int j = 0; j < chords[0]; j++) {
+      double a = 2 * pi * (j + 0.381966) / chords[0];
+      out.push_back(s.centre + p2(std::cos(a), std::sin(a)) * s.radius);
+      if (runOf) runOf->push_back(0);
+    }
+    return out;
+  }
+  size_t n = s.runs.size();
+  for (size_t i = 0; i < n; i++) {
+    const auto &r = s.runs[i];
+    out.push_back(r.p);
+    if (runOf) runOf->push_back((int)i);
+    if (!r.arc) continue;
+    double a0, turn;
+    arcTurn(r, s.runs[(i + 1) % n].p, a0, turn);
+    for (int j = 1; j < chords[i]; j++) {
+      double a = a0 + turn * j / chords[i];
+      out.push_back(r.centre + p2(std::cos(a), std::sin(a)) * r.radius);
+      if (runOf) runOf->push_back((int)i);
+    }
+  }
+  return out;
+}
+
+void ccw(Section2 &s) {
+  if (s.circle || area2(pointsOf(s, chordsOf(s, 1e9))) >= 0) return;
+  size_t n = s.runs.size();
+  std::vector<Section2::Run> back(n);
+  for (size_t j = 0; j < n; j++) {
+    back[j] = s.runs[(2 * n - 2 - j) % n];  // the side the other way
+    back[j].p = s.runs[n - 1 - j].p;
+  }
+  s.runs = back;
+}
+
+// The material angle at a corner (face A along da, outward normal na; face B along db), radians: from da round through the
+// material to db.
+double cornerAngle(V3 da, V3 na, V3 db) {
+  double u = dot(db, da), v = dot(db, na);
+  double phi = std::atan2(-v, u);
+  return phi <= 0 ? phi + 2 * pi : phi;
+}
+
+// How far a tool reaches out past the faces (each tool a little differently — `which` — so no two lie in one plane where
+// they overlap), and how far short of an end with nothing to run onto it stops.
+double reachOut(double size, int which = 0) { return std::max(0.3 * size, 1e-3) * (1 + 0.083 * (which % 7)); }
+double hair(double r) { return std::max(2e-3 * r, 1e-6); }
+
+// Rounding the corner at e (face A from e along da, outward normal na; face B along db) with radius r: where its circle
+// meets face A and face B, its middle, and whether the corner is convex (the circle in the material).
+struct Touch {
+  V3 a, b, centre;
+  bool convex;
+};
+Touch touchAt(V3 e, V3 da, V3 na, V3 db, double r) {
+  V3 dB = unit(p2(dot(db, da), dot(db, na)));
+  double phi = cornerAngle(p2(1, 0), p2(0, 1), dB);
+  bool convex = phi < pi;
+  double half = (convex ? phi : 2 * pi - phi) / 2, t = r / std::tan(half);
+  V3 c = unit(p2(1, 0) + dB) * (r / std::sin(half));
+  return {e + da * t, e + db * t, e + da * c.x + na * c.y, convex};
+}
+
+// A straight run from p.
+Section2::Run lineRun(V3 p) {
+  Section2::Run run;
+  run.p = p;
+  return run;
+}
+
+// The corner's arc as a run from where it meets face B round to where it meets face A, past the corner.
+Section2::Run arcRun(const Touch &k, V3 from, V3 corner, double r) {
+  Section2::Run run;
+  run.p = from, run.arc = true, run.centre = k.centre, run.radius = r, run.mid = k.centre + unit(corner - k.centre) * r;
+  return run;
+}
+
+// The outer corner of a tool reaching out by m past face A (normal na) and face B (normal nb) at e.
+V3 outerCorner(V3 e, V3 na, V3 nb, double m) {
+  V3 O;
+  if (!meet(na, dot(na, e) + m, nb, dot(nb, e) + m, O)) O = e + na * m;
+  return O;
+}
+
+// Rounding the corner at e: at an outside corner the part to take away (outside the circle, reaching out past both
+// faces), at an inside one the part to add (reaching into the material).
+Section2 roundCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double r, int which) {
+  Touch k = touchAt(e, da, na, db, r);
+  double m = reachOut(r, which) * (k.convex ? 1 : -1);
+  Section2 out;
+  out.fill = !k.convex;
+  out.runs = {lineRun(k.a), lineRun(k.a + na * m), lineRun(outerCorner(e, na, nb, m)), lineRun(k.b + nb * m), arcRun(k, k.b, e, r)};
+  ccw(out);
+  return out;
+}
+
+// Bevelling the corner at e: legs la along face A and lb along face B; taken away at an outside corner, added at an inside
+// one. With `soft` above zero its two edges with the faces rounded too.
+Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, double soft, int which, bool &fits) {
+  bool convex = cornerAngle(da, na, db) < pi;
+  double m = reachOut(std::max(la, lb), which) * (convex ? 1 : -1);
+  V3 PA = e + da * la, PB = e + db * lb, dP = unit(PB - PA), nP = p2(-dP.y, dP.x);
+  if (dot(nP, e - PA) < 0) nP = -nP;
+  V3 O = outerCorner(e, na, nb, m);
+  // The bevel's line run on past each face, out to the tool's sides.
+  auto past = [&](V3 from, V3 dir, V3 n) { return from + dir * (m / dot(dir, n)); };
+  Section2 out;
+  out.fill = !convex;
+  fits = true;
+  if (!(soft > 0.005) || !convex) {
+    out.runs = {lineRun(past(PA, PA - PB, na)), lineRun(O), lineRun(past(PB, PB - PA, nb))};
+  } else {
+    Touch kA = touchAt(PA, da, na, dP, soft), kB = touchAt(PB, -dP, nP, db, soft);
+    fits = dot(kB.a - kA.b, dP) > 0;
+    out.runs = {lineRun(kA.a), lineRun(kA.a + na * m), lineRun(O), lineRun(kB.b + nb * m), arcRun(kB, kB.b, PB, soft), lineRun(kB.a),
+                arcRun(kA, kA.b, PA, soft)};
+  }
+  ccw(out);
+  return out;
+}
+
+// The sections a treatment takes at one point of a crease, in its end-on frame (u into face A, v face A's outward normal);
+// `fits` false when a softened bevel's roundings would cross.
+std::vector<Section2> sectionsAt(const Crease &c, size_t i, const Treatment &t, int which, bool *fits = nullptr) {
+  V3 U = c.ia[i], N = unit(c.na[i] - U * dot(c.na[i], U));
+  V3 da = p2(1, 0), na = p2(0, 1), db = unit(p2(dot(c.ib[i], U), dot(c.ib[i], N))), nb = unit(p2(dot(c.nb[i], U), dot(c.nb[i], N)));
+  bool convex = cornerAngle(da, na, db) < pi;
+  std::vector<Section2> out;
+  switch (t.kind) {
+  case Treatment::Round:
+    out.push_back(roundCorner(p2(0, 0), da, na, db, nb, t.radius, which));
+    break;
+  case Treatment::Cove:
+    if (convex) {
+      Section2 s;
+      s.circle = true, s.centre = p2(0, 0), s.radius = t.radius;
+      out.push_back(s);
+    }
+    break;
+  case Treatment::Bevel: {
+    bool ok;
+    out.push_back(bevelCorner(p2(0, 0), da, na, db, nb, t.legA, t.legB, t.corner, which, ok));
+    if (fits) *fits = ok;
+    break;
+  }
+  }
+  return out;
+}
+
+// MARK: - tools
+
+// A cross-section's points from a frame (E, U, N) into the world.
+V3 at3(V3 E, V3 U, V3 N, V3 q) { return E + U * q.x + N * q.y; }
+
+// A closed outline's inside as triangles (point numbers), by a triangulation keeping its sides.
+std::vector<int> capOf(const std::vector<V3> &pts) {
+  double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+  for (V3 q : pts) lo[0] = std::min(lo[0], q.x), lo[1] = std::min(lo[1], q.y), hi[0] = std::max(hi[0], q.x), hi[1] = std::max(hi[1], q.y);
+  double w = std::max(hi[0] - lo[0], hi[1] - lo[1]) + 1, cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+  Tri2 tri(cx - 4 * w, cy - 3 * w, cx + 4 * w, cy - 3 * w, cx, cy + 5 * w);
+  std::vector<int> id(pts.size());
+  std::unordered_map<int, int> back;
+  for (size_t j = 0; j < pts.size(); j++) id[j] = tri.insert(pts[j].x, pts[j].y), back[id[j]] = (int)j;
+  for (size_t j = 0; j < pts.size(); j++) tri.keep(id[j], id[(j + 1) % pts.size()]);
+  std::vector<int> out;
+  for (int q : tri.insideKept()) {
+    auto it = back.find(q);
+    if (it == back.end()) return {};
+    out.push_back(it->second);
+  }
+  return out;
+}
+
+// The arc of a circle (2D) from p to q the way that passes nearest `near`, as a turned outline's piece.
+Elem arcThrough(V3 c, double r, V3 p, V3 q, V3 near) {
+  double a0 = std::atan2(p.y - c.y, p.x - c.x), a1 = std::atan2(q.y - c.y, q.x - c.x), d = a1 - a0;
+  while (d > pi) d -= 2 * pi;
+  while (d < -pi) d += 2 * pi;
+  double mid = a0 + d / 2, want = std::atan2(near.y - c.y, near.x - c.x);
+  double off = std::fabs(std::remainder(mid - want, 2 * pi)), other = std::fabs(std::remainder(mid + pi - want, 2 * pi));
+  if (other < off) d += d > 0 ? -2 * pi : 2 * pi;
+  Elem e = Elem::arcOf(c.x, c.y, r, a0, a0 + d);
+  e.r0 = p.x, e.z0 = p.y, e.r1 = q.x, e.z1 = q.y;
+  return e;
+}
+
+// The solid of a section turned round an axis (a crease running round a circle): the section's points taken into the
+// half-plane of (distance from the axis, height along it); false when it would reach across the axis.
+bool ringTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 centre, V3 axis, int around, V3 x0, double d, Solid &out) {
+  // Signed distance from the axis (towards the crease's side), so a point past the axis shows as one. The frame's
+  // directions in that half-plane are taken square where they are within rounding of it, so points on the faces land
+  // on them exactly.
+  V3 radial = (E - centre) - axis * dot(E - centre, axis);
+  double R = norm(radial);
+  if (R < 1e-12) return false;
+  radial = radial / R;
+  auto snap = [](double x) { return std::fabs(x) < 1e-12 ? 0.0 : std::fabs(x - 1) < 1e-12 ? 1.0 : std::fabs(x + 1) < 1e-12 ? -1.0 : x; };
+  double Ur = snap(dot(U, radial)), Uz = snap(dot(U, axis)), Nr = snap(dot(N, radial)), Nz = snap(dot(N, axis));
+  double z0 = dot(E - centre, axis);
+  if (std::fabs(z0) < 1e-12 * (1 + R)) z0 = 0;
+  auto rh = [&](V3 q2) { return p2(R + q2.x * Ur + q2.y * Nr, z0 + q2.x * Uz + q2.y * Nz); };
+  std::vector<Elem> profile;
+  if (sec.circle) {
+    V3 c = rh(sec.centre);
+    if (c.x <= sec.radius * 1.0001) return false;
+    profile = {Elem::arcOf(c.x, c.y, sec.radius, 0, 2 * pi)};
+  } else {
+    size_t n = sec.runs.size();
+    for (size_t i = 0; i < n; i++) {
+      const auto &r = sec.runs[i];
+      V3 p = rh(r.p), q = rh(sec.runs[(i + 1) % n].p);
+      if (p.x <= 0) return false;
+      if (!r.arc) {
+        profile.push_back(Elem::line(p.x, p.y, q.x, q.y));
+        continue;
+      }
+      if (rh(r.centre).x <= r.radius) return false;
+      profile.push_back(arcThrough(rh(r.centre), r.radius, p, q, rh(r.mid)));
+    }
+  }
+  // Counter-clockwise round its region (the area of its outline, arcs by their chords and bulge).
+  double area = 0;
+  for (const auto &e : profile) {
+    if (!e.arc) {
+      area += e.r0 * e.z1 - e.r1 * e.z0;
+    } else {
+      for (int k = 0; k < 64; k++) {
+        double r0, z0, r1, z1;
+        e.at(k / 64.0, r0, z0), e.at((k + 1) / 64.0, r1, z1);
+        area += r0 * z1 - r1 * z0;
+      }
+    }
+  }
+  if (area < 0) {
+    std::reverse(profile.begin(), profile.end());
+    for (auto &e : profile) {
+      std::swap(e.r0, e.r1), std::swap(e.z0, e.z1);
+      if (e.arc) std::swap(e.a0, e.a1);
+    }
+  }
+  // Its steps round the axis those of the solid's circle (`around` of them, one at x0), so where it meets the solid's
+  // faces along a circle it meets them point for point.
+  Affine f;
+  V3 x = around >= 3 ? x0 : unit(std::fabs(axis.x) < 0.9 ? cross(axis, V3{1, 0, 0}) : cross(axis, V3{0, 1, 0})), y = cross(axis, x);
+  f.m[0] = x.x, f.m[1] = y.x, f.m[2] = axis.x, f.m[3] = centre.x;
+  f.m[4] = x.y, f.m[5] = y.y, f.m[6] = axis.y, f.m[7] = centre.y;
+  f.m[8] = x.z, f.m[9] = y.z, f.m[10] = axis.z, f.m[11] = centre.z;
+  auto model = turnedModel(profile);
+  model->around = around;
+  mesh(shapeOf(model, f), d, out);
+  return true;
+}
+
+// A cross-section swept from point to point of a run (each point its own frame and outline, all with as many points),
+// its ends closed.
+Solid sweptTool(const std::vector<V3> &E, const std::vector<V3> &U, const std::vector<V3> &N, const std::vector<std::vector<V3>> &outlines,
+                bool closed) {
+  Solid out;
+  size_t n = E.size(), k = outlines[0].size();
+  for (size_t i = 0; i < n; i++)
+    for (size_t j = 0; j < k; j++) out.p.push_back(at3(E[i], U[i], N[i], outlines[i][j]));
+  out.n.assign(out.p.size(), V3{});
+  size_t rows = closed ? n : n - 1;
+  auto id = [&](size_t i, size_t j) { return (uint32_t)((i % n) * k + j % k); };
+  for (size_t j = 0; j < k; j++) {
+    Solid::Face f;
+    out.faces.push_back(f);
+  }
+  for (size_t i = 0; i < rows; i++)
+    for (size_t j = 0; j < k; j++) {
+      uint32_t a = id(i, j), b = id(i, j + 1), c = id(i + 1, j + 1), dd = id(i + 1, j);
+      out.triangle(a, b, c, (int)j);
+      out.triangle(a, c, dd, (int)j);
+    }
+  if (!closed) {
+    for (int end = 0; end < 2; end++) {
+      size_t i = end == 0 ? 0 : n - 1;
+      Solid::Face f;
+      out.faces.push_back(f);
+      int fid = (int)out.faces.size() - 1;
+      std::vector<int> cap = capOf(outlines[i]);
+      for (size_t q = 0; q + 2 < cap.size(); q += 3) {
+        if (end == 0) out.triangle(id(i, cap[q]), id(i, cap[q + 2]), id(i, cap[q + 1]), fid);
+        else out.triangle(id(i, cap[q]), id(i, cap[q + 1]), id(i, cap[q + 2]), fid);
+      }
+    }
+  }
+  // Turned outward, and each face's normals and plane.
+  if (out.meshVolume() < 0)
+    for (size_t t = 0; t < out.tri.size(); t += 3) std::swap(out.tri[t + 1], out.tri[t + 2]);
+  // Every triangle its own points (unwelded, as the engine's meshes are) with its flat normal.
+  Solid flat;
+  flat.faces = out.faces;
+  for (size_t t = 0; t < out.triFace.size(); t++) {
+    V3 a = out.p[out.tri[3 * t]], b = out.p[out.tri[3 * t + 1]], c = out.p[out.tri[3 * t + 2]], nn = unit(cross(b - a, c - a));
+    uint32_t base = (uint32_t)flat.p.size();
+    flat.vertex(a, nn), flat.vertex(b, nn), flat.vertex(c, nn);
+    flat.triangle(base, base + 1, base + 2, (int)out.triFace[t]);
+  }
+  for (auto &f : flat.faces) f.geom.kind = FaceGeom::Curved;
+  flat.centroids();
+  flat.gap.assign(6 * flat.triFace.size(), 0);
+  return flat;
+}
+
+// MARK: - runs, ends and corners
+
+// Faces with a triangle at point p.
+std::vector<int> facesAt(const Solid &s, V3 p) {
+  std::vector<int> out;
+  for (size_t c = 0; c < s.tri.size(); c++)
+    if (s.p[s.tri[c]] == p) {
+      int f = (int)s.triFace[c / 3];
+      if (std::find(out.begin(), out.end(), f) == out.end()) out.push_back(f);
+    }
+  return out;
+}
+
+// Whether a mesh is closed: every side of a triangle met by one running the other way (points by position).
+bool closed(const Solid &s) {
+  std::unordered_map<PKey, uint32_t, PKeyHash> id;
+  std::vector<uint32_t> at(s.p.size());
+  for (size_t i = 0; i < s.p.size(); i++) at[i] = id.emplace(pkey(s.p[i]), (uint32_t)id.size()).first->second;
+  std::unordered_map<uint64_t, int> sides;
+  for (size_t t = 0; t < s.tri.size(); t += 3)
+    for (int k = 0; k < 3; k++) {
+      uint32_t a = at[s.tri[t + k]], b = at[s.tri[t + (k + 1) % 3]];
+      if (a == b) return false;
+      sides[(uint64_t)a << 32 | b]++;
+    }
+  for (auto [k, n] : sides) {
+    auto o = sides.find(k << 32 | k >> 32);
+    if (o == sides.end() || o->second != n) return false;
+  }
+  return true;
+}
+
+// How far each face runs straight from the crease at point i, seen in the cut across it (until its outline turns by more
+// than 30°), and whether that run ends on one of `treated` (so the face is shared between two treatments).
+struct Runs {
+  double a = INFINITY, b = INFINITY;
+  bool aShared = false, bShared = false;
+};
+
+double distanceTo(const std::vector<V3> &pts, V3 q) {
+  double best = INFINITY;
+  for (size_t i = 0; i + 1 < pts.size(); i++) {
+    V3 a = pts[i], dv = pts[i + 1] - pts[i];
+    double l2 = norm2(dv), t = l2 > 0 ? std::clamp(dot(q - a, dv) / l2, 0.0, 1.0) : 0;
+    best = std::min(best, norm(a + dv * t - q));
+  }
+  return best;
+}
+
+Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease> &treated, double tol) {
+  Runs out;
+  auto loops = sliceAcross(s, c, i);
+  // The loop and point nearest the edge.
+  const std::vector<std::pair<double, double>> *loop = nullptr;
+  size_t k = 0;
+  double best = INFINITY;
+  for (const auto &l : loops)
+    for (size_t j = 0; j < l.size(); j++) {
+      double d = std::hypot(l[j].first, l[j].second);
+      if (d < best) best = d, loop = &l, k = j;
+    }
+  if (!loop || loop->size() < 3) return out;
+  const auto &L = *loop;
+  size_t n = L.size();
+  V3 E = c.pts[i], X = -c.ia[i], Y = unit(c.na[i] - X * dot(c.na[i], X));
+  auto run = [&](int step, V3 &dir, V3 &end) {
+    double length = 0, turned = 0;
+    V3 heading{};
+    bool have = false;
+    size_t j = k;
+    for (size_t g = 0; g < n; g++) {
+      size_t nx = (j + n + step) % n;
+      V3 d = p2(L[nx].first - L[j].first, L[nx].second - L[j].second);
+      double l = norm(d);
+      if (l > 1e-12) {
+        V3 h = d / l;
+        if (have) turned += std::acos(std::clamp(dot(heading, h), -1.0, 1.0));
+        if (turned > pi / 6) break;
+        if (!have) dir = h;
+        heading = h, have = true, length += l;
+      }
+      j = nx;
+    }
+    end = E + X * L[j].first + Y * L[j].second;
+    return length;
+  };
+  V3 d1, d2, e1, e2;
+  double l1 = run(1, d1, e1), l2 = run(-1, d2, e2);
+  // Face A leaves along -x.
+  bool firstIsA = d1.x < d2.x;
+  out.a = firstIsA ? l1 : l2, out.b = firstIsA ? l2 : l1;
+  V3 endA = firstIsA ? e1 : e2, endB = firstIsA ? e2 : e1;
+  for (const auto &o : treated) {
+    if (&o == &c) continue;
+    if (distanceTo(o.pts, endA) < tol) out.aShared = true;
+    if (distanceTo(o.pts, endB) < tol) out.bShared = true;
+  }
+  return out;
+}
+
+// How far a run's tool reaches across it: the largest distance of its section's points from the edge.
+double spanOf(const std::vector<Section2> &secs) {
+  double s = 0;
+  for (const auto &x : secs) {
+    if (x.circle) s = std::max(s, norm(x.centre) + x.radius);
+    for (const auto &r : x.runs) s = std::max(s, r.arc ? norm(r.centre) + r.radius : norm(r.p));
+  }
+  return s;
+}
+
+// MARK: - rounded straight edges and their corners, as one mesh
+
+// A straight edge between two flat faces, to be rounded: its ends, its faces (A, B) and their outward normals, and the corner
+// (a ball) at each end when it has one.
+struct Line {
+  const Crease *c = nullptr;
+  V3 E0, E1, T;
+  int fa = -1, fb = -1;
+  V3 na, nb;
+  int arcs = 1;
+  int ball[2] = {-1, -1};
+};
+
+// A corner where rounded straight edges meet on flat faces, rounded by a ball of the same radius: its faces and lines in turn
+// round it (line i between faces i and i + 1).
+struct Ball {
+  V3 V, C;
+  std::vector<int> faces, lines;
+};
+
+// A mesh put together piece by piece: points shared by position (pieces made apart meet point for point where they're made
+// from the same numbers), each triangle's face, and each face's form — flat, round about an axis, a ball — for its normals
+// and for the volume its chords miss.
+struct Builder {
+  struct Face {
+    FaceGeom geom;
+    int kind = 0;  // 0 flat, 1 round about an axis, 2 a ball, 3 rough
+    V3 axisPoint, axis, centre;
+    double miss = 0;  // the volume its chords miss, before its sign is known
+  };
+  std::vector<V3> pts;
+  std::unordered_map<PKey, uint32_t, PKeyHash> index;
+  std::vector<uint32_t> tri;
+  std::vector<int> triFace;
+  std::vector<Face> faces;
+
+  uint32_t at(V3 p) {
+    auto it = index.find(pkey(p));
+    if (it != index.end()) return it->second;
+    pts.push_back(p);
+    return index[pkey(p)] = (uint32_t)pts.size() - 1;
+  }
+  int face(int kind, FaceGeom g = FaceGeom()) {
+    Face f;
+    f.kind = kind, f.geom = g;
+    faces.push_back(f);
+    return (int)faces.size() - 1;
+  }
+  void triangle(V3 a, V3 b, V3 c, int f) {
+    uint32_t i = at(a), j = at(b), k = at(c);
+    if (i == j || j == k || i == k) return;
+    tri.insert(tri.end(), {i, j, k});
+    triFace.push_back(f);
+  }
+  void quad(V3 a, V3 b, V3 c, V3 d, int f) { triangle(a, b, c, f), triangle(a, c, d, f); }
+
+  // Every triangle turned the same way as its neighbours, each closed piece outward; then as the engine's mesh: each face its
+  // own points with normals by its form, its exact form and the volume its chords miss.
+  Solid solid() {
+    size_t nt = triFace.size();
+    std::unordered_map<uint64_t, std::vector<uint32_t>> sides;
+    auto key = [](uint32_t a, uint32_t b) { return (uint64_t)std::min(a, b) << 32 | std::max(a, b); };
+    for (size_t t = 0; t < nt; t++)
+      for (int k = 0; k < 3; k++) sides[key(tri[3 * t + k], tri[3 * t + (k + 1) % 3])].push_back((uint32_t)t);
+    std::vector<int> flip(nt, -1);
+    auto runs = [&](size_t t, uint32_t a, uint32_t b) {
+      for (int k = 0; k < 3; k++)
+        if (tri[3 * t + k] == a && tri[3 * t + (k + 1) % 3] == b) return true;
+      return false;
+    };
+    for (size_t seed = 0; seed < nt; seed++) {
+      if (flip[seed] >= 0) continue;
+      flip[seed] = 0;
+      std::vector<size_t> todo{seed}, piece{seed};
+      while (!todo.empty()) {
+        size_t t = todo.back();
+        todo.pop_back();
+        for (int k = 0; k < 3; k++) {
+          uint32_t a = tri[3 * t + k], b = tri[3 * t + (k + 1) % 3];
+          bool forward = flip[t] == 0;  // t runs a → b when unflipped
+          for (uint32_t o : sides[key(a, b)]) {
+            if (o == t || flip[o] >= 0) continue;
+            // A neighbour must run the side the other way.
+            bool oRuns = runs(o, a, b);
+            flip[o] = (oRuns == forward) ? 1 : 0;
+            todo.push_back(o), piece.push_back(o);
+          }
+        }
+      }
+      double v = 0;
+      for (size_t t : piece) {
+        V3 a = pts[tri[3 * t]], b = pts[tri[3 * t + 1]], c = pts[tri[3 * t + 2]];
+        double w = dot(a, cross(b, c));
+        v += flip[t] ? -w : w;
+      }
+      if (v < 0)
+        for (size_t t : piece) flip[t] ^= 1;
+    }
+    for (size_t t = 0; t < nt; t++)
+      if (flip[t] == 1) std::swap(tri[3 * t + 1], tri[3 * t + 2]);
+    Solid out;
+    for (const auto &f : faces) {
+      Solid::Face sf;
+      sf.geom = f.geom;
+      out.faces.push_back(sf);
+    }
+    // A flat face with no form given: the plane of its largest triangle (square where it's within rounding of square).
+    std::vector<double> largest(faces.size(), 0);
+    for (size_t t = 0; t < nt; t++) {
+      Solid::Face &sf = out.faces[triFace[t]];
+      if (faces[triFace[t]].kind != 0 || faces[triFace[t]].geom.flat) continue;
+      V3 a = pts[tri[3 * t]], nn = cross(pts[tri[3 * t + 1]] - a, pts[tri[3 * t + 2]] - a);
+      double area = norm(nn);
+      if (area <= largest[triFace[t]]) continue;
+      largest[triFace[t]] = area;
+      nn = nn / area;
+      for (int k = 0; k < 3; k++) {
+        double &x = k == 0 ? nn.x : k == 1 ? nn.y : nn.z;
+        if (std::fabs(x) < 1e-12) x = 0;
+        else if (std::fabs(std::fabs(x) - 1) < 1e-12) x = x > 0 ? 1 : -1;
+      }
+      sf.geom.kind = FaceGeom::Flat, sf.geom.flat = true, sf.geom.pn = nn, sf.geom.pd = dot(nn, a);
+    }
+    std::vector<int> signOf(faces.size(), 0);
+    for (size_t t = 0; t < nt; t++) {
+      V3 a = pts[tri[3 * t]], b = pts[tri[3 * t + 1]], c = pts[tri[3 * t + 2]], nn = unit(cross(b - a, c - a));
+      const Face &f = faces[triFace[t]];
+      auto normalAt = [&](V3 p) {
+        V3 n = nn;
+        if (f.kind == 1) n = unit((p - f.axisPoint) - f.axis * dot(p - f.axisPoint, f.axis));
+        if (f.kind == 2) n = unit(p - f.centre);
+        if (f.kind == 1 || f.kind == 2) {
+          if (dot(n, nn) < 0) n = -n;
+          if (signOf[triFace[t]] == 0) {
+            V3 out = f.kind == 1 ? (a - f.axisPoint) - f.axis * dot(a - f.axisPoint, f.axis) : a - f.centre;
+            signOf[triFace[t]] = dot(nn, out) > 0 ? 1 : -1;
+          }
+        }
+        return n;
+      };
+      uint32_t base = (uint32_t)out.p.size();
+      out.vertex(a, normalAt(a)), out.vertex(b, normalAt(b)), out.vertex(c, normalAt(c));
+      out.triangle(base, base + 1, base + 2, triFace[t]);
+    }
+    // A curved face facing away from its middle (a solid's) misses volume beyond its chords; facing towards it (a tool's), the
+    // chords take in volume that isn't there.
+    for (size_t f = 0; f < faces.size(); f++) out.faces[f].deficit = faces[f].miss * signOf[f];
+    out.centroids();
+    out.slivers();
+    return out;
+  }
+};
+
+// A line's loop across it at the axis point q (where its rounding's circle has its middle): the tangent points on faces A
+// and B with the tool's sides going out from them (by m) to its outer corner, then the arc from B's tangent point back
+// towards A's (its inner points).
+std::vector<V3> loopAt(const Line &L, V3 q, double r, double m) {
+  V3 TA = q + L.na * r, TB = q + L.nb * r;
+  std::vector<V3> loop{TA, q + L.na * (r + m), q + (L.na + L.nb) * ((r + m) / (1 + dot(L.na, L.nb))), q + L.nb * (r + m), TB};
+  double alpha = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
+  V3 w = unit(L.na - L.nb * dot(L.na, L.nb));
+  for (int j = 1; j < L.arcs; j++) {
+    double a = alpha * j / L.arcs;
+    loop.push_back(q + (L.nb * std::cos(a) + w * std::sin(a)) * r);
+  }
+  return loop;
+}
+
+// The axis point of a line's rounding across it at distance s along it from its first end.
+V3 axisAt(const Line &L, double s, double r) { return L.E0 + L.T * s - (L.na + L.nb) * (r / (1 + dot(L.na, L.nb))); }
+
+V3 slerp(V3 a, V3 b, double t) {
+  double th = std::acos(std::clamp(dot(a, b), -1.0, 1.0));
+  if (th < 1e-9) return unit(a * (1 - t) + b * t);
+  return unit(a * (std::sin((1 - t) * th) / std::sin(th)) + b * (std::sin(t * th) / std::sin(th)));
+}
+
+// The ball's patch at a corner: its outline (the lines' arcs one after another) filled in rings towards its middle.
+void ballPatch(Builder &B, const Ball &ball, const std::vector<V3> &outline, double r, double d) {
+  FaceGeom g;
+  g.kind = FaceGeom::Turned, g.elem = Elem::arcOf(0, 0, r, -pi / 2, pi / 2), g.place = Affine::translation(ball.C);
+  int f = B.face(2, g);
+  B.faces[f].centre = ball.C;
+  V3 mid = unit(ball.V - ball.C);
+  double widest = 0;
+  for (V3 p : outline) widest = std::max(widest, std::acos(std::clamp(dot(unit(p - ball.C), mid), -1.0, 1.0)));
+  int rings = std::max(1, (int)std::ceil(widest / (2 * std::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
+  rings = std::min(rings, 32);
+  size_t n = outline.size();
+  std::vector<std::vector<V3>> ring(rings + 1);
+  for (int l = 1; l < rings; l++)
+    for (V3 p : outline) ring[l].push_back(ball.C + slerp(mid, unit(p - ball.C), (double)l / rings) * r);
+  ring[rings] = outline;
+  V3 top = ball.C + mid * r;
+  double miss = 0;
+  auto add = [&](V3 a, V3 b, V3 c) {
+    B.triangle(a, b, c, f);
+    // The ball's sector over this triangle less the triangle's pyramid from the middle.
+    V3 x = a - ball.C, y = b - ball.C, z = c - ball.C;
+    double det = dot(x, cross(y, z)), den = r * r * r + dot(x, y) * r + dot(y, z) * r + dot(z, x) * r;
+    double omega = 2 * std::atan2(std::fabs(det), den);
+    miss += r * r * r * std::fabs(omega) / 3 - std::fabs(det) / 6;
+  };
+  for (size_t j = 0; j < n; j++) {
+    size_t k = (j + 1) % n;
+    add(top, ring[1][j], ring[1][k]);
+    for (int l = 1; l < rings; l++) {
+      add(ring[l][j], ring[l + 1][j], ring[l + 1][k]);
+      add(ring[l][j], ring[l + 1][k], ring[l][k]);
+    }
+  }
+  B.faces[f].miss = miss;
+}
+
+// Rounding the lines: a tool for each group of lines joined at balls, one mesh each — each line's tool between its end
+// loops (at a ball, the loop round the ball's middle; at a free end, run on past the end, or a hair short of it), each
+// ball's patch, and over each corner a lid reaching out past the faces.
+std::vector<Solid> lineTools(const Solid &s, const std::vector<Line> &lines, const std::vector<Ball> &balls, double r, double d, double tol) {
+  // Groups: lines joined through balls.
+  std::vector<int> group(lines.size(), -1);
+  int groups = 0;
+  for (size_t i = 0; i < lines.size(); i++) {
+    if (group[i] >= 0) continue;
+    std::vector<int> todo{(int)i};
+    group[i] = groups;
+    while (!todo.empty()) {
+      int l = todo.back();
+      todo.pop_back();
+      for (int e : lines[l].ball)
+        if (e >= 0)
+          for (int o : balls[e].lines)
+            if (group[o] < 0) group[o] = groups, todo.push_back(o);
+    }
+    groups++;
+  }
+  std::vector<Solid> out;
+  for (int gi = 0; gi < groups; gi++) {
+    Builder B;
+    double m = reachOut(r, gi);
+    std::vector<int> mine;
+    for (size_t i = 0; i < lines.size(); i++)
+      if (group[i] == gi) mine.push_back((int)i);
+    for (int li : mine) {
+      const Line &L = lines[li];
+      double len = norm(L.E1 - L.E0);
+      std::vector<V3> ends[2];
+      for (int e = 0; e < 2; e++) {
+        if (L.ball[e] >= 0) {
+          ends[e] = loopAt(L, balls[L.ball[e]].C, r, m);
+          continue;
+        }
+        // A free end: on past it onto a face there (outside the solid), or stopping a hair short.
+        V3 V = e == 0 ? L.E0 : L.E1, out = e == 0 ? -L.T : L.T;
+        std::vector<int> others;
+        for (int f : facesAt(s, V))
+          if (f != L.fa && f != L.fb) others.push_back(f);
+        bool onto = others.size() == 1 && s.faces[others[0]].geom.flat && dot(s.faces[others[0]].geom.pn, out) > 0.05;
+        double span = r + m + norm(L.na + L.nb) * (r + m), reach = onto ? (span + 0.45 * m) / dot(s.faces[others[0]].geom.pn, out) * 1.2 + span : -hair(r);
+        ends[e] = loopAt(L, axisAt(L, e == 0 ? -reach : len + reach, r), r, m);
+      }
+      size_t k = ends[0].size();
+      double between = dot(ends[1][0] - ends[0][0], L.T);
+      if (!(between > tol)) return {};
+      int wallA = B.face(0), outA = B.face(0), outB = B.face(0), wallB = B.face(0);
+      FaceGeom cyl;
+      {
+        // The rounding's cylinder: a turned face round the line's axis.
+        V3 q = axisAt(L, 0, r), x = unit(L.na - L.T * dot(L.na, L.T)), y = cross(L.T, x);
+        Affine f;
+        f.m[0] = x.x, f.m[1] = y.x, f.m[2] = L.T.x, f.m[3] = q.x;
+        f.m[4] = x.y, f.m[5] = y.y, f.m[6] = L.T.y, f.m[7] = q.y;
+        f.m[8] = x.z, f.m[9] = y.z, f.m[10] = L.T.z, f.m[11] = q.z;
+        cyl.kind = FaceGeom::Turned, cyl.elem = Elem::line(r, -1e6, r, 1e6), cyl.place = f;
+      }
+      int arc = B.face(1, cyl);
+      B.faces[arc].axisPoint = axisAt(L, 0, r), B.faces[arc].axis = L.T;
+      int faceOf[4] = {wallA, outA, outB, wallB};
+      for (size_t j = 0; j < k; j++) {
+        size_t n = (j + 1) % k;
+        int f = j < 4 ? faceOf[j] : arc;
+        B.quad(ends[0][j], ends[0][n], ends[1][n], ends[1][j], f);
+      }
+      double a = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
+      B.faces[arc].miss += L.arcs * r * r / 2 * (a - std::sin(a)) * between;
+      for (int e = 0; e < 2; e++) {
+        if (L.ball[e] >= 0) continue;
+        // A free end's cap: a fan from its outer corner.
+        int cap = B.face(0);
+        for (size_t j = 0; j < k; j++) {
+          size_t n = (j + 1) % k;
+          if (j == 2 || n == 2) continue;
+          B.triangle(ends[e][2], ends[e][j], ends[e][n], cap);
+        }
+      }
+    }
+    for (size_t bi = 0; bi < balls.size(); bi++) {
+      const Ball &ball = balls[bi];
+      if (group[ball.lines[0]] != gi) continue;
+      // The patch's outline: each line's arc in turn, from face i's tangent point to face i + 1's.
+      std::vector<V3> outline, lid;
+      for (size_t i = 0; i < ball.lines.size(); i++) {
+        const Line &L = lines[ball.lines[i]];
+        std::vector<V3> loop = loopAt(L, ball.C, r, m);
+        // loop: TA, PA, O, PB, TB, arc from TB towards TA.
+        bool forward = L.fb == ball.faces[i];  // B first: runs from face i to face i + 1 as the arc does
+        std::vector<V3> arcPts{loop[4]};
+        for (size_t j = 5; j < loop.size(); j++) arcPts.push_back(loop[j]);
+        arcPts.push_back(loop[0]);
+        if (!forward) std::reverse(arcPts.begin(), arcPts.end());
+        for (size_t j = 0; j + 1 < arcPts.size(); j++) outline.push_back(arcPts[j]);
+        // The lid: face i's point out, the line's outer corner.
+        lid.push_back(forward ? loop[3] : loop[1]);
+        lid.push_back(loop[2]);
+      }
+      ballPatch(B, ball, outline, r, d);
+      int top = B.face(3);
+      V3 far = ball.V + unit(ball.V - ball.C) * (3 * (r + m));
+      for (size_t j = 0; j < lid.size(); j++) B.triangle(far, lid[j], lid[(j + 1) % lid.size()], top);
+    }
+    out.push_back(B.solid());
+  }
+  return out;
+}
+
+// A section swept straight along T from s0 to s1 (E the frame's origin): a side per straight run, a round face per arc
+// (its form, and the volume its chords miss), the two ends flat.
+Solid prismTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 T, double s0, double s1, double d) {
+  std::vector<int> chords = chordsOf(sec, d), runOf;
+  std::vector<V3> outline = pointsOf(sec, chords, &runOf);
+  size_t k = outline.size();
+  Builder B;
+  std::vector<V3> ends[2];
+  for (V3 q : outline) ends[0].push_back(at3(E, U, N, q) + T * s0), ends[1].push_back(at3(E, U, N, q) + T * s1);
+  // Each run's face.
+  size_t runs = sec.circle ? 1 : sec.runs.size();
+  std::vector<int> faceOf(runs);
+  for (size_t i = 0; i < runs; i++) {
+    bool arc = sec.circle || sec.runs[i].arc;
+    if (!arc) {
+      faceOf[i] = B.face(0);
+      continue;
+    }
+    V3 c = sec.circle ? sec.centre : sec.runs[i].centre;
+    double r = sec.circle ? sec.radius : sec.runs[i].radius, turn = 2 * pi;
+    if (!sec.circle) {
+      double a0;
+      arcTurn(sec.runs[i], sec.runs[(i + 1) % runs].p, a0, turn);
+    }
+    V3 c3 = at3(E, U, N, c), x = U, y = cross(T, x);
+    FaceGeom cyl;
+    Affine f;
+    f.m[0] = x.x, f.m[1] = y.x, f.m[2] = T.x, f.m[3] = c3.x;
+    f.m[4] = x.y, f.m[5] = y.y, f.m[6] = T.y, f.m[7] = c3.y;
+    f.m[8] = x.z, f.m[9] = y.z, f.m[10] = T.z, f.m[11] = c3.z;
+    cyl.kind = FaceGeom::Turned, cyl.elem = Elem::line(r, -1e6, r, 1e6), cyl.place = f;
+    faceOf[i] = B.face(1, cyl);
+    B.faces[faceOf[i]].axisPoint = c3, B.faces[faceOf[i]].axis = T;
+    double a = std::fabs(turn) / chords[i];
+    B.faces[faceOf[i]].miss = chords[i] * r * r / 2 * (a - std::sin(a)) * (s1 - s0);
+  }
+  for (size_t j = 0; j < k; j++) {
+    size_t n = (j + 1) % k;
+    B.quad(ends[0][j], ends[0][n], ends[1][n], ends[1][j], faceOf[runOf[j]]);
+  }
+  std::vector<int> cap = capOf(outline);
+  if (cap.empty()) return Solid();
+  for (int e = 0; e < 2; e++) {
+    int f = B.face(0);
+    for (size_t q = 0; q + 2 < cap.size(); q += 3) B.triangle(ends[e][cap[q]], ends[e][cap[q + 1]], ends[e][cap[q + 2]], f);
+  }
+  return B.solid();
+}
+
+// The whole solid rounded at once (every edge a line, every corner a ball): its faces shrunk to the tangent points, each
+// line's cylinder between its balls, each ball's patch — no tool needed.
+bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vector<Ball> &balls, double r, double d, Solid &out) {
+  Builder B;
+  // Each face: the tangent points of the balls on it, in turn round its normal.
+  for (size_t f = 0; f < s.faces.size(); f++) {
+    std::vector<V3> pts;
+    for (const auto &ball : balls)
+      for (int g : ball.faces)
+        if (g == (int)f) pts.push_back(ball.C + s.faces[f].geom.pn * r);
+    if (pts.size() < 3) return false;
+    V3 mid;
+    for (V3 p : pts) mid += p;
+    mid = mid / (double)pts.size();
+    V3 n = s.faces[f].geom.pn, e1 = unit(pts[0] - mid), e2 = cross(n, e1);
+    std::sort(pts.begin(), pts.end(), [&](V3 a, V3 b) { return std::atan2(dot(a - mid, e2), dot(a - mid, e1)) < std::atan2(dot(b - mid, e2), dot(b - mid, e1)); });
+    int face = B.face(0, s.faces[f].geom);
+    for (size_t j = 1; j + 1 < pts.size(); j++) B.triangle(pts[0], pts[j], pts[j + 1], face);
+  }
+  for (const auto &L : lines) {
+    if (L.ball[0] < 0 || L.ball[1] < 0) return false;
+    std::vector<V3> ends[2];
+    for (int e = 0; e < 2; e++) {
+      std::vector<V3> loop = loopAt(L, balls[L.ball[e]].C, r, 0);
+      ends[e] = {loop[4]};
+      for (size_t j = 5; j < loop.size(); j++) ends[e].push_back(loop[j]);
+      ends[e].push_back(loop[0]);
+    }
+    double between = dot(ends[1][0] - ends[0][0], L.T);
+    if (!(between > 0)) return false;
+    FaceGeom cyl;
+    V3 q = axisAt(L, 0, r), x = unit(L.na - L.T * dot(L.na, L.T)), y = cross(L.T, x);
+    Affine f;
+    f.m[0] = x.x, f.m[1] = y.x, f.m[2] = L.T.x, f.m[3] = q.x;
+    f.m[4] = x.y, f.m[5] = y.y, f.m[6] = L.T.y, f.m[7] = q.y;
+    f.m[8] = x.z, f.m[9] = y.z, f.m[10] = L.T.z, f.m[11] = q.z;
+    cyl.kind = FaceGeom::Turned, cyl.elem = Elem::line(r, -1e6, r, 1e6), cyl.place = f;
+    int arc = B.face(1, cyl);
+    B.faces[arc].axisPoint = q, B.faces[arc].axis = L.T;
+    for (size_t j = 0; j + 1 < ends[0].size(); j++) B.quad(ends[0][j], ends[0][j + 1], ends[1][j + 1], ends[1][j], arc);
+    double a = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
+    B.faces[arc].miss = L.arcs * r * r / 2 * (a - std::sin(a)) * between;
+  }
+  for (const auto &ball : balls) {
+    std::vector<V3> outline;
+    for (size_t i = 0; i < ball.lines.size(); i++) {
+      const Line &L = lines[ball.lines[i]];
+      std::vector<V3> loop = loopAt(L, ball.C, r, 0);
+      bool forward = L.fb == ball.faces[i];
+      std::vector<V3> arcPts{loop[4]};
+      for (size_t j = 5; j < loop.size(); j++) arcPts.push_back(loop[j]);
+      arcPts.push_back(loop[0]);
+      if (!forward) std::reverse(arcPts.begin(), arcPts.end());
+      for (size_t j = 0; j + 1 < arcPts.size(); j++) outline.push_back(arcPts[j]);
+    }
+    ballPatch(B, ball, outline, r, d);
+  }
+  out = B.solid();
+  return out.meshVolume() > 0;
+}
+
+}  // namespace
+
+Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit) {
+  fit = TreatFit();
+  std::vector<Crease> creases = creasesOf(s, t.kinds.data(), t.picks.data(), (int)t.kinds.size(), &fit.missing);
+  // Bevels and coves skip edges where the faces meet flat (and coves inside corners too).
+  std::vector<Crease> work;
+  for (auto &c : creases) {
+    if (t.kind == Treatment::Cove && c.angle >= 179) continue;
+    if (std::fabs(c.angle - 180) <= 1) continue;
+    work.push_back(c);
+  }
+  double size = 0;
+  for (V3 q : s.p) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+  double tol = 1e-7 * (1 + size);
+  if (work.empty() || (t.kind != Treatment::Bevel && t.radius < 0.005) || (t.kind == Treatment::Bevel && std::min(t.legA, t.legB) < 0.005)) return s;
+
+  // Will it fit: each face beside a crease must hold what the treatment takes of it (half of it when another treated edge
+  // ends the face across from this one), measured in the cut across the crease's middle.
+  double most = INFINITY;
+  for (const auto &c : work) {
+    size_t mid = c.pts.size() / 2;
+    Runs r = runsAt(s, c, mid, work, std::max(tol, d));
+    double la = r.aShared ? r.a / 2 : r.a, lb = r.bShared ? r.b / 2 : r.b;
+    double phi = c.angleAt(mid) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
+    if (t.kind == Treatment::Round) {
+      most = std::min(most, std::min(la, lb) * std::tan(half));
+    } else if (t.kind == Treatment::Cove) {
+      most = std::min(most, std::min(la, lb));
+    } else if (t.legA > la * (1 - 1e-9) || t.legB > lb * (1 - 1e-9)) {
+      fit.fits = false;
+      fit.why = "bevel: too large for these edges";
+      return s;
+    }
+  }
+  if (t.kind != Treatment::Bevel && t.radius >= most * (1 - 1e-6)) {
+    fit.fits = false;
+    fit.most = std::max(0.0, std::floor(most * 0.999 * 100) / 100);
+    fit.why = t.kind == Treatment::Round ? "rounding too large" : "cove too large";
+    return s;
+  }
+  auto tooLarge = [&]() {
+    fit.fits = false;
+    fit.why = t.kind == Treatment::Bevel ? "bevel: too large for these edges" : "too large for these edges";
+    return s;
+  };
+
+  // Straight edges between flat faces, rounded outward: lines, joined at corners by balls where every edge there is one.
+  std::vector<Line> lines;
+  std::vector<char> isLine(work.size(), 0);
+  if (t.kind == Treatment::Round) {
+    for (size_t i = 0; i < work.size(); i++) {
+      const Crease &c = work[i];
+      if (c.closed || c.edges.size() != 1 || c.angle >= 179) continue;
+      bool flat = s.faces[c.fa[0]].geom.flat && s.faces[c.fb[0]].geom.flat;
+      V3 T = unit(c.pts.back() - c.pts.front());
+      for (V3 q : c.pts) flat = flat && norm(cross(q - c.pts.front(), T)) <= tol * 10;
+      if (!flat) continue;
+      Line L;
+      L.c = &c, L.E0 = c.pts.front(), L.E1 = c.pts.back(), L.T = T, L.fa = c.fa[0], L.fb = c.fb[0];
+      L.na = s.faces[L.fa].geom.pn, L.nb = s.faces[L.fb].geom.pn;
+      double alpha = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
+      L.arcs = std::max(1, (int)std::ceil(alpha / (2 * std::acos(std::clamp(1 - d / t.radius, -1.0, 1.0))) - 1e-9));
+      L.arcs = std::min(std::max(L.arcs, (int)std::ceil(alpha / 0.35 - 1e-9)), 64);
+      lines.push_back(L);
+      isLine[i] = 1;
+    }
+  }
+  std::vector<Ball> balls;
+  {
+    std::map<std::tuple<double, double, double>, std::vector<std::pair<int, int>>> at;  // corner → (line, end)
+    for (size_t l = 0; l < lines.size(); l++) {
+      at[{lines[l].E0.x, lines[l].E0.y, lines[l].E0.z}].push_back({(int)l, 0});
+      at[{lines[l].E1.x, lines[l].E1.y, lines[l].E1.z}].push_back({(int)l, 1});
+    }
+    for (auto &[key, ends] : at) {
+      V3 V{std::get<0>(key), std::get<1>(key), std::get<2>(key)};
+      if (ends.size() < 3) continue;
+      int creasesHere = 0;
+      for (const auto &e : s.edges)
+        if (e.f0 >= 0 && e.f1 >= 0 && e.f0 != e.f1 && (e.pts.front() == V || e.pts.back() == V)) creasesHere++;
+      if (creasesHere != (int)ends.size()) continue;
+      std::vector<int> faces = facesAt(s, V);
+      bool flat = faces.size() == ends.size();
+      for (int f : faces) flat = flat && s.faces[f].geom.flat;
+      if (!flat) continue;
+      // The faces and lines in turn round the corner.
+      Ball ball;
+      ball.V = V;
+      std::vector<int> ls;
+      for (auto [l, e] : ends) ls.push_back(l);
+      int cur = ls[0], face = lines[cur].fa;
+      std::set<int> used;
+      bool ok = true;
+      for (size_t k = 0; k < ls.size() && ok; k++) {
+        used.insert(cur);
+        ball.faces.push_back(face);
+        ball.lines.push_back(cur);
+        int other = lines[cur].fa == face ? lines[cur].fb : lines[cur].fa, next = -1;
+        for (int l : ls)
+          if (!used.count(l) && (lines[l].fa == other || lines[l].fb == other)) next = l;
+        if (k + 1 < ls.size()) {
+          if (next < 0) ok = false;
+          cur = next, face = other;
+        }
+      }
+      if (!ok || ball.lines.size() != ls.size()) continue;
+      // The ball's middle: the radius inside every face there (least squares, then checked).
+      double ata[3][3] = {}, atb[3] = {};
+      for (int f : ball.faces) {
+        V3 n = s.faces[f].geom.pn;
+        double b = s.faces[f].geom.pd - t.radius;
+        for (int i = 0; i < 3; i++) {
+          for (int j = 0; j < 3; j++) ata[i][j] += n[i] * n[j];
+          atb[i] += n[i] * b;
+        }
+      }
+      auto det3 = [](double m[3][3]) {
+        return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+      };
+      double det = det3(ata);
+      if (std::fabs(det) < 1e-12) continue;
+      for (int k = 0; k < 3; k++) {
+        double m[3][3];
+        for (int i = 0; i < 3; i++)
+          for (int j = 0; j < 3; j++) m[i][j] = j == k ? atb[i] : ata[i][j];
+        ball.C[k] = det3(m) / det;
+      }
+      for (int f : ball.faces) ok = ok && std::fabs(dot(s.faces[f].geom.pn, ball.C) - (s.faces[f].geom.pd - t.radius)) < 1e-6 * (1 + size);
+      if (!ok) continue;
+      int bi = (int)balls.size();
+      balls.push_back(ball);
+      for (auto [l, e] : ends) lines[l].ball[e] = bi;
+    }
+  }
+
+  // Every edge rounded on a solid of flat faces meeting only at balls: the rounded solid made outright.
+  if (t.kind == Treatment::Round && !lines.empty() && lines.size() == work.size()) {
+    size_t edgesHere = 0;
+    for (const auto &e : s.edges)
+      if (e.f0 >= 0 && e.f1 >= 0 && e.f0 != e.f1) edgesHere++;
+    bool all = edgesHere == lines.size();
+    for (const auto &L : lines) all = all && L.ball[0] >= 0 && L.ball[1] >= 0;
+    Solid whole;
+    if (all && roundedWhole(s, lines, balls, t.radius, d, whole)) {
+      finish(whole, d);
+      if (pieces(whole) == pieces(s)) return whole;
+    }
+  }
+
+  std::vector<Solid> take, add;
+  if (!lines.empty()) {
+    std::vector<Solid> tools = lineTools(s, lines, balls, t.radius, d, tol);
+    if (tools.empty()) return tooLarge();
+    for (auto &tool : tools) take.push_back(std::move(tool));
+  }
+  // Inward roundings meeting at a corner: each there a hair wider than the others, so their cylinders cross rather than
+  // touch (alone, each exact).
+  std::vector<int> shade(work.size(), 0);
+  if (t.kind == Treatment::Cove)
+    for (size_t i = 0; i < work.size(); i++) {
+      if (work[i].closed) continue;
+      std::set<int> taken;
+      for (size_t j = 0; j < i; j++) {
+        if (work[j].closed) continue;
+        bool meets = false;
+        for (V3 p : {work[i].pts.front(), work[i].pts.back()})
+          for (V3 q : {work[j].pts.front(), work[j].pts.back()}) meets = meets || norm(p - q) <= tol * 10;
+        if (meets) taken.insert(shade[j]);
+      }
+      while (taken.count(shade[i])) shade[i]++;
+    }
+  int which = 0;
+  for (size_t ci = 0; ci < work.size(); ci++) {
+    const Crease &c = work[ci];
+    which++;
+    if (isLine[ci]) continue;
+    // Straight between two flat faces: one section, swept straight. Round a circle between faces turned round its axis:
+    // turned. Otherwise from point to point.
+    bool flatFaces = true;
+    for (size_t i = 0; i < c.pts.size(); i++) flatFaces = flatFaces && s.faces[c.fa[i]].geom.flat && s.faces[c.fb[i]].geom.flat;
+    bool straight = !c.closed && c.edges.size() == 1 && flatFaces;
+    if (straight) {
+      V3 T = unit(c.pts.back() - c.pts.front());
+      for (V3 q : c.pts) straight = straight && norm(cross(q - c.pts.front(), T)) <= tol * 10;
+    }
+    const Solid::Edge &first = s.edges[c.edges[0]];
+    bool ring = c.closed && c.edges.size() == 1 && first.geom.kind == EdgeGeom::Circle && first.geom.exact;
+    V3 centre, axis;
+    if (ring) {
+      centre = first.geom.place.point({0, 0, first.geom.z});
+      axis = unit(first.geom.place.vector({0, 0, 1}));
+      // Both faces turned round that axis (or flat across it).
+      for (int f : {c.fa[0], c.fb[0]}) {
+        const FaceGeom &g = s.faces[f].geom;
+        if (g.flat) {
+          ring = ring && norm(cross(g.pn, axis)) < 1e-9;
+        } else if (g.kind == FaceGeom::Turned && g.exact) {
+          V3 ax = unit(g.place.vector({0, 0, 1})), o = g.place.point({0, 0, 0});
+          V3 off = (o - centre) - axis * dot(o - centre, axis);
+          ring = ring && norm(cross(ax, axis)) < 1e-9 && norm(off) < tol * 10;
+        } else {
+          ring = false;
+        }
+      }
+    }
+    Treatment tw = t;
+    tw.radius = t.radius * (1 + 2e-3 * shade[ci]);
+    if (straight) {
+      bool fits = true;
+      std::vector<Section2> secs = sectionsAt(c, 0, tw, which, &fits);
+      if (!fits) return tooLarge();
+      V3 E = c.pts.front(), T = unit(c.pts.back() - c.pts.front()), U = c.ia[0], N = unit(c.na[0] - U * dot(c.na[0], U));
+      double len = norm(c.pts.back() - c.pts.front()), span = spanOf(secs);
+      // Each end runs on past the face there (outside the solid, where it takes nothing); with no single flat face there to
+      // run onto, it stops a hair short.
+      // What's added at an inside corner stops on that face instead: there if it's square to the edge, else cut off by it.
+      double s0 = 0, s1 = len, f0 = 0, f1 = len;
+      int endFace[2] = {-1, -1};
+      for (int end = 0; end < 2; end++) {
+        V3 V = end == 0 ? c.pts.front() : c.pts.back(), out = end == 0 ? -T : T;
+        std::vector<int> others;
+        for (int f : facesAt(s, V))
+          if (f != c.fa[0] && f != c.fb[0]) others.push_back(f);
+        bool onto = others.size() == 1 && s.faces[others[0]].geom.flat && dot(s.faces[others[0]].geom.pn, out) > 0.05;
+        double square = onto ? dot(s.faces[others[0]].geom.pn, out) : 0;
+        double reach = onto ? (span + 0.45 * reachOut(span)) / square * 1.2 + span : -hair(span);
+        double fill = !onto ? -hair(span) : square > 1 - 1e-12 ? 0 : reach;
+        if (onto && square <= 1 - 1e-12) endFace[end] = others[0];
+        if (end == 0) s0 = -reach, f0 = -fill;
+        else s1 = len + reach, f1 = len + fill;
+      }
+      for (const auto &sec : secs) {
+        if (!sec.fill) {
+          take.push_back(prismTool(sec, E, U, N, T, s0, s1, d));
+          continue;
+        }
+        Solid tool = prismTool(sec, E, U, N, T, f0, f1, d);
+        for (int end = 0; end < 2; end++)
+          if (endFace[end] >= 0) tool = cut(tool, end == 0 ? c.pts.front() : c.pts.back(), -s.faces[endFace[end]].geom.pn, 0);
+        add.push_back(tool);
+      }
+    } else if (ring) {
+      // The cut across it on the circle itself, in the plane through the axis (the mesh's points may sit on its chords, its
+      // into-directions lean along them).
+      Crease cr = c;
+      V3 radial = (c.pts[0] - centre) - axis * dot(c.pts[0] - centre, axis);
+      V3 E = centre + unit(radial) * norm(first.geom.place.vector({first.geom.r, 0, 0})), along = unit(cross(axis, radial));
+      for (auto [into, n] : {std::pair<V3 *, V3>{&cr.ia[0], c.na[0]}, {&cr.ib[0], c.nb[0]}}) {
+        V3 exact = unit(cross(along, n));
+        *into = dot(exact, *into) < 0 ? -exact : exact;
+      }
+      bool fits = true;
+      std::vector<Section2> secs = sectionsAt(cr, 0, tw, which, &fits);
+      if (!fits) return tooLarge();
+      V3 U = cr.ia[0], N = unit(c.na[0] - U * dot(c.na[0], U));
+      // The circle's steps in the solid's mesh: its points on the circle itself, evenly round it (else the tool's own).
+      int around = 0;
+      V3 x0;
+      {
+        double R = norm(E - centre);
+        std::vector<V3> on;
+        for (V3 q : c.pts) {
+          V3 rq = (q - centre) - axis * dot(q - centre, axis);
+          if (std::fabs(norm(rq) - R) <= 1e-9 * (1 + R)) on.push_back(unit(rq));
+        }
+        if (on.size() >= 3) {
+          // Counted from the point most square to the world's axes (where a shape's own steps start).
+          V3 e1 = on[0];
+          auto squareness = [](V3 q) { return std::max({std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)}); };
+          for (V3 q : on)
+            if (squareness(q) > squareness(e1)) e1 = q;
+          V3 e2 = cross(axis, e1);
+          std::vector<double> angle;
+          for (V3 q : on) {
+            double a = std::atan2(dot(q, e2), dot(q, e1));
+            angle.push_back(a < -1e-9 ? a + 2 * pi : std::max(a, 0.0));
+          }
+          std::sort(angle.begin(), angle.end());
+          angle.erase(std::unique(angle.begin(), angle.end(), [](double a, double b) { return b - a < 1e-9; }), angle.end());
+          if (angle.size() > 1 && 2 * pi - angle.back() < 1e-9) angle.pop_back();
+          size_t n = angle.size();
+          bool even = n >= 3;
+          for (size_t k = 0; k < n && even; k++) even = std::fabs(angle[k] - 2 * pi * k / n) < 1e-7;
+          if (even) around = (int)n, x0 = e1;
+        }
+      }
+      for (const auto &sec : secs) {
+        Solid tool;
+        if (!ringTool(sec, E, U, N, centre, axis, around, x0, d, tool)) {
+          fit.fits = false;
+          fit.why = "too large for this circle";
+          return s;
+        }
+        (sec.fill ? add : take).push_back(tool);
+      }
+    } else {
+      // Swept: each point its own frame and sections; an open run reaches on past its ends onto the face there.
+      size_t n = c.closed ? c.pts.size() - 1 : c.pts.size();
+      std::vector<std::vector<Section2>> per(n);
+      bool fits = true;
+      for (size_t i = 0; i < n; i++) per[i] = sectionsAt(c, i, tw, which, &fits);
+      if (!fits) return tooLarge();
+      size_t count = per[0].size();
+      for (size_t i = 0; i < n; i++)
+        if (per[i].size() != count) count = 0;
+      if (count == 0) continue;
+      double span = 0;
+      for (const auto &p : per) span = std::max(span, spanOf(p));
+      for (size_t k = 0; k < count; k++) {
+        // As many points at every point of the run: each arc as many chords as the most it needs anywhere.
+        std::vector<int> chords = chordsOf(per[0][k], d);
+        for (size_t i = 1; i < n; i++) {
+          std::vector<int> here = chordsOf(per[i][k], d);
+          for (size_t j = 0; j < chords.size() && j < here.size(); j++) chords[j] = std::max(chords[j], here[j]);
+        }
+        std::vector<V3> E, U, N;
+        std::vector<std::vector<V3>> outlines;
+        for (size_t i = 0; i < n; i++) {
+          V3 u = c.ia[i];
+          E.push_back(c.pts[i]), U.push_back(u), N.push_back(unit(c.na[i] - u * dot(c.na[i], u)));
+          outlines.push_back(pointsOf(per[i][k], chords));
+        }
+        if (!c.closed) {
+          for (int end = 0; end < 2; end++) {
+            size_t i = end == 0 ? 0 : n - 1;
+            V3 T = c.tangent(i) * (end == 0 ? -1.0 : 1.0), V = c.pts[i];
+            std::vector<int> others;
+            for (int f : facesAt(s, V))
+              if (f != c.fa[i] && f != c.fb[i]) others.push_back(f);
+            bool onto = others.size() == 1 && s.faces[others[0]].geom.flat && dot(s.faces[others[0]].geom.pn, T) > 0.05;
+            double reach = onto ? (span + 0.45 * reachOut(span)) / dot(s.faces[others[0]].geom.pn, T) * 1.2 + span : 0;
+            if (reach > 0) {
+              V3 Ex = V + T * reach;
+              if (end == 0) {
+                E.insert(E.begin(), Ex), U.insert(U.begin(), U.front()), N.insert(N.begin(), N.front());
+                outlines.insert(outlines.begin(), outlines.front());
+              } else {
+                E.push_back(Ex), U.push_back(U.back()), N.push_back(N.back()), outlines.push_back(outlines.back());
+              }
+            }
+          }
+        }
+        Solid tool = sweptTool(E, U, N, outlines, c.closed);
+        if (per[0][k].fill && !c.closed)
+          for (int end = 0; end < 2; end++) {
+            size_t i = end == 0 ? 0 : n - 1;
+            std::vector<int> others;
+            for (int f : facesAt(s, c.pts[i]))
+              if (f != c.fa[i] && f != c.fb[i]) others.push_back(f);
+            if (others.size() == 1 && s.faces[others[0]].geom.flat) tool = cut(tool, c.pts[i], -s.faces[others[0]].geom.pn, 0);
+          }
+        (per[0][k].fill ? add : take).push_back(tool);
+      }
+    }
+  }
+
+  // The tools taken away one by one, then those added; failing that, each kind all together.
+  auto made = [&](bool together) {
+    Solid r = s;
+    for (int op : {BK_SUBTRACT, BK_UNION}) {
+      const std::vector<Solid> &tools = op == BK_SUBTRACT ? take : add;
+      if (tools.empty()) continue;
+      if (!together) {
+        for (const auto &tool : tools) {
+          r = combine(r, tool, op);
+          if (!closed(r)) return r;
+        }
+        continue;
+      }
+      Solid all = tools[0];
+      for (size_t i = 1; i < tools.size(); i++) all = combine(all, tools[i], BK_UNION);
+      r = combine(r, all, op);
+    }
+    return r;
+  };
+  Solid result = made(false);
+  if (!closed(result) && take.size() + add.size() > 1) result = made(true);
+  if (result.tri.empty() || !closed(result)) return tooLarge();
+  finish(result, d);
+  if (pieces(result) != pieces(s)) return tooLarge();
+  return result;
+}
+
+}  // namespace bce

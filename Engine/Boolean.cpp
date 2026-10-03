@@ -727,6 +727,13 @@ Solid combine(const Solid &sa, const Solid &sb, int op) {
     }
     out.face.push_back(f);
   }
+  // Pieces left with no area at all (points on one cut, a rounding apart) swapped away, so the next merge or cut never
+  // meets them.
+  {
+    double scale = 1;
+    for (V3 q : c.P) scale = std::max({scale, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+    unneedle(out, 1e-9 * scale);
+  }
   unweld(out, result);
   return result;
 }

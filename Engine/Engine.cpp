@@ -5,6 +5,7 @@
 #include "Engine/Distance.hpp"
 #include "Engine/Fasteners.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Treat.hpp"
 
 #include <cstdlib>
 #include <cstring>
@@ -227,21 +228,52 @@ BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) 
   return new BKShape{{node, Affine()}};
 }
 
-BKShape *bk_fillet(const BKShape *, const int *, const double *, int, double, double *maxRadius, int *missing) {
-  if (maxRadius) *maxRadius = 0;
+// A treatment of the picked edges, made now at the detail shown (so whether it fits is known at once, and that mesh kept).
+static BKShape *treat(const BKShape *s, const int *kinds, const double *picks, int count, Treatment t, double *maxRadius, int *missing,
+                      const char *what) {
+  if (maxRadius) *maxRadius = t.radius;
   if (missing) *missing = 0;
-  return later("round");
+  if (!s) return nullptr;
+  if (count < 0 || (count > 0 && (!kinds || !picks)) || !finite(picks, count * 6) || !std::isfinite(t.radius) || !std::isfinite(t.legA) ||
+      !std::isfinite(t.legB) || !std::isfinite(t.corner)) {
+    lastError = std::string(what) + ": must be numbers";
+    return nullptr;
+  }
+  t.kinds.assign(kinds, kinds + count);
+  t.picks.assign(picks, picks + count * 6);
+  const double d = 0.05;
+  Solid a;
+  mesh(s->shape, d, a);
+  TreatFit fit;
+  Solid made = treated(a, t, d, fit);
+  if (missing) *missing = fit.missing;
+  if (!fit.fits) {
+    if (maxRadius) *maxRadius = fit.most;
+    lastError = fit.why;
+    return nullptr;
+  }
+  auto node = std::make_shared<Node>();
+  node->kind = Node::Treat, node->a = s->shape, node->treat = std::make_shared<Treatment>(t);
+  node->made.push_back({d, std::make_shared<Solid>(std::move(made))});
+  return new BKShape{{node, Affine()}};
 }
 
-BKShape *bk_chamfer(const BKShape *, const int *, const double *, int, double, double, double, int *missing) {
-  if (missing) *missing = 0;
-  return later("bevel");
+BKShape *bk_fillet(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) {
+  Treatment t;
+  t.kind = Treatment::Round, t.radius = radius;
+  return treat(s, kinds, picks, count, t, maxRadius, missing, "rounding");
 }
 
-BKShape *bk_cove(const BKShape *, const int *, const double *, int, double, double *maxRadius, int *missing) {
-  if (maxRadius) *maxRadius = 0;
-  if (missing) *missing = 0;
-  return later("cove");
+BKShape *bk_chamfer(const BKShape *s, const int *kinds, const double *picks, int count, double legA, double legB, double cornerRadius, int *missing) {
+  Treatment t;
+  t.kind = Treatment::Bevel, t.legA = legA, t.legB = legB, t.corner = cornerRadius;
+  return treat(s, kinds, picks, count, t, nullptr, missing, "bevel");
+}
+
+BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) {
+  Treatment t;
+  t.kind = Treatment::Cove, t.radius = radius;
+  return treat(s, kinds, picks, count, t, maxRadius, missing, "cove");
 }
 
 BKShape *bk_hollow(const BKShape *, const BKShape *const *, int, const double *, int, const double *, const double *, int, double, int *missing) {
@@ -249,9 +281,51 @@ BKShape *bk_hollow(const BKShape *, const BKShape *const *, int, const double *,
   return later("hollow");
 }
 
-BKSection *bk_section(const BKShape *, int, const double *, double) {
-  lastError = std::string("section: ") + notYet;
-  return nullptr;
+BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) {
+  if (!s) return nullptr;
+  const double none[6] = {0, 0, 0, 0, 0, 0};
+  const double *q = pick ? pick : none;
+  if (!finite(q, 6) || !std::isfinite(radius)) {
+    lastError = "section: pick must be numbers";
+    return nullptr;
+  }
+  Solid solid;
+  mesh(s->shape, std::max(radius > 0 ? radius / 400 : 0.05, 1e-4), solid);
+  Crease c;
+  size_t at = 0;
+  if (!creaseAt(solid, kind, q, c, at)) {
+    lastError = "section: no edge between two faces here";
+    return nullptr;
+  }
+  auto loops = sliceAcross(solid, c, at);
+  if (loops.empty()) {
+    lastError = "section: the cut across this edge is empty";
+    return nullptr;
+  }
+  std::vector<double> points;
+  std::vector<int> starts{0};
+  for (const auto &loop : loops) {
+    for (auto [x, y] : loop) points.insert(points.end(), {x, y});
+    starts.push_back((int)(points.size() / 2));
+  }
+  BKSection *out = new BKSection();
+  out->loopCount = (int)loops.size();
+  out->pointCount = (int)(points.size() / 2);
+  out->points = mallocCopy(points);
+  out->loopStart = mallocCopy(starts);
+  out->angle = c.angleAt(at);
+  auto describe = [&](int f, double *info) {
+    V3 n = solid.faces[f].normal, m = solid.faces[f].centroid;
+    double v[6] = {n.x, n.y, n.z, m.x, m.y, m.z};
+    memcpy(info, v, sizeof v);
+  };
+  describe(c.fa[at], out->faceA);
+  describe(c.fb[at], out->faceB);
+  V3 x = -c.ia[at], y = unit(c.na[at] - x * dot(c.na[at], x)), z = cross(x, y), p = c.pts[at];
+  double pt[3] = {p.x, p.y, p.z}, dir[3] = {z.x, z.y, z.z};
+  memcpy(out->point, pt, sizeof pt);
+  memcpy(out->direction, dir, sizeof dir);
+  return out;
 }
 
 void bk_section_free(BKSection *section) {

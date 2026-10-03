@@ -3,6 +3,7 @@
 
 #include "BcadKernel.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <utility>
@@ -225,7 +226,7 @@ void buildPoly(const Model &m, Solid &out) {
 
 void buildTurned(const Model &m, Solid &out, double d) {
   // One count round the axis for every face, so the faces meet point for point.
-  int count = std::max(3, countFor(2 * pi, m.support({1, 0, 0}), d));
+  int count = m.around >= 3 ? m.around : std::max(3, countFor(2 * pi, m.support({1, 0, 0}), d));
   std::vector<double> cs(count + 1), sn(count + 1), cm(count), sm(count);
   for (int j = 0; j <= count; j++) {
     double a = 2 * pi * j / count;
@@ -616,6 +617,33 @@ Affine turnZ(double phi) {
 }
 
 }  // namespace
+
+std::shared_ptr<Model> turnedModel(std::vector<Elem> profile) { return turned(std::move(profile)); }
+
+std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops) {
+  auto m = std::make_shared<Model>();
+  m->verts = std::move(verts);
+  m->loops = std::move(loops);
+  double v = 0;
+  for (const auto &loop : m->loops)
+    for (size_t i = 1; i + 1 < loop.size(); i++) v += dot(m->verts[loop[0]], cross(m->verts[loop[i]], m->verts[loop[i + 1]]));
+  if (v < 0)
+    for (auto &loop : m->loops) std::reverse(loop.begin(), loop.end());
+  m->volume = std::fabs(v) / 6;
+  return m;
+}
+
+Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place) {
+  auto node = std::make_shared<Node>();
+  node->model = std::move(m);
+  return {node, place};
+}
+
+Shape merged(int op, const Shape &a, const Shape &b) {
+  auto node = std::make_shared<Node>();
+  node->kind = Node::Bool, node->op = op, node->a = a, node->b = b;
+  return {node, Affine()};
+}
 
 bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   // How many numbers each kind takes, and which must be above zero (a cone end and a ring's hole may be 0).
