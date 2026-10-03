@@ -79,6 +79,7 @@ struct Part {
   struct Cut {
     std::vector<uint32_t> in;
     std::vector<std::pair<uint32_t, uint32_t>> segs;
+    std::vector<uint32_t> twin;  // per cut: the other shape's triangle it's where this one crosses (none: lying flat)
     std::vector<uint32_t> partners;  // the other shape's triangles lying flat on this one
     bool any() const { return !in.empty() || !segs.empty() || !partners.empty(); }
   };
@@ -153,6 +154,7 @@ struct KeyHash {
 
 struct Cutter {
   Part A, B;
+  std::vector<std::pair<uint32_t, uint32_t>> flats;  // pairs of triangles lying in one plane
   std::vector<V3> P;            // every point: A's, B's, then the new ones
   std::vector<uint32_t> parent;  // points found to be one
   std::unordered_map<std::array<uint32_t, 3>, uint32_t, KeyHash> made;
@@ -194,17 +196,20 @@ struct Cutter {
   // Kinds of crossing point: A's edge through B's triangle, A's triangle through B's edge, A's edge across B's edge.
   enum { EdgeTri = 1, TriEdge = 2, EdgeEdge = 3 };
 
+  // Where edge u → v crosses the plane through a, b, c: from the two ends' heights over it, each as near exact as a
+  // double holds (whatever the angle: they have opposite signs, so their difference loses nothing).
   static V3 lineThroughPlane(V3 u, V3 v, V3 a, V3 b, V3 c) {
-    V3 n = cross(b - a, c - a);
-    double du = dot(u - a, n), dv = dot(v - a, n), den = du - dv;
+    double du = orient3dValue(a, b, c, u), dv = orient3dValue(a, b, c, v), den = du - dv;
     double t = den != 0 ? std::clamp(du / den, 0.0, 1.0) : 0.5;
     return u + (v - u) * t;
   }
-  static V3 linesMeet(V3 p, V3 q, V3 r, V3 s) {
-    V3 d1 = q - p, d2 = s - r, w = p - r;
-    double a = dot(d1, d1), b = dot(d1, d2), c = dot(d2, d2), d = dot(d1, w), e = dot(d2, w), den = a * c - b * b;
-    double t1 = den > 0 ? std::clamp((b * e - c * d) / den, 0.0, 1.0) : 0, t2 = den > 0 ? std::clamp((a * e - b * d) / den, 0.0, 1.0) : 0;
-    return (p + d1 * t1 + r + d2 * t2) * 0.5;
+  // Where edge u → v crosses line c → d in a plane (seen flat by f): likewise, from the ends' sides of that line.
+  static V3 linesCross(const Flat &f, V3 u, V3 v, V3 c, V3 d) {
+    double ux, uy, vx, vy, cx, cy, dx, dy;
+    f.at(u, ux, uy), f.at(v, vx, vy), f.at(c, cx, cy), f.at(d, dx, dy);
+    double su = orient2dValue(cx, cy, dx, dy, ux, uy), sv = orient2dValue(cx, cy, dx, dy, vx, vy), den = su - sv;
+    double t = den != 0 ? std::clamp(su / den, 0.0, 1.0) : 0.5;
+    return u + (v - u) * t;
   }
 
   void addOnEdge(Part &part, uint32_t a, uint32_t b, uint32_t p) { part.onEdge[part.edgeOf(a, b)].push_back(p); }
@@ -239,7 +244,7 @@ struct Cutter {
           if (o1 * o2 < 0 && o3 * o4 < 0) {
             uint32_t ex = X.edgeOf(u, v), ey = Y.edgeOf(c, d);
             std::array<uint32_t, 3> key = xIsA ? std::array<uint32_t, 3>{EdgeEdge, ex, ey} : std::array<uint32_t, 3>{EdgeEdge, ey, ex};
-            uint32_t q = point(key, [&] { return linesMeet(P[u], P[v], P[c], P[d]); });
+            uint32_t q = point(key, [&] { return linesCross(fy, P[u], P[v], P[c], P[d]); });
             addOnEdge(X, u, v, q), addOnEdge(Y, c, d, q);
             found.push_back(q);
           }
@@ -264,7 +269,8 @@ struct Cutter {
         int m = t[0] == 0 ? 0 : t[1] == 0 ? 1 : 2;
         uint32_t c = gy[m], d = gy[(m + 1) % 3], ey = Y.edgeOf(c, d);
         std::array<uint32_t, 3> key = xIsA ? std::array<uint32_t, 3>{EdgeEdge, ex, ey} : std::array<uint32_t, 3>{EdgeEdge, ey, ex};
-        uint32_t q = point(key, [&] { return linesMeet(P[u], P[v], P[c], P[d]); });
+        // (On Y's edge where it crosses Y's plane.)
+        uint32_t q = point(key, [&] { return lineThroughPlane(P[u], P[v], y[0], y[1], y[2]); });
         addOnEdge(X, u, v, q), addOnEdge(Y, c, d, q);
         found.push_back(q);
       } else {
@@ -309,18 +315,42 @@ struct Cutter {
         int o1 = orientFlat(f, P[u], P[v], P[c]), o2 = orientFlat(f, P[u], P[v], P[d]);
         int o3 = orientFlat(f, P[c], P[d], P[u]), o4 = orientFlat(f, P[c], P[d], P[v]);
         if (!(o1 * o2 < 0 && o3 * o4 < 0)) continue;
-        uint32_t q = point({EdgeEdge, A.edgeOf(u, v), B.edgeOf(c, d)}, [&] {
-          double ux, uy, vx, vy, cx, cy, dx, dy;
-          f.at(P[u], ux, uy), f.at(P[v], vx, vy), f.at(P[c], cx, cy), f.at(P[d], dx, dy);
-          double den = (vx - ux) * (dy - cy) - (vy - uy) * (dx - cx);
-          double t = den != 0 ? std::clamp(((cx - ux) * (dy - cy) - (cy - uy) * (dx - cx)) / den, 0.0, 1.0) : 0.5;
-          return P[u] + (P[v] - P[u]) * t;
-        });
+        uint32_t q = point({EdgeEdge, A.edgeOf(u, v), B.edgeOf(c, d)}, [&] { return linesCross(f, P[u], P[v], P[c], P[d]); });
         addOnEdge(A, u, v, q), addOnEdge(B, c, d, q);
       }
-    // Each one's edges inside the other become cuts there: the edge's points that lie in the other triangle, in order,
-    // joined where the piece between them lies inside.
-    auto edgesInto = [&](Part &X, uint32_t tx, const uint32_t gx[3], Part &Y, uint32_t ty, const V3 yt[3]) {
+    // Each one's edges inside the other become cuts there: done once every pair has put its points on the edges.
+    flats.push_back({ta, tb});
+  }
+
+  // Two triangles in one plane (after every pair is done, so each edge's points are all there): each one's edges inside the
+  // other become cuts there, the edge's points in order, joined where the piece between them lies inside; every point of
+  // such a cut is put in the other triangle too (inside, on a side, or one with a corner), so the cut is never lost there.
+  // Whether any point was put anywhere new.
+  bool flatEdges(uint32_t ta, uint32_t tb) {
+    uint32_t ga[3], gb[3];
+    V3 a[3], b[3];
+    for (int k = 0; k < 3; k++) ga[k] = A.corner(ta, k), gb[k] = B.corner(tb, k), a[k] = P[ga[k]], b[k] = P[gb[k]];
+    Flat f = flatOf(a[0], a[1], a[2]);
+    V3 bc[3] = {b[0], b[1], b[2]};
+    uint32_t gbc[3] = {gb[0], gb[1], gb[2]};
+    if (orientFlat(f, bc[0], bc[1], bc[2]) < 0) std::swap(bc[1], bc[2]), std::swap(gbc[1], gbc[2]);
+    bool grew = false;
+    auto edgesInto = [&](Part &X, const uint32_t gx[3], Part &Y, uint32_t ty, const V3 yt[3], const uint32_t gy[3]) {
+      // A point of the cut put in Y's triangle (where it isn't already).
+      auto put = [&](uint32_t q, int at) {
+        if (at == 0) {
+          for (uint32_t r : Y.cut[ty].in)
+            if (rep(r) == rep(q)) return;
+          addIn(Y, ty, q), grew = true;
+        } else if (at <= 3) {
+          auto &on = Y.onEdge[Y.edgeOf(gy[at - 1], gy[at % 3])];
+          for (uint32_t r : on)
+            if (rep(r) == rep(q)) return;
+          on.push_back(q), grew = true;
+        } else if (rep(q) != rep(gy[at - 4]) && norm2(P[q] - P[gy[at - 4]]) <= 1e-18 * (1 + norm2(P[q]))) {
+          unite(q, gy[at - 4]), grew = true;
+        }
+      };
       for (int k = 0; k < 3; k++) {
         uint32_t u = gx[k], v = gx[(k + 1) % 3];
         std::vector<uint32_t> pts{u, v};
@@ -332,13 +362,17 @@ struct Cutter {
         });
         for (size_t i = 0; i + 1 < pts.size(); i++) {
           V3 mid = (P[pts[i]] + P[pts[i + 1]]) * 0.5;
-          if (where(f, yt, mid) >= 0 && where(f, yt, P[pts[i]]) >= 0 && where(f, yt, P[pts[i + 1]]) >= 0) Y.cut[ty].segs.push_back({pts[i], pts[i + 1]});
+          int w0 = where(f, yt, P[pts[i]]), w1 = where(f, yt, P[pts[i + 1]]);
+          if (where(f, yt, mid) >= 0 && w0 >= 0 && w1 >= 0) {
+            put(pts[i], w0), put(pts[i + 1], w1);
+            Y.cut[ty].segs.push_back({pts[i], pts[i + 1]}), Y.cut[ty].twin.push_back(UINT32_MAX);
+          }
         }
       }
-      (void)tx;
     };
-    edgesInto(B, tb, gb, A, ta, a);
-    edgesInto(A, ta, ga, B, tb, bc);
+    edgesInto(B, gb, A, ta, a, ga);
+    edgesInto(A, ga, B, tb, bc, gbc);
+    return grew;
   }
 
   void pairOf(uint32_t ta, uint32_t tb) {
@@ -368,8 +402,8 @@ struct Cutter {
       return dp < dq || (dp == dq && p < q);
     });
     for (size_t i = 0; i + 1 < found.size(); i++) {
-      A.cut[ta].segs.push_back({found[i], found[i + 1]});
-      B.cut[tb].segs.push_back({found[i], found[i + 1]});
+      A.cut[ta].segs.push_back({found[i], found[i + 1]}), A.cut[ta].twin.push_back(tb);
+      B.cut[tb].segs.push_back({found[i], found[i + 1]}), B.cut[tb].twin.push_back(ta);
     }
   }
 
@@ -549,8 +583,110 @@ std::vector<Side> classify(Cutter &c, Part &X, const std::vector<Cutter::Piece> 
       }
     }
   }
+  // Each piece beside a cut, exactly: which side it lies of the other shape's triangle (or two, meeting at an edge) that
+  // cut it there, by its corner off the cut. 1 inside, -1 outside, 0 not told (or told both ways).
+  auto onSeg = [&](uint32_t x, uint32_t p, uint32_t q) {
+    if (x == p || x == q) return true;
+    V3 a = c.P[p], d = c.P[q] - a, v = c.P[x] - a;
+    double l2 = norm2(d), along = dot(v, d);
+    return l2 > 0 && along > 0 && along < l2 && norm2(cross(v, d)) <= 1e-18 * l2 * l2;
+  };
+  // Which side of the other shape's triangle o lies (1 below, inside; -1 above), 0 when no farther from its plane than
+  // `near` (a sliver's far corner, a hair off the cut, says nothing).
+  auto below = [&](uint32_t ty, V3 o, double near) {
+    V3 y0 = c.P[Y.corner(ty, 0)], y1 = c.P[Y.corner(ty, 1)], y2 = c.P[Y.corner(ty, 2)];
+    double v = orient3dValue(y0, y1, y2, o), area2 = norm(cross(y1 - y0, y2 - y0));
+    if (!(area2 > 0) || std::fabs(v) <= near * area2) return 0;
+    return v > 0 ? 1 : -1;
+  };
+  double scale = 1;
+  for (V3 q : c.P) scale = std::max({scale, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+  std::vector<int> local(n, 0);
+  for (size_t i = 0; i < n; i++) {
+    if (fixed[i]) continue;
+    const Part::Cut &cutT = X.cut[pieces[i].from];
+    if (cutT.segs.empty()) continue;
+    int vote = 0;
+    bool torn = false;
+    for (int e = 0; e < 3 && !torn; e++) {
+      uint32_t a = pieces[i].v[e], b = pieces[i].v[(e + 1) % 3], o = pieces[i].v[(e + 2) % 3];
+      if (!cuts.count(pairKey(a, b))) continue;
+      std::vector<uint32_t> tw;
+      for (size_t k = 0; k < cutT.segs.size(); k++) {
+        if (k >= cutT.twin.size() || cutT.twin[k] == UINT32_MAX) continue;
+        uint32_t p = c.rep(cutT.segs[k].first), q = c.rep(cutT.segs[k].second);
+        if (onSeg(a, p, q) && onSeg(b, p, q)) tw.push_back(cutT.twin[k]);
+      }
+      std::sort(tw.begin(), tw.end());
+      tw.erase(std::unique(tw.begin(), tw.end()), tw.end());
+      int side = 0;
+      V3 O = c.P[o];
+      double near = 1e-9 * scale + 1e-6 * norm(c.P[b] - c.P[a]);
+      if (tw.size() == 1) {
+        int s = below(tw[0], O, near);
+        side = s > 0 ? 1 : s < 0 ? -1 : 0;
+      } else if (tw.size() == 2) {
+        // Two of the other shape's triangles meeting at the cut: below both where they turn away (an outside edge), below
+        // either where they turn in.
+        uint32_t t1 = tw[0], t2 = tw[1], far = UINT32_MAX;
+        int shared = 0;
+        for (int k = 0; k < 3; k++) {
+          uint32_t v2 = c.rep(Y.corner(t2, k));
+          bool in1 = false;
+          for (int j = 0; j < 3; j++) in1 = in1 || c.rep(Y.corner(t1, j)) == v2;
+          if (in1) shared++;
+          else far = Y.corner(t2, k);
+        }
+        if (shared == 2 && far != UINT32_MAX) {
+          int convex = below(t1, c.P[far], 0);
+          int s1 = below(t1, O, near), s2 = below(t2, O, near);
+          if (convex > 0) side = s1 > 0 && s2 > 0 ? 1 : s1 < 0 || s2 < 0 ? -1 : 0;
+          else if (convex < 0) side = s1 > 0 || s2 > 0 ? 1 : s1 < 0 && s2 < 0 ? -1 : 0;
+          else side = s1 > 0 ? 1 : s1 < 0 ? -1 : 0;
+        }
+      }
+      if (side == 0) continue;
+      if (vote == 0) vote = side;
+      else if (vote != side) torn = true;
+    }
+    local[i] = torn ? 0 : vote;
+  }
+  // Each region: as its pieces beside cuts all say; where they disagree (a cut not made somewhere let the region run on
+  // across it), each piece as the nearest that says; with none saying, by a winding number.
+  std::vector<int> label(n, 0);
   for (auto &reg : regions) {
     if (fixed[reg[0]]) continue;
+    int ins = 0, outs = 0;
+    for (uint32_t i : reg) ins += local[i] > 0, outs += local[i] < 0;
+    if (ins && !outs) {
+      for (uint32_t i : reg) side[i] = In;
+      continue;
+    }
+    if (outs && !ins) {
+      for (uint32_t i : reg) side[i] = Out;
+      continue;
+    }
+    if (ins && outs) {
+      combineReport.torn++;
+      std::vector<uint32_t> queue;
+      for (uint32_t i : reg)
+        if (local[i]) label[i] = local[i], queue.push_back(i);
+      for (size_t q = 0; q < queue.size(); q++) {
+        uint32_t i = queue[q];
+        for (int e = 0; e < 3; e++) {
+          if (cuts.count(pairKey(pieces[i].v[e], pieces[i].v[(e + 1) % 3]))) continue;
+          uint32_t lo = groupOf[3 * i + e];
+          for (uint32_t k = lo; k < groupEnd[lo]; k++) {
+            uint32_t j = sides[k].second / 3;
+            if (label[j] || region[j] != region[i]) continue;
+            label[j] = label[i];
+            queue.push_back(j);
+          }
+        }
+      }
+      for (uint32_t i : reg) side[i] = label[i] > 0 ? In : Out;
+      continue;
+    }
     // The largest pieces first: their middles are farthest from the other shape's surface.
     std::vector<std::pair<double, uint32_t>> bySize;
     for (uint32_t i : reg) {
@@ -576,37 +712,103 @@ std::vector<Side> classify(Cutter &c, Part &X, const std::vector<Cutter::Piece> 
 // Points put on a grid finer than anything measured (about 10⁻¹² of the shapes' size), the same for both shapes: faces
 // meant to lie on one another (a shape turned a quarter turn, whose sines and cosines come out a hair off) then do so
 // exactly, and are merged by the rules for faces on faces rather than as two faces a hair apart.
-Welded gridded(const Solid &s, double step) {
-  Welded w = weld(s, step);
-  // A triangle left with two corners in one place has no area: out (its sides cancel).
+// Triangles taken out (by mark), the rest kept in order.
+void compact(Welded &w, const std::vector<char> &dead) {
   size_t n = 0;
   for (size_t t = 0; t < w.count(); t++) {
-    uint32_t *v = &w.tri[3 * t];
-    if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) continue;
-    for (int k = 0; k < 3; k++) w.tri[3 * n + k] = v[k], w.nrm[3 * n + k] = w.nrm[3 * t + k];
+    if (dead[t]) continue;
+    for (int k = 0; k < 3; k++) w.tri[3 * n + k] = w.tri[3 * t + k], w.nrm[3 * n + k] = w.nrm[3 * t + k];
     if (!w.gap.empty())
       for (int k = 0; k < 6; k++) w.gap[6 * n + k] = w.gap[6 * t + k];
     w.face[n++] = w.face[t];
   }
   w.tri.resize(3 * n), w.nrm.resize(3 * n), w.face.resize(n);
   if (!w.gap.empty()) w.gap.resize(6 * n);
+}
+
+Welded gridded(const Solid &s, double step) {
+  Welded w = weld(s, step);
+  // A triangle left with two corners in one place has no area: out (its sides cancel).
+  {
+    std::vector<char> dead(w.count(), 0);
+    for (size_t t = 0; t < w.count(); t++) {
+      const uint32_t *v = &w.tri[3 * t];
+      dead[t] = v[0] == v[1] || v[1] == v[2] || v[0] == v[2];
+    }
+    compact(w, dead);
+  }
+  // Nor has one with its three corners on a line (as merges leave where a cut grazes a side): it would lie flat on every
+  // triangle of the other shape there and be cut by nonsense. Its long side's neighbour is split at its middle corner
+  // instead, and it goes (each side still met by one running the other way; two such facing each other both go).
+  bool gaps = !w.gap.empty();
+  for (int round = 0; round < 4; round++) {
+    size_t nt = w.count();
+    auto onLine = [&](size_t t) {
+      V3 a = w.pts[w.tri[3 * t]], b = w.pts[w.tri[3 * t + 1]], c = w.pts[w.tri[3 * t + 2]];
+      return orient2d(a.x, a.y, b.x, b.y, c.x, c.y) == 0 && orient2d(a.y, a.z, b.y, b.z, c.y, c.z) == 0 && orient2d(a.z, a.x, b.z, b.x, c.z, c.x) == 0;
+    };
+    std::vector<size_t> flat;
+    for (size_t t = 0; t < nt; t++)
+      if (onLine(t)) flat.push_back(t);
+    if (flat.empty()) break;
+    std::unordered_map<uint64_t, uint32_t> side;
+    side.reserve(3 * nt);
+    for (size_t t = 0; t < nt; t++)
+      for (int k = 0; k < 3; k++) side[(uint64_t)w.tri[3 * t + k] << 32 | w.tri[3 * t + (k + 1) % 3]] = (uint32_t)t;
+    std::vector<char> dead(nt, 0), changed(nt, 0);
+    for (size_t t : flat) {
+      if (dead[t] || changed[t]) continue;
+      // The long side a → b, and c on it between.
+      int k = 0;
+      double best = -1;
+      for (int j = 0; j < 3; j++) {
+        double l2 = norm2(w.pts[w.tri[3 * t + (j + 1) % 3]] - w.pts[w.tri[3 * t + j]]);
+        if (l2 > best) best = l2, k = j;
+      }
+      uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3], c = w.tri[3 * t + (k + 2) % 3];
+      auto it = side.find((uint64_t)b << 32 | a);
+      if (it == side.end() || it->second == t || dead[it->second] || changed[it->second]) continue;
+      uint32_t n = it->second;
+      int kn = 0;
+      while (w.tri[3 * n + kn] != b) kn++;
+      uint32_t d = w.tri[3 * n + (kn + 2) % 3];
+      dead[t] = 1;
+      if (d == c) {
+        dead[n] = 1;
+        continue;
+      }
+      // n = (b, a, d) becomes (b, c, d), and (c, a, d) is added; c's normal and the slivers from n's.
+      V3 A = w.pts[a], B = w.pts[b], C = w.pts[c];
+      double sAt = best > 0 ? dot(C - A, B - A) / best : 0.5;
+      V3 nb = w.nrm[3 * n + kn], na = w.nrm[3 * n + (kn + 1) % 3], nd = w.nrm[3 * n + (kn + 2) % 3], nc = unit(na * (1 - sAt) + nb * sAt);
+      double g[6] = {0, 0, 0, 0, 0, 0};
+      V3 q[3] = {w.pts[w.tri[3 * n]], w.pts[w.tri[3 * n + 1]], w.pts[w.tri[3 * n + 2]]};
+      if (gaps) std::copy(&w.gap[6 * n], &w.gap[6 * n] + 6, g);
+      uint32_t f = w.face[n];
+      auto put = [&](size_t at, uint32_t x, uint32_t y, uint32_t z, V3 nx, V3 ny, V3 nz) {
+        if (at == w.count()) {
+          w.tri.insert(w.tri.end(), {x, y, z}), w.nrm.insert(w.nrm.end(), {nx, ny, nz}), w.face.push_back(f);
+          if (gaps) w.gap.insert(w.gap.end(), 6, 0.0);
+          dead.push_back(0), changed.push_back(1);
+        } else {
+          w.tri[3 * at] = x, w.tri[3 * at + 1] = y, w.tri[3 * at + 2] = z;
+          w.nrm[3 * at] = nx, w.nrm[3 * at + 1] = ny, w.nrm[3 * at + 2] = nz;
+          changed[at] = 1;
+        }
+        if (gaps) {
+          V3 piece[3] = {w.pts[x], w.pts[y], w.pts[z]};
+          gapOfPiece(g, q[0], q[1], q[2], piece, &w.gap[6 * at]);
+        }
+      };
+      put(n, b, c, d, nb, nc, nd);
+      put(w.count(), c, a, d, nc, na, nd);
+    }
+    compact(w, dead);
+  }
   return w;
 }
 
 }  // namespace
-
-// Whether every side of every triangle is met by one running the other way (point numbers, not places).
-static bool balanced(const Welded &w) {
-  std::vector<uint64_t> fwd, back;
-  fwd.reserve(w.tri.size()), back.reserve(w.tri.size());
-  for (size_t t = 0; t < w.tri.size(); t += 3)
-    for (int k = 0; k < 3; k++) {
-      uint32_t a = w.tri[t + k], b = w.tri[t + (k + 1) % 3];
-      fwd.push_back((uint64_t)a << 32 | b), back.push_back((uint64_t)b << 32 | a);
-    }
-  std::sort(fwd.begin(), fwd.end()), std::sort(back.begin(), back.end());
-  return fwd == back;
-}
 
 Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepGrid) {
   combineReport.calls++;
@@ -653,6 +855,13 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepG
   }
   std::sort(pairs.begin(), pairs.end());
   for (uint64_t k : pairs) c.pairOf((uint32_t)(k >> 32), (uint32_t)(k & 0xffffffffu));
+  // Triangles lying in one plane: each one's edges as cuts in the other, their points put there too; again while that
+  // puts new points on edges (another such pair's edge may then hold more of them).
+  for (int round = 0; round < 4 && !c.flats.empty(); round++) {
+    bool grew = false;
+    for (auto [ta, tb] : c.flats) grew = c.flatEdges(ta, tb) || grew;
+    if (!grew) break;
+  }
   // Crossing points made a hair apart by different roads (an edge through a triangle beside another edge through a
   // triangle, at what is one place) are one point: the triangulations would otherwise have to keep them apart at the
   // scale of rounding, which they can't. A hair is `merge` of the shapes' size: 10⁻¹¹ by default; where a rounding's
@@ -777,10 +986,10 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepG
   {
     double scale = 1;
     for (V3 q : c.P) scale = std::max({scale, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+    if (!balanced(out)) combineReport.open++;
     tidy(out, 1e-9 * scale);
     unneedle(out, 1e-9 * scale);
   }
-  if (!balanced(out)) combineReport.open++;
   unweld(out, result);
   result.grid = step;
   return result;

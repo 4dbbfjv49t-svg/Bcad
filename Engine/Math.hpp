@@ -117,6 +117,11 @@ struct Affine {
 int orient3d(V3 a, V3 b, V3 c, V3 d);
 // The sign of the turn a → b → c in the plane (positive counter-clockwise), exactly.
 int orient2d(double ax, double ay, double bx, double by, double cx, double cy);
+// The values themselves (six times the tetrahedron's volume, twice the triangle's area), to within a rounding of the
+// exact value (from the exact sum where the plain sum can't be trusted): their signs are always orient3d's and
+// orient2d's. For where a line crosses a plane, or two lines cross, as near the exact place as a double holds.
+double orient3dValue(V3 a, V3 b, V3 c, V3 d);
+double orient2dValue(double ax, double ay, double bx, double by, double cx, double cy);
 // Which side of the plane through p with normal n the point v lies on (+1 where n points, -1 the other, 0 on it), exactly.
 int planeSide(V3 v, V3 p, V3 n);
 

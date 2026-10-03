@@ -511,6 +511,18 @@ void tidy(Welded &w, double eps) {
   if (!w.gap.empty()) w.gap.resize(6 * n);
 }
 
+bool balanced(const Welded &w) {
+  std::vector<uint64_t> fwd, back;
+  fwd.reserve(w.tri.size()), back.reserve(w.tri.size());
+  for (size_t t = 0; t < w.tri.size(); t += 3)
+    for (int k = 0; k < 3; k++) {
+      uint32_t a = w.tri[t + k], b = w.tri[t + (k + 1) % 3];
+      fwd.push_back((uint64_t)a << 32 | b), back.push_back((uint64_t)b << 32 | a);
+    }
+  std::sort(fwd.begin(), fwd.end()), std::sort(back.begin(), back.end());
+  return fwd == back;
+}
+
 bool sameForm(const FaceGeom &a, const FaceGeom &b) { return sameSurface(a, b); }
 
 // Triangles thinner than anything told apart (a point a hair off the line between two others, where a cut grazes a side)
