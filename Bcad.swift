@@ -878,18 +878,20 @@ final class Kernel: @unchecked Sendable {
             var maxR = 0.0
             var missing: Int32 = 0
             let out = s.with { bk_fillet($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
+            let numeric = out == nil && Self.numeric()
             if missing > 0 { problems.append("missing") }
             if let out = out ?? beneath(of, node) { return out }
-            problems.append(maxR > 0 ? "max:\(maxR)" : "round")
+            problems.append(numeric ? "failed" : maxR > 0 ? "max:\(maxR)" : "round")
             return s.with { bk_copy($0) }
         case .bevel(let of, let picks, let legs, let corner):
             guard let s = shape(of) else { return nil }
             let (kinds, data) = Self.flat(picks)
             var missing: Int32 = 0
             let out = s.with { bk_chamfer($0, kinds, data, Int32(picks.count), legs.x, legs.y, corner, &missing) }
+            let numeric = out == nil && Self.numeric()
             if missing > 0 { problems.append("missing") }
             if let out = out ?? beneath(of, node) { return out }
-            problems.append("bevel")
+            problems.append(numeric ? "failed" : "bevel")
             return s.with { bk_copy($0) }
         case .cove(let of, let picks, let radius):
             guard let s = shape(of) else { return nil }
@@ -897,9 +899,10 @@ final class Kernel: @unchecked Sendable {
             var maxR = 0.0
             var missing: Int32 = 0
             let out = s.with { bk_cove($0, kinds, data, Int32(picks.count), radius, &maxR, &missing) }
+            let numeric = out == nil && Self.numeric()
             if missing > 0 { problems.append("missing") }
             if let out = out ?? beneath(of, node) { return out }
-            problems.append(maxR > 0 ? "max:\(maxR)" : "cove")
+            problems.append(numeric ? "failed" : maxR > 0 ? "max:\(maxR)" : "cove")
             return s.with { bk_copy($0) }
         case .hollow(let of, let open, let walls, let thickness):
             guard let s = shape(of) else { return nil }
@@ -944,6 +947,10 @@ final class Kernel: @unchecked Sendable {
 
     // Problems that mean the shape didn't come out as asked (skipped picks and a merge in pieces still did).
     static func failure(_ p: String) -> Bool { p != "missing" && p != "pieces" }
+
+    // Whether the engine's last refusal wasn't for size but because it couldn't work the shape out (said as a failure,
+    // not as "too large").
+    static func numeric() -> Bool { String(cString: bk_last_error()).hasPrefix("numeric") }
 
     // A new treatment of `node`'s inner shape, built apart from anything left over from earlier work: its mesh, and what
     // went wrong with it.

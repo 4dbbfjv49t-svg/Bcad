@@ -11,6 +11,7 @@
 #include "BcadKernel.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -678,6 +679,9 @@ bool closed(const Solid &s) {
   }
   return true;
 }
+
+// The merge count past which a treatment's merges are refused (see treated).
+thread_local long mergesUntil = LONG_MAX;
 
 // How far each face runs straight from the crease at point i, seen in the cut across it (until its outline turns by more
 // than 30°), and whether that run ends on one of `treated` (so the face is shared between two treatments).
@@ -2112,11 +2116,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   // One merge or cut; should it leave a hole, again with crossing points a little farther apart made one (a tool touching
   // a face along a line crosses it only roughly there).
   auto step = [](const Solid &a, const Solid &b, int op) {
+    // (Past the treatment's budget of merges: no result, so it's refused in moments rather than ground at.)
+    if (combineReport.calls >= mergesUntil) return Solid();
     Solid r = combine(a, b, op);
-    for (double merge : {1e-9, 1e-7, 1e-6}) {
-      if (closed(r)) break;
-      r = combine(a, b, op, merge);
-    }
+    if (!closed(r)) r = combine(a, b, op, 1e-9);
     return r;
   };
   // A run of edges meeting smoothly (a face's edges round a rounded corner): each edge its own piece. Straight ones
@@ -2826,8 +2829,64 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     }
     piecesOf.swap(moved);
   };
-  // Inward roundings exact first; where their cylinders only touch at a corner, a little wider each there.
+  // A result is taken only when it's closed, keeps the shape's pieces and (an inward rounding wider than its faces hold)
+  // cuts no face it mustn't; it's finished as it's taken. Otherwise the next way of making it is tried.
+  int was = pieces(base);
+  std::vector<double> before;
+  std::set<int> beside, near;
+  auto faceAreas = [](const Solid &m, std::vector<double> &out) {
+    for (size_t t = 0; t < m.triFace.size(); t++) {
+      if (m.triFace[t] >= out.size()) continue;
+      V3 a = m.p[m.tri[3 * t]], b = m.p[m.tri[3 * t + 1]], c = m.p[m.tri[3 * t + 2]];
+      out[m.triFace[t]] += norm(cross(b - a, c - a)) / 2;
+    }
+  };
+  if (coveChecked) {
+    before.assign(s.faces.size(), 0);
+    faceAreas(s, before);
+    for (const auto &c : work) {
+      for (size_t k = 0; k < c.pts.size(); k++) beside.insert(c.fa[k]), beside.insert(c.fb[k]);
+      for (int e : c.edges)
+        for (V3 end : {s.edges[e].pts.front(), s.edges[e].pts.back()})
+          for (int f : facesAt(s, end)) near.insert(f);
+    }
+  }
   Solid result;
+  auto accept = [&](Solid r) {
+    if (r.tri.empty() || !closed(r)) return false;
+    // Wider than the faces beside it hold: fine unless one of them is gone, or a face that has no corner on a coved edge
+    // is cut into (the shape's faces keep their numbers through the cuts).
+    if (coveChecked) {
+      std::vector<double> after(s.faces.size(), 0);
+      faceAreas(r, after);
+      for (size_t f = 0; f < s.faces.size(); f++) {
+        // (Changed by more than a merge's rounding: re-triangulated alone, a face keeps its area to about 1e-12 of it.)
+        bool touched = std::fabs(after[f] - before[f]) > 1e-6 * before[f] + 1e-3 * d * d;
+        // (A speck of a face far smaller than the mesh tells apart, where a cut grazed a corner, may go.)
+        bool gone = after[f] <= 1e-9 * (1 + before[f]) && before[f] > 0.1 * d * d;
+        if (beside.count((int)f) ? gone : touched && !near.count((int)f)) return false;
+      }
+    }
+    foldAux(r, d);
+    finish(r, d);
+    // A hair's remnant of a face left where two tools meet (a run's straight part and the part swept on from it): into the
+    // face beside it.
+    if (fold(r, 0.05 * d, false)) finish(r, d);
+    if (pieces(r) > was && add.empty() && dropIslands(r, was, 0.02)) finish(r, d);
+    if (pieces(r) != was) return false;
+    result = std::move(r);
+    return true;
+  };
+  // The tools taken away one by one, then last first, then each kind all together: the first sound result. (Other
+  // orders, each kind apart, never made one the corpus's cases needed.)
+  auto ladder = [&]() {
+    std::vector<int> hows{0};
+    if (take.size() + add.size() > 1) hows.insert(hows.end(), {12, 3});
+    for (int how : hows)
+      if (accept(made(how))) return true;
+    return false;
+  };
+  // Inward roundings exact first; where their cylinders only touch at a corner, a little wider each there.
   bool done = false;
   for (double shadeBy : {0.0, 1e-4, 2e-3}) {
     if (shadeBy > 0 && t.kind != Treatment::Cove) break;
@@ -2841,14 +2900,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         for (auto &tool : *list)
           for (auto &f : tool.faces)
             if (!f.geom.flat && !f.aux) f.blend = true;
-    result = made(0);
-    for (int how : {12, 4, 8})
-      if (!closed(result) && take.size() + add.size() > 1) result = made(how);
-    if (!closed(result) && take.size() + add.size() > 1) result = made(3);
-    // Or one kind together, the other one by one.
-    for (int how : {1, 2})
-      if (!closed(result) && !take.empty() && !add.empty()) result = made(how);
-    if ((done = !result.tri.empty() && closed(result))) break;
+    if ((done = ladder())) break;
   }
   if (!done && !fillCut.empty()) {
     fillHair = true;
@@ -2859,56 +2911,30 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       for (auto &tool : *list)
         for (auto &f : tool.faces)
           if (!f.geom.flat && !f.aux) f.blend = true;
-    result = made(0);
-    for (int how : {12, 4, 8})
-      if (!closed(result) && take.size() + add.size() > 1) result = made(how);
-    if (!closed(result) && take.size() + add.size() > 1) result = made(3);
-    for (int how : {1, 2})
-      if (!closed(result) && !take.empty() && !add.empty()) result = made(how);
-    done = !result.tri.empty() && closed(result);
+    done = ladder();
   }
-  if (!done) return coveChecked ? tooWide() : tooLarge();
-  // Wider than the faces beside it hold: fine unless one of them is gone, or a face that has no corner on a coved edge
-  // is cut into (the shape's faces keep their numbers through the cuts).
-  if (coveChecked) {
-    std::vector<double> before(s.faces.size(), 0), after(s.faces.size(), 0);
-    auto areas = [](const Solid &m, std::vector<double> &out) {
-      for (size_t t = 0; t < m.triFace.size(); t++) {
-        if (m.triFace[t] >= out.size()) continue;
-        V3 a = m.p[m.tri[3 * t]], b = m.p[m.tri[3 * t + 1]], c = m.p[m.tri[3 * t + 2]];
-        out[m.triFace[t]] += norm(cross(b - a, c - a)) / 2;
-      }
-    };
-    areas(s, before), areas(result, after);
-    std::set<int> beside, near;
-    for (const auto &c : work) {
-      for (size_t k = 0; k < c.pts.size(); k++) beside.insert(c.fa[k]), beside.insert(c.fb[k]);
-      for (int e : c.edges)
-        for (V3 end : {s.edges[e].pts.front(), s.edges[e].pts.back()})
-          for (int f : facesAt(s, end)) near.insert(f);
-    }
-    for (size_t f = 0; f < s.faces.size(); f++) {
-      // (Changed by more than a merge's rounding: re-triangulated alone, a face keeps its area to about 1e-12 of it.)
-      bool touched = std::fabs(after[f] - before[f]) > 1e-6 * before[f] + 1e-3 * d * d;
-      // (A speck of a face far smaller than the mesh tells apart, where a cut grazed a corner, may go.)
-      bool gone = after[f] <= 1e-9 * (1 + before[f]) && before[f] > 0.1 * d * d;
-      if (beside.count((int)f) ? gone : touched && !near.count((int)f)) return tooWide();
-    }
+  if (!done) {
+    if (coveChecked) return tooWide();
+    // Not a matter of size: every way of merging its tools came out unsound.
+    fit.fits = false, fit.numeric = true;
+    fit.why = std::string("numeric: ") + (t.kind == Treatment::Bevel ? "bevel" : t.kind == Treatment::Cove ? "cove" : "rounding") +
+              " couldn't be worked out here";
+    return s;
   }
-  foldAux(result, d);
-  finish(result, d);
-  // A hair's remnant of a face left where two tools meet (a run's straight part and the part swept on from it): into the
-  // face beside it.
-  if (fold(result, 0.05 * d, false)) finish(result, d);
-  int was = pieces(base);
-  if (pieces(result) > was && add.empty() && dropIslands(result, was, 0.02)) finish(result, d);
-  if (pieces(result) != was) return coveChecked ? tooWide() : tooLarge();
   return result;
 }
 
 int toolOrderSeed = 0;
 
 Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
+  // At most 300 merges for one treatment, its second try included (the most any case needed was 175): what can't be
+  // made in that many is refused in moments. (A treatment inside a hollow's has its own, within the hollow's.)
+  long outer = mergesUntil;
+  mergesUntil = std::min(outer, combineReport.calls + 300);
+  struct Restore {
+    long value;
+    ~Restore() { mergesUntil = value; }
+  } restore{outer};
   Solid made = treatedAs(s, t, d, fit, onto, false);
   // Every edge asked for and not every one fitting: those beside a hair's remnant of a face (where roundings or cuts met)
   // left as they are, if then the rest fit.

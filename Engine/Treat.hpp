@@ -60,6 +60,8 @@ struct Treatment {
 // none); picks that matched nothing.
 struct TreatFit {
   bool fits = true;
+  // Not fitting not for its size but because merging its tools kept coming out unsound (`why` starts "numeric:").
+  bool numeric = false;
   std::string why;
   double most = 0;
   int missing = 0;
