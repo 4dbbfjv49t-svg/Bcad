@@ -688,6 +688,8 @@ struct Runs {
   // in the cut (its start, and its way on), to see it does.
   bool aOpen = false, bOpen = false;
   V3 aNext, aWay, bNext, bWay;
+  // The next face's number (where the cut knows it), else -1.
+  int aNextFace = -1, bNextFace = -1;
 };
 
 double distanceTo(const std::vector<V3> &pts, V3 q) {
@@ -757,8 +759,9 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
   };
   // Past a run's end (at point j, coming in heading `h`; `out` its face's outward normal in the cut): the next side turns
   // into the material, and the outline keeps behind the face's plane as far as `within` from the edge.
-  auto open = [&](int step, size_t j, V3 h, V3 out, double within, V3 &at, V3 &way) {
+  auto open = [&](int step, size_t j, V3 h, V3 out, double within, V3 &at, V3 &way, int &nextFace) {
     size_t nx = (j + n + step) % n;
+    nextFace = byFace && sides && sides->size() == n ? (*sides)[step > 0 ? j : nx] : -1;
     V3 next = p2(L[nx].first - L[j].first, L[nx].second - L[j].second);
     if (norm(next) < 1e-12 || norm(h) < 0.5 || dot(unit(next), out) > -1e-3) return false;
     // (In the end-on frame of the sections: u into face A, v its normal; the cut's x runs the other way.)
@@ -789,8 +792,8 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
     // As far as a rounding of the radius asked reaches: past its circle, and its tool's reach out past it.
     double within = std::max(out.a, out.b) + 4 * radius;
     V3 nB2 = unit(p2(dot(c.nb[i], X), dot(c.nb[i], Y)));
-    out.aOpen = open(firstIsA ? 1 : -1, firstIsA ? j1 : j2, firstIsA ? h1 : h2, p2(0, 1), within, out.aNext, out.aWay);
-    out.bOpen = open(firstIsA ? -1 : 1, firstIsA ? j2 : j1, firstIsA ? h2 : h1, nB2, within, out.bNext, out.bWay);
+    out.aOpen = open(firstIsA ? 1 : -1, firstIsA ? j1 : j2, firstIsA ? h1 : h2, p2(0, 1), within, out.aNext, out.aWay, out.aNextFace);
+    out.bOpen = open(firstIsA ? -1 : 1, firstIsA ? j2 : j1, firstIsA ? h2 : h1, nB2, within, out.bNext, out.bWay, out.bNextFace);
   }
   // The other crease's reach along the run (`face`), for a radius of 1: r·cot(half its angle) square to it, longer where
   // the run meets it aslant; where a face beside it is curved in its cut, where its circle (of the radius asked) touches.
@@ -1807,6 +1810,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   double most = INFINITY;
   std::vector<double> setback(s.edges.size(), 0), legs(s.edges.size(), 0);
   std::set<int> flats, consumed;
+  // Inside-corner roundings run on past a narrow face: by crease, the faces beyond that cut what they fill.
+  std::map<size_t, std::vector<int>> fillCut;
+  // (Cut a hair short of that face, should cutting on it leave the merge open.)
+  bool fillHair = false;
   for (const auto &c : work) {
     for (size_t q = 0; q < c.edges.size(); q++) {
       int e = c.edges[q];
@@ -1837,15 +1844,22 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       // taking all of it, and ends on the next face as that face cuts across its circle. One side at most, at an outside
       // corner (one taken away), the other side holding it as it is.
       bool spillA = false, spillB = false;
-      if (phi < pi && (ra < t.radius) != (rb < t.radius)) {
-        // Its circle in the end-on frame (u into face A, v A's normal; B's way in at the corner's angle).
-        V3 C = p2(t.radius / std::tan(half), -t.radius);
+      if ((ra < t.radius) != (rb < t.radius)) {
+        // Its circle in the end-on frame (u into face A, v A's normal; B's way in at the corner's angle): in the material
+        // at an outside corner, in the air at an inside one.
+        V3 C = p2(t.radius / std::tan(half), phi < pi ? -t.radius : t.radius);
         auto crosses = [&](V3 at, V3 way) {
           V3 w = C - at;
           return std::fabs(w.x * way.y - w.y * way.x) < t.radius * (1 - 1e-6);
         };
-        spillA = ra < t.radius && r.aOpen && !r.aShared && crosses(r.aNext, r.aWay);
-        spillB = rb < t.radius && r.bOpen && !r.bShared && crosses(r.bNext, r.bWay);
+        // At an inside corner, what it fills past the narrow face is cut off by the flat face beyond (as OpenCascade's
+        // kernel does): it ends there, square to that face.
+        auto flatNext = [&](int f) { return phi < pi || (f >= 0 && s.faces[f].geom.flat); };
+        spillA = ra < t.radius && r.aOpen && !r.aShared && crosses(r.aNext, r.aWay) && flatNext(r.aNextFace);
+        spillB = rb < t.radius && r.bOpen && !r.bShared && crosses(r.bNext, r.bWay) && flatNext(r.bNextFace);
+        size_t ci = (size_t)(&whole - work.data());
+        if (phi > pi && spillA) fillCut[ci].push_back(r.aNextFace);
+        if (phi > pi && spillB) fillCut[ci].push_back(r.bNextFace);
       }
       if (spillA) ra = INFINITY, consumed.insert(c.fa[mid]);
       if (spillB) rb = INFINITY, consumed.insert(c.fb[mid]);
@@ -2437,6 +2451,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           Solid tool = prismTool(sec, {E + T * f0, E + T * f1}, U, N, T, d);
           for (int end = 0; end < 2; end++)
             if (endFace[end] >= 0) tool = cut(tool, end == 0 ? c.pts.front() : c.pts.back(), -s.faces[endFace[end]].geom.pn, 0);
+          for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * (s.faces[f].geom.pd - (fillHair ? hair(t.radius) : 0)), -s.faces[f].geom.pn, 0);
           add.push_back(tool);
         }
       } else if (ring) {
@@ -2584,6 +2599,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
                 if (f != c.fa[i] && f != c.fb[i]) others.push_back(f);
               if (others.size() == 1 && s.faces[others[0]].geom.flat) tool = cut(tool, c.pts[i], -s.faces[others[0]].geom.pn, 0);
             }
+          if (per[0][k].fill)
+            for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * (s.faces[f].geom.pd - (fillHair ? hair(t.radius) : 0)), -s.faces[f].geom.pn, 0);
           (per[0][k].fill ? add : take).push_back(tool);
         }
       }
@@ -2732,6 +2749,18 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     result = made(false);
     if (!closed(result) && take.size() + add.size() > 1) result = made(true);
     if ((done = !result.tri.empty() && closed(result))) break;
+  }
+  if (!done && !fillCut.empty()) {
+    fillHair = true;
+    if (!tools(0)) return s;
+    markAux(take, false), markAux(add, true);
+    for (auto *list : {&take, &add})
+      for (auto &tool : *list)
+        for (auto &f : tool.faces)
+          if (!f.geom.flat && !f.aux) f.blend = true;
+    result = made(false);
+    if (!closed(result) && take.size() + add.size() > 1) result = made(true);
+    done = !result.tri.empty() && closed(result);
   }
   if (!done) return coveChecked ? tooWide() : tooLarge();
   // Wider than the faces beside it hold: fine unless one of them is gone, or a face that has no corner on a coved edge

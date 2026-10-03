@@ -817,6 +817,13 @@ int main() {
     BKShape *L = keep(bk_boolean(BK_UNION, box, keep(at(box, 20, 0, -10))));
     double inside[6] = {10, 0, 0, 0, 1, 0};
     is("round: an inside corner is filled", bk_fillet(L, &ke, inside, 1, 2, &mr, &miss), 16000 + (4 - PI) * 20, 1e-6, 11);
+    // An inside corner rounded wider than the narrow face beside it is across (c1044): what it fills past that face is cut
+    // off by the face beyond, as OpenCascade's kernel does (its 3466.8184 mm³).
+    {
+      double box1044[3] = {8.17306, 9.76692, 22.3589}, five1044[3] = {5, 12.2671, 20.3772}, edge1044[6] = {3.74027, 4.88346, 7.8643, -1, 0, 0};
+      BKShape *joined = keep(bk_boolean(BK_UNION, keep(bk_primitive(BK_BOX, box1044)), keep(at(keep(bk_primitive(BK_PRISM, five1044)), 7.92584, 2.62818, -2.3243))));
+      is("round: an inside corner wider than the narrow face beside it", bk_fillet(joined, &ke, edge1044, 1, 0.419373, &mr, &miss), 3466.8184, 1e-3, 14);
+    }
     is("cove: one edge", bk_cove(box, &ke, edge, 1, 3, &mr, &miss), 8000 - PI * 9 / 4 * 20, 0.01, 7);
     // Every edge: each cylinder's quarter, less where two (Steinmetz) and three (the tricylinder) meet at a corner.
     for (double r : {1.0, 3.0})
