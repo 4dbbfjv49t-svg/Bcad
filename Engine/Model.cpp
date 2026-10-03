@@ -128,6 +128,9 @@ double Solid::sliver(size_t t) const {
 }
 
 void Solid::transform(const Affine &a) {
+  bool still = true;
+  for (int i = 0; i < 12; i++) still = still && a.m[i] == Affine().m[i];
+  if (!still) grid = 0;
   // A triangle's slivers grow with volume while its area grows its own way: the gap between grows by the difference.
   std::vector<double> before;
   if (!gap.empty()) {
@@ -224,9 +227,37 @@ void buildPoly(const Model &m, Solid &out) {
 
 // MARK: turned
 
+// Where a profile piece's mesh rings go, as t along it: evenly within the chord error, and also (on a slope or an arc)
+// at each of the heights asked for, so a cut across there at that height (a part on the same axis ending there) falls
+// on a ring.
+std::vector<double> stepsOf(const Elem &e, double d, const std::vector<double> &levels) {
+  std::vector<double> cuts{0, 1};
+  for (double z : levels) {
+    if (!e.arc) {
+      if (e.r0 != e.r1 && e.z0 != e.z1) cuts.push_back((z - e.z0) / (e.z1 - e.z0));
+    } else if (std::fabs(z - e.cz) < e.rad) {
+      double v = std::asin((z - e.cz) / e.rad);
+      for (double a : {v, pi - v})
+        for (int k = -2; k <= 2; k++) cuts.push_back((a + 2 * pi * k - e.a0) / (e.a1 - e.a0));
+    }
+  }
+  std::sort(cuts.begin(), cuts.end());
+  std::vector<double> ts{0};
+  for (double c : cuts)
+    if (c > ts.back() + 1e-6 && c < 1 - 1e-6) ts.push_back(c);
+  ts.push_back(1);
+  std::vector<double> out;
+  for (size_t i = 0; i + 1 < ts.size(); i++) {
+    int n = e.arc ? countFor((ts[i + 1] - ts[i]) * (e.a1 - e.a0), e.rad, d) : 1;
+    for (int j = 0; j < n; j++) out.push_back(j == 0 ? ts[i] : ts[i] + (ts[i + 1] - ts[i]) * j / n);
+  }
+  out.push_back(1);
+  return out;
+}
+
 void buildTurned(const Model &m, Solid &out, double d) {
   // One count round the axis for every face, so the faces meet point for point.
-  int count = m.around >= 3 ? m.around : std::max(3, countFor(2 * pi, m.support({1, 0, 0}), d));
+  int count = m.columns(d);
   std::vector<double> cs(count + 1), sn(count + 1), cm(count), sm(count);
   for (int j = 0; j <= count; j++) {
     double a = 2 * pi * j / count;
@@ -246,13 +277,14 @@ void buildTurned(const Model &m, Solid &out, double d) {
     Solid::Face face{{-nr, 0, nz}, {}, {}};
     face.geom.kind = FaceGeom::Turned, face.geom.elem = e;
     if (e.flat()) face.geom.flat = true, face.geom.pn = {0, 0, nz > 0 ? 1.0 : -1.0}, face.geom.pd = nz > 0 ? e.z0 : -e.z0;
-    int pieces = e.pieces(d);
+    std::vector<double> ts = stepsOf(e, d, m.levels);
+    int pieces = (int)ts.size() - 1;
     // What the mesh misses: the exact volume this piece turns round, less the polygon-sided one its chords turn round.
     double meshed = 0;
     for (int i = 0; i < pieces; i++) {
       double r0, z0, r1, z1;
-      e.at((double)i / pieces, r0, z0);
-      e.at((double)(i + 1) / pieces, r1, z1);
+      e.at(ts[i], r0, z0);
+      e.at(ts[i + 1], r1, z1);
       meshed += moment(Elem::line(r0, z0, r1, z1));
     }
     face.deficit = 2 * pi * (moment(e) - meshed * count * std::sin(2 * pi / count) / (2 * pi));
@@ -262,7 +294,7 @@ void buildTurned(const Model &m, Solid &out, double d) {
     std::vector<uint32_t> ring(pieces + 1);
     std::vector<char> pole(pieces + 1), fan(pieces + 1);
     for (int i = 0; i <= pieces; i++) {
-      double t = (double)i / pieces, r, z;
+      double t = ts[i], r, z;
       e.at(t, r, z);
       e.normalAt(t, nr, nz);
       ring[i] = (uint32_t)out.p.size();
@@ -299,7 +331,7 @@ void buildTurned(const Model &m, Solid &out, double d) {
       Solid::Edge seam;
       for (int i = 0; i <= pieces; i++) {
         double r, z;
-        e.at((double)i / pieces, r, z);
+        e.at(ts[i], r, z);
         seam.pts.push_back({r, 0, z});
       }
       seam.f0 = f;
@@ -426,6 +458,11 @@ void buildSwept(const Model &m, Solid &out, double d) {
 }
 
 }  // namespace
+
+int Model::columns(double deflection) const {
+  double d = std::isfinite(deflection) ? std::max(deflection, 1e-4) : 0.05;
+  return around >= 3 ? around : std::max(3, countFor(2 * pi, support({1, 0, 0}), d));
+}
 
 void Model::build(Solid &out, double deflection) const {
   double d = std::isfinite(deflection) ? std::max(deflection, 1e-4) : 0.05;

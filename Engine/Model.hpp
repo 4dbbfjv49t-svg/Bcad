@@ -96,6 +96,9 @@ struct Solid {
   // the triangle it gives the volume the mesh misses there, so whatever a merge or split keeps of a triangle keeps
   // exactly its share. Empty where every face is flat.
   std::vector<double> gap;
+  // The grid a merge last put its points on (0: none, or moved off it since): a merge of this keeps to that grid, so its
+  // points stay where they are and a part made afresh lands on them.
+  double grid = 0;
 
   uint32_t vertex(V3 pos, V3 nrm) {
     p.push_back(pos), n.push_back(nrm);
@@ -147,8 +150,10 @@ struct Model {
   std::vector<std::vector<int>> loops;
   // Turned: a closed profile, counter-clockwise round its region.
   std::vector<Elem> profile;
-  // Turned: the steps round the axis when set (to meet another mesh point for point), else from the deflection.
+  // Turned: the steps round the axis when set (to meet another mesh point for point), else from the deflection; and
+  // heights where its mesh has rings on slopes and arcs (where a part on the same axis ends).
   int around = 0;
+  std::vector<double> levels;
   // Swept: the oval's semi-axes along (cos phi, sin phi) and across it, and the tube's outline round the oval's line
   // (r along the oval's outward normal, z up), counter-clockwise.
   double a = 0, b = 0, phi = 0;
@@ -159,6 +164,8 @@ struct Model {
   double support(V3 d, V3 *at = nullptr) const;
   // The mesh, every chord within `deflection` of the exact shape.
   void build(Solid &out, double deflection) const;
+  // Turned: the steps its mesh takes round the axis at that deflection.
+  int columns(double deflection) const;
 };
 
 struct Node;
@@ -236,7 +243,7 @@ bool inside(const Solid &s, V3 q);
 // Merges and splits of meshes (Boolean.cpp, Split.cpp), and what's made of their results afterwards (Csg.cpp): faces on
 // one surface joined, edges, corners and circles found again.
 // merge: crossing points this close (a part of the shapes' size) are one.
-Solid combine(const Solid &a, const Solid &b, int op, double merge = 1e-11);
+Solid combine(const Solid &a, const Solid &b, int op, double merge = 1e-11, bool keepGrid = false);
 Solid cut(const Solid &s, V3 p, V3 n, int side);
 // Whether two faces lie on one surface (one plane facing one way; one turned profile piece in one place).
 bool sameForm(const FaceGeom &a, const FaceGeom &b);

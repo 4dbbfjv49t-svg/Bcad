@@ -19,6 +19,79 @@ namespace bce {
 
 // MARK: - evaluating
 
+namespace {
+
+// A turned primitive among a merge's parts: its axis line (a pointing the way fixed for that line, whichever way the part
+// was turned), the deflection it's meshed at, and its steps round the axis.
+struct Lathe {
+  bool ok = false;
+  V3 o, a;
+  double d = 0;
+  int count = 0;
+};
+
+Lathe latheOf(const Shape &s, double d) {
+  Lathe l;
+  if (!s.node || s.node->kind != Node::Prim || !s.node->model || s.node->model->kind != Model::Turned || !s.place.similarity()) return l;
+  l.d = d / s.place.stretch();
+  l.count = s.node->model->columns(l.d);
+  l.o = s.place.point({0, 0, 0});
+  V3 a = unit(s.place.vector({0, 0, 1}));
+  double ax = std::fabs(a.x), ay = std::fabs(a.y), az = std::fabs(a.z);
+  double big = ax >= ay && ax >= az ? a.x : ay >= az ? a.y : a.z;
+  l.a = big < 0 ? -a : a;
+  l.ok = true;
+  return l;
+}
+
+bool oneLine(const Lathe &p, const Lathe &q) {
+  double size = 1 + std::max({std::fabs(p.o.x), std::fabs(p.o.y), std::fabs(p.o.z)});
+  return p.ok && q.ok && norm(cross(p.a, q.a)) <= 1e-9 && norm(cross(q.o - p.o, p.a)) <= 1e-9 * size;
+}
+
+// A frame made from the axis line `line` alone (the part's axis along it one way or the other, its first step along a
+// direction fixed for the line, its origin on the line): turning a turned shape about its own axis, or mirroring it in a
+// plane through that axis, leaves it as it is, so this places the same shape however its part was turned — and two
+// parts' surfaces on one line mesh point for point, and where they meet face to face they cancel exactly.
+Affine frameOn(const Shape &s, const Lathe &l, const Lathe &line) {
+  V3 z = s.place.vector({0, 0, 1});
+  double scale = norm(z);
+  V3 a = dot(z, line.a) > 0 ? line.a : -line.a;
+  // (Along x as near as square to the line: an upright part not turned keeps its own frame.)
+  V3 ref = std::fabs(line.a.x) < 0.9 ? V3{1, 0, 0} : V3{0, 1, 0};
+  V3 x = unit(ref - line.a * dot(ref, line.a)), y = cross(a, x);
+  // (A hair off the line where the parts' placements round differently.)
+  V3 o = line.o + line.a * dot(l.o - line.o, line.a);
+  Affine f;
+  f.m[0] = x.x * scale, f.m[1] = y.x * scale, f.m[2] = a.x * scale, f.m[3] = o.x;
+  f.m[4] = x.y * scale, f.m[5] = y.y * scale, f.m[6] = a.y * scale, f.m[7] = o.y;
+  f.m[8] = x.z * scale, f.m[9] = y.z * scale, f.m[10] = a.z * scale, f.m[11] = o.z;
+  return f;
+}
+
+// Where a turned part's rims lie along the line (its profile's corners off the axis), as heights in the frame `to`.
+std::vector<double> rimsIn(const Shape &s, const Affine &from, const Affine &to) {
+  std::vector<double> out;
+  Affine back = to.inverse();
+  for (const Elem &e : s.node->model->profile)
+    if (e.r0 > 0) out.push_back(back.point(from.point({0, 0, e.z0})).z);
+  return out;
+}
+
+// Its mesh, `count` steps round, rings at `levels` too, in the frame f.
+void lathe(const Shape &s, const Lathe &l, const Affine &f, int count, const std::vector<double> &levels, Solid &out) {
+  Model m = *s.node->model;
+  m.around = count;
+  m.levels = levels;
+  out = Solid();
+  m.build(out, l.d);
+  out.centroids();
+  out.slivers();
+  out.transform(f);
+}
+
+}  // namespace
+
 std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
   for (const auto &m : node.made)
     if (std::fabs(m.first - d) <= 1e-12 * d) return m.second;
@@ -35,16 +108,29 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
   } else if (node.kind == Node::Hollow) {
     // Made once already (it fitted); at another detail failing after all, the shape as it is.
     if (!hollowed(node.a, *node.hollow, d, *out)) mesh(node.a, d, *out);
+  } else if (node.kind == Node::Bool) {
+    Solid a, b;
+    // Turned parts on one axis line meshed alike: the finer count for both, each with rings where the other ends.
+    Lathe la = latheOf(node.a, d), lb = latheOf(node.b, d);
+    bool one = oneLine(la, lb);
+    Affine fa, fb;
+    std::vector<double> atA, atB;
+    if (la.ok) fa = frameOn(node.a, la, la);
+    if (lb.ok) fb = frameOn(node.b, lb, one ? la : lb);
+    if (one) {
+      la.count = lb.count = std::max(la.count, lb.count);
+      atA = rimsIn(node.b, fb, fa), atB = rimsIn(node.a, fa, fb);
+    }
+    if (la.ok) lathe(node.a, la, fa, la.count, atA, a);
+    else mesh(node.a, d, a);
+    if (lb.ok) lathe(node.b, lb, fb, lb.count, atB, b);
+    else mesh(node.b, d, b);
+    *out = combine(a, b, node.op, 1e-11, true);
+    finish(*out, d);
   } else {
     Solid a;
     mesh(node.a, d, a);
-    if (node.kind == Node::Bool) {
-      Solid b;
-      mesh(node.b, d, b);
-      *out = combine(a, b, node.op);
-    } else {
-      *out = cut(a, node.p, node.n, node.side);
-    }
+    *out = cut(a, node.p, node.n, node.side);
     finish(*out, d);
   }
   node.made.push_back({d, out});
@@ -113,14 +199,89 @@ int pieces(const Solid &s) {
 
 namespace {
 
+constexpr double pi = M_PI;
+
+// A turned face's surface in the solid's frame, whatever part of it the face is and however its part was placed: a
+// cylinder (axis through o along a, radius r), a cone (apex o, a the way it widens, k its widening per length), a ball
+// (centre o, radius r) or a ring (centre o, axis a, radius r round the axis, k the tube's).
+struct Form {
+  enum Kind { None, Cylinder, Cone, Ball, Ring } kind = None;
+  V3 o, a;
+  double r = 0, k = 0;
+};
+
+Form formOf(const FaceGeom &g) {
+  Form f;
+  double s;
+  if (g.kind != FaceGeom::Turned || !g.exact || g.flat || !g.place.similarity(&s) || !(s > 0)) return f;
+  const Elem &e = g.elem;
+  V3 axis = unit(g.place.vector({0, 0, 1}));
+  if (!e.arc) {
+    if (e.onAxis() || e.z0 == e.z1) return f;
+    double dr = e.r1 - e.r0, dz = e.z1 - e.z0;
+    if (std::fabs(dr) <= 1e-12 * (std::fabs(e.r0) + std::fabs(e.r1) + std::fabs(dz))) {
+      f.kind = Form::Cylinder, f.o = g.place.point({0, 0, 0}), f.a = axis, f.r = s * 0.5 * (e.r0 + e.r1);
+    } else {
+      double k = dr / dz;
+      f.kind = Form::Cone, f.o = g.place.point({0, 0, e.z0 - e.r0 / k}), f.a = k > 0 ? axis : -axis, f.k = std::fabs(k);
+    }
+  } else {
+    f.o = g.place.point({0, 0, e.cz}), f.a = axis, f.r = s * e.rad;
+    if (std::fabs(e.cr) <= 1e-12 * e.rad) {
+      f.kind = Form::Ball;
+    } else {
+      f.kind = Form::Ring, f.k = f.r, f.r = s * e.cr;
+    }
+  }
+  return f;
+}
+
 bool sameSurface(const FaceGeom &a, const FaceGeom &b) {
   if (a.flat && b.flat) return norm(a.pn - b.pn) < 1e-9 && std::fabs(a.pd - b.pd) < 1e-9 * (1 + std::fabs(a.pd));
-  if (a.kind == FaceGeom::Turned && b.kind == FaceGeom::Turned && a.exact && b.exact && !a.flat && !b.flat && a.elem.same(b.elem)) {
-    for (int i = 0; i < 12; i++)
-      if (std::fabs(a.place.m[i] - b.place.m[i]) > 1e-9 * (1 + std::fabs(a.place.m[i]))) return false;
-    return true;
+  Form p = formOf(a), q = formOf(b);
+  if (p.kind == Form::None || p.kind != q.kind) return false;
+  double size = 1 + std::max({std::fabs(p.o.x), std::fabs(p.o.y), std::fabs(p.o.z), p.r, p.k});
+  double tol = 1e-9 * size;
+  auto near = [&](double x, double y) { return std::fabs(x - y) <= tol; };
+  bool along = norm(cross(p.a, q.a)) <= 1e-9;
+  switch (p.kind) {
+  case Form::Cylinder: return along && near(p.r, q.r) && norm(cross(q.o - p.o, p.a)) <= tol;
+  case Form::Cone: return along && dot(p.a, q.a) > 0 && std::fabs(p.k - q.k) <= 1e-9 * (1 + p.k) && norm(q.o - p.o) <= tol;
+  case Form::Ball: return near(p.r, q.r) && norm(q.o - p.o) <= tol;
+  case Form::Ring: return along && near(p.r, q.r) && near(p.k, q.k) && norm(q.o - p.o) <= tol;
+  default: return false;
   }
-  return false;
+}
+
+// The face `g` widened to take in `o` on the same surface: its profile piece run on, in its own frame, over every point
+// of o's (so whatever is found on the joined face — its rims, its normals — lies within it).
+void spanBoth(FaceGeom &g, const FaceGeom &o) {
+  if (g.kind != FaceGeom::Turned || o.kind != FaceGeom::Turned || g.flat || o.flat) return;
+  Affine back = g.place.inverse();
+  Elem &e = g.elem;
+  std::vector<V3> at;
+  for (int i = 0; i <= 8; i++) {
+    double r, z;
+    o.elem.at(i / 8.0, r, z);
+    at.push_back(back.point(o.place.point({r, 0, z})));
+  }
+  if (!e.arc) {
+    double lo = std::min(e.z0, e.z1), hi = std::max(e.z0, e.z1);
+    for (V3 p : at) lo = std::min(lo, p.z), hi = std::max(hi, p.z);
+    double k = (e.r1 - e.r0) / (e.z1 - e.z0);
+    double z0 = e.z0 < e.z1 ? lo : hi, z1 = e.z0 < e.z1 ? hi : lo;
+    e = Elem::line(std::max(0.0, e.r0 + (z0 - e.z0) * k), z0, std::max(0.0, e.r0 + (z1 - e.z0) * k), z1);
+  } else {
+    // Angles measured from the middle of g's arc, the way it runs.
+    double dir = e.a1 >= e.a0 ? 1 : -1, mid = 0.5 * (e.a0 + e.a1), lo = (e.a0 - mid) * dir, hi = (e.a1 - mid) * dir;
+    for (V3 p : at) {
+      double t = std::atan2(p.z - e.cz, std::hypot(p.x, p.y) - e.cr) - mid;
+      t = std::remainder(t * dir, 2 * pi);
+      lo = std::min(lo, t), hi = std::max(hi, t);
+    }
+    if (hi - lo >= 2 * pi - 1e-9) lo = -pi, hi = pi;
+    e = Elem::arcOf(e.cr, e.cz, e.rad, mid + dir * lo, mid + dir * hi);
+  }
 }
 
 // A frame with z along `axis` at `origin`.
@@ -490,7 +651,11 @@ void finish(Solid &s, double deflection) {
   for (auto &[key, ts] : edgeTris)
     for (size_t i = 1; i < ts.size(); i++) {
       int fa = find((int)w.face[ts[0]]), fb = find((int)w.face[ts[i]]);
-      if (fa != fb && sameSurface(s.faces[fa].geom, s.faces[fb].geom)) parent[fb] = fa;
+      if (fa == fb || !sameSurface(s.faces[fa].geom, s.faces[fb].geom)) continue;
+      parent[fb] = fa;
+      Solid::Face &f = s.faces[fa], &o = s.faces[fb];
+      spanBoth(f.geom, o.geom);
+      f.blend = f.blend || o.blend, f.aux = f.aux && o.aux;
     }
   // Faces renumbered: only those with triangles, joined ones as one.
   std::vector<int> used(nf, 0), number(nf, -1);

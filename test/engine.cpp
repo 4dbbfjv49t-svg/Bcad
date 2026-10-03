@@ -469,6 +469,46 @@ int main() {
     g = look(keep(bk_boolean(BK_INTERSECT, box, box2)));
     check("intersect: the shared corner", g.shut && near(g.volume, 1000, 1e-9) && g.faces == 6 && boxIs(g, {0, 0, 0}, {10, 10, 10}), says(g));
 
+    // Merges as one piece: faces of parts on one surface are one face, with no line between; parts on one axis meet point
+    // for point however they were turned about it; a merge of a merge stays on its grid.
+    {
+      auto spun = [](BKShape *s, double a, double z, bool flip = false) {
+        double c = std::cos(a), n = std::sin(a), f = flip ? -1 : 1;
+        double m[12] = {c, -n * f, 0, 0, n, c * f, 0, 0, 0, 0, f, z};
+        return bk_transform(s, m);
+      };
+      double c20[2] = {20, 10}, c20b[2] = {20, 6}, c14[2] = {14, 10}, hemi[1] = {20}, ball20[1] = {20}, tall[2] = {20, 20}, cone[3] = {20, 0, 10};
+      double ring[3] = {30, 14, 10}, slab[3] = {10, 10, 20};
+      BKShape *cylA = keep(bk_primitive(BK_CYLINDER, c20)), *cylB = keep(bk_primitive(BK_CYLINDER, c20b));
+      g = look(keep(bk_boolean(BK_UNION, cylA, keep(at(cylB, 0, 0, 8)))));
+      check("merge: cylinders stacked on one axis are one side, no line between",
+            g.shut && near(g.volume, PI * 100 * 16, 1e-6) && g.faces == 3 && g.edges == 2 && g.circles == 2 && g.pieces == 1, says(g));
+      g = look(keep(bk_boolean(BK_UNION, keep(spun(cylA, 0.3, 0)), keep(spun(cylB, 1.234, 8, true)))));
+      check("merge: one turned about its own axis and upside down, still one side",
+            g.shut && near(g.volume, PI * 100 * 16, 1e-6) && g.faces == 3 && g.edges == 2 && g.pieces == 1, says(g));
+      BKShape *two = keep(bk_boolean(BK_UNION, keep(spun(cylA, 0.7, 0)), keep(at(cylB, 0, 0, 8))));
+      g = look(keep(bk_boolean(BK_UNION, two, keep(spun(cylA, 2.1, -10)))));
+      check("merge: a merge of a merge, three cylinders stacked, is one piece",
+            g.shut && near(g.volume, PI * 100 * 26, 1e-6) && g.faces == 3 && g.edges == 2 && g.pieces == 1, says(g));
+      BKShape *top = keep(at(keep(bk_primitive(BK_HEMISPHERE, hemi)), 0, 0, 5)), *bottom = keep(spun(keep(bk_primitive(BK_HEMISPHERE, hemi)), 0.4, -5, true));
+      g = look(keep(bk_boolean(BK_UNION, top, bottom)));
+      check("merge: two half balls are one ball, one face", g.shut && near(g.volume, 4 * PI * 1000 / 3, 1e-6) && g.faces == 1 && g.edges == 0, says(g));
+      g = look(keep(bk_boolean(BK_UNION, keep(bk_primitive(BK_SPHERE, ball20)), keep(at(keep(bk_primitive(BK_CYLINDER, tall)), 0, 0, -10)))));
+      check("merge: a ball on a cylinder's end, as wide (half a capsule)",
+            g.shut && near(g.volume, PI * 100 * 20 + 2 * PI * 1000 / 3, 1e-6) && g.faces == 3 && g.edges == 2 && g.circles == 2, says(g));
+      g = look(keep(bk_boolean(BK_UNION, cylA, keep(at(keep(bk_primitive(BK_CONE, cone)), 0, 0, 10)))));
+      check("merge: a cone running on from a cylinder", g.shut && near(g.volume, PI * 100 * 10 * 4 / 3, 1e-6) && g.faces == 3 && g.edges == 2, says(g));
+      BKShape *rg = keep(bk_primitive(BK_RING, ring)), *plug = keep(spun(keep(bk_primitive(BK_CYLINDER, c14)), 0.9, 0));
+      g = look(keep(bk_boolean(BK_UNION, rg, plug)));
+      check("merge: a ring with its hole filled is a cylinder", g.shut && near(g.volume, PI * 225 * 10, 1e-6) && g.faces == 3 && g.edges == 2 && g.circles == 2, says(g));
+      g = look(keep(bk_boolean(BK_SUBTRACT, rg, plug)));
+      check("subtract: the cylinder filling a ring's hole leaves the ring", g.shut && near(g.volume, PI * 176 * 10, 1e-6) && g.faces == 4 && g.edges == 4, says(g));
+      g = look(keep(bk_boolean(BK_INTERSECT, rg, plug)));
+      check("intersect: a ring and the cylinder filling its hole have nothing in common", g.faces == 0 && std::fabs(g.volume) < 1e-9 && g.pieces == 0, says(g));
+      g = look(keep(bk_boolean(BK_UNION, box, keep(at(keep(bk_primitive(BK_BOX, slab)), 15, -5)))));
+      check("merge: blocks of other sizes flush, one face per plane", g.shut && near(g.volume, 10000, 1e-9) && g.faces == 8 && g.edges == 18 && g.corners == 12, says(g));
+    }
+
     // Holes: through, flush with both faces; a hidden hollow; a sphere cut by a face.
     BKShape *drilled = keep(bk_boolean(BK_SUBTRACT, box, cyl));
     g = look(drilled);

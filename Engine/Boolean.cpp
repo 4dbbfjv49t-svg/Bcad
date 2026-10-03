@@ -576,13 +576,19 @@ Welded gridded(const Solid &s, double step) {
 
 }  // namespace
 
-Solid combine(const Solid &sa, const Solid &sb, int op, double merge) {
+Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepGrid) {
   Cutter c;
+  double step;
   {
     double scale = 1;
     for (const Solid *s : {&sa, &sb})
       for (V3 q : s->p) scale = std::max({scale, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
-    double step = std::ldexp(1.0, std::ilogb(scale) + 1 - 40);
+    step = std::ldexp(1.0, std::ilogb(scale) + 1 - 40);
+    // A merge of a merge: on the grid it's on already (put on a coarser one, its points would round apart from where a
+    // part made afresh rounds the same place).
+    if (keepGrid)
+      for (const Solid *s : {&sa, &sb})
+        if (s->grid > 0) step = std::min(step, s->grid);
     c.A.w = gridded(sa, step), c.B.w = gridded(sb, step);
   }
   c.A.base = 0, c.B.base = (uint32_t)c.A.w.pts.size();
@@ -738,6 +744,7 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge) {
     unneedle(out, 1e-9 * scale);
   }
   unweld(out, result);
+  result.grid = step;
   return result;
 }
 
