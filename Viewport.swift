@@ -1226,6 +1226,11 @@ final class CadView: MTKView {
         last = p
         let free = e.modifierFlags.contains(.command)
         defer { redraw() }
+        // Shapes stay exactly where they are until the pointer has really moved: a click's jitter would snap them to a mark.
+        switch drag {
+        case .body, .axis, .ring, .scaleAxis: if !moved { return }
+        default: break
+        }
         switch drag {
         case .none: break
         case .orbit: orbit(dx, dy)
@@ -1328,10 +1333,8 @@ final class CadView: MTKView {
         case .round:
             if moved { lib.commitRound() } else { lib.clearPreview() }
         case .scaleAxis:
-            lib.finishScale()
-        case .ring:
-            lib.finishTransform()
-        case .body, .axis:
+            if !moved { lib.undoLastIfUnchanged() } else { lib.finishScale() }
+        case .ring, .body, .axis:
             if !moved { lib.undoLastIfUnchanged() } else { lib.finishTransform() }
         default: break
         }

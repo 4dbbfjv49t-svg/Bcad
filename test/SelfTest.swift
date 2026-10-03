@@ -897,6 +897,19 @@ enum SelfTest {
         let linkedSide = bounds(linker.id).1.x
         check("a dragged shape lines up with a turned shape's side exactly", abs(ballSide - (3.37 - 10)) < tight && abs(linkedSide - ballSide) < 1e-9
               && abs(bounds(linker.id).0.z) < 1e-9, String(format: "side at %.9f, ball's at %.9f", linkedSide, ballSide))
+        // A click's jitter on a shape or on a handle leaves it exactly where it is (it would snap to a grid line or a step).
+        let jittery = Solid(name: "Jittery", color: Palette.colors[3], node: .primitive(Primitive(kind: .box, size: [20.4, 20, 20])),
+                            place: Placement(move: SIMD3(-40.3, 0.2, 10)))
+        use([turnedBall, jittery])
+        if let p = view.project(SIMD3(-40.3, 0.2, 20)) { drag(p, CGPoint(x: p.x + 2, y: p.y + 1)) }
+        let clickedOn = lib.selection == [jittery.id]
+        lib.choose(.resize)
+        let jitterGizmo = view.renderer!
+        jitterGizmo.turnGizmo()
+        if let tip = view.project(jitterGizmo.gizmoCenter + jitterGizmo.gizmoHandles()[0] * jitterGizmo.gizmoLength * 0.95) { drag(tip, CGPoint(x: tip.x + 2, y: tip.y)) }
+        lib.choose(.move)
+        check("a click's jitter on a shape or a handle leaves it where it is", clickedOn && lib.body(jittery.id) == jittery,
+              "\(String(describing: lib.body(jittery.id)?.place.move)) · \(String(describing: lib.body(jittery.id)?.node))")
         // Between files: copied shapes paste into another document where they were (beside the copies when pasted back into
         // their own), and a Bcad file dropped on the window adds its shapes to the one open.
         use([cube])

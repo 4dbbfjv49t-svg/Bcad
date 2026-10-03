@@ -1,5 +1,5 @@
-// Bcad's own geometry engine behind the same C API as BcadKernel.cpp (BcadKernel.h): shapes, placements, meshes and
-// measuring so far. What it can't do yet answers with nothing and says so in bk_last_error.
+// Bcad's own geometry engine behind the same C API as BcadKernel.cpp (BcadKernel.h): shapes, placements, meshes, boxes,
+// measuring, merging and splitting so far. What it can't do yet answers with nothing and says so in bk_last_error.
 #include "BcadKernel.h"
 
 #include "Engine/Distance.hpp"
