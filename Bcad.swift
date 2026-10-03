@@ -508,6 +508,24 @@ indirect enum Node: Codable, Hashable, Sendable {
         }
     }
 
+    // A treatment's picks.
+    var picks: [Pick]? {
+        switch self {
+        case .round(_, let p, _), .cove(_, let p, _), .bevel(_, let p, _, _): p
+        default: nil
+        }
+    }
+
+    // The same treatment of other edges, around a node.
+    func withPicks(_ p: [Pick], of n: Node) -> Node {
+        switch self {
+        case .round(_, _, let r): .round(of: n, picks: p, radius: r)
+        case .cove(_, _, let r): .cove(of: n, picks: p, radius: r)
+        case .bevel(_, _, let l, let c): .bevel(of: n, picks: p, legs: l, corner: c)
+        default: self
+        }
+    }
+
     // The same wrapper (split, rounding, hollow) around a different inner node.
     func wrapping(_ n: Node) -> Node {
         switch self {
@@ -933,6 +951,118 @@ final class Kernel: @unchecked Sendable {
         (picks.map(\.kind), picks.flatMap { [$0.a.x, $0.a.y, $0.a.z, $0.b.x, $0.b.y, $0.b.z] })
     }
 
+    // MARK: treated faces
+
+    // Where a click lands on a face a rounding, bevel or inward rounding made: that layer, the edge it made the face along
+    // (as it was before, sharp) and its other edges. It is the first layer, outermost first, before which the clicked point
+    // wasn't on the shape's surface (nor facing the same way); a merge's parts are looked into, the one whose surface the
+    // point is on. Nil on a face the shape had before any treatment (or one a hollow or a cut made).
+    func treatedAt(_ node: Node, _ p: SIMD3<Double>) -> Spot? {
+        guard let top = mesh(node, deflection: 0.01), let hit = Self.nearest(top, p) else { return nil }
+        return treatedAt(node, p, hit.normal, path: [])
+    }
+
+    private func treatedAt(_ node: Node, _ p: SIMD3<Double>, _ facing: SIMD3<Double>, path: [Int]) -> Spot? {
+        var level = 0
+        var n: Node? = node
+        while let c = n {
+            if let inner = c.inner {
+                guard let m = mesh(inner, deflection: 0.01), let hit = Self.nearest(m, p) else { return nil }
+                if hit.distance > 0.06 || simd_dot(hit.normal, facing) < cos(5 * Double.pi / 180) {
+                    switch c {
+                    case .round, .cove, .bevel:
+                        guard let edge = Self.nearestEdge(m, p) else { return nil }
+                        return Spot(path: path, level: level, edges: [edge], rest: [], layer: c)
+                    default:
+                        return nil
+                    }
+                }
+            } else if case .group(_, let parts) = c {
+                for (i, part) in parts.enumerated() {
+                    // In the part's own frame (normals carried by the transpose).
+                    let q = (part.place.matrix.inverse * SIMD4(p, 1)).xyz
+                    let f = simd_normalize((simd_transpose(part.place.matrix) * SIMD4(facing, 0)).xyz)
+                    guard let m = mesh(part.node, deflection: 0.01), let hit = Self.nearest(m, q), hit.distance < 0.06 else { continue }
+                    if let s = treatedAt(part.node, q, f, path: path + [level, i]) { return s }
+                }
+                return nil
+            }
+            n = c.inner
+            level += 1
+        }
+        return nil
+    }
+
+    // A layer's edges (one edge pick each, on the shape before it) but the ones given.
+    func rest(of layer: Node, without edited: [Pick]) -> [Pick] {
+        guard let inner = layer.inner, let s = shape(inner), let picks = layer.picks else { return [] }
+        let (kinds, data) = Self.flat(picks)
+        let n = Int(s.with { bk_pick_edges($0, kinds, data, Int32(picks.count), nil, 0) })
+        guard n > 0 else { return [] }
+        var out = [Double](repeating: 0, count: 6 * n)
+        _ = s.with { bk_pick_edges($0, kinds, data, Int32(picks.count), &out, Int32(n)) }
+        var edges = (0..<n).map { i in Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3(out[6 * i], out[6 * i + 1], out[6 * i + 2]), b: SIMD3(out[6 * i + 3], out[6 * i + 4], out[6 * i + 5])) }
+        for e in edited {
+            if let i = edges.indices.min(by: { simd_length(edges[$0].a - e.a) < simd_length(edges[$1].a - e.a) }) { edges.remove(at: i) }
+        }
+        return edges
+    }
+
+    // The nearest triangle of a mesh to p: how far, and which way it faces.
+    static func nearest(_ m: Mesh, _ p: SIMD3<Double>) -> (distance: Double, normal: SIMD3<Double>)? {
+        var best = Double.infinity, normal = SIMD3<Double>(0, 0, 1)
+        var t = 0
+        while t + 2 < m.indices.count {
+            let a = SIMD3<Double>(m.vertices[Int(m.indices[t])].xyz), b = SIMD3<Double>(m.vertices[Int(m.indices[t + 1])].xyz),
+                c = SIMD3<Double>(m.vertices[Int(m.indices[t + 2])].xyz)
+            let d = simd_length(p - Self.closest(p, a, b, c))
+            if d < best {
+                best = d
+                let n = simd_cross(b - a, c - a)
+                if simd_length(n) > 0 { normal = simd_normalize(n) }
+            }
+            t += 3
+        }
+        return best.isFinite ? (best, normal) : nil
+    }
+
+    // The point of triangle abc nearest p.
+    static func closest(_ p: SIMD3<Double>, _ a: SIMD3<Double>, _ b: SIMD3<Double>, _ c: SIMD3<Double>) -> SIMD3<Double> {
+        let ab = b - a, ac = c - a, ap = p - a
+        let d1 = simd_dot(ab, ap), d2 = simd_dot(ac, ap)
+        if d1 <= 0 && d2 <= 0 { return a }
+        let bp = p - b, d3 = simd_dot(ab, bp), d4 = simd_dot(ac, bp)
+        if d3 >= 0 && d4 <= d3 { return b }
+        let vc = d1 * d4 - d3 * d2
+        if vc <= 0 && d1 >= 0 && d3 <= 0 { return a + ab * (d1 / (d1 - d3)) }
+        let cp = p - c, d5 = simd_dot(ab, cp), d6 = simd_dot(ac, cp)
+        if d6 >= 0 && d5 <= d6 { return c }
+        let vb = d5 * d2 - d1 * d6
+        if vb <= 0 && d2 >= 0 && d6 <= 0 { return a + ac * (d2 / (d2 - d6)) }
+        let va = d3 * d6 - d5 * d4
+        if va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0 { return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))) }
+        let den = 1 / (va + vb + vc)
+        return a + ab * (vb * den) + ac * (vc * den)
+    }
+
+    // The mesh's edge between two faces nearest p, as an edge pick.
+    static func nearestEdge(_ m: Mesh, _ p: SIMD3<Double>) -> Pick? {
+        var best = Double.infinity, hit = -1
+        for (i, e) in m.edges.enumerated() where e.count > 1 && i < m.edgeFaces.count {
+            let f = m.edgeFaces[i]
+            guard f.x >= 0, f.y >= 0, f.x != f.y else { continue }
+            for k in 1..<e.count {
+                let a = SIMD3<Double>(e[k - 1]), b = SIMD3<Double>(e[k]), ab = b - a
+                let t = simd_dot(ab, ab) > 0 ? max(0, min(1, simd_dot(p - a, ab) / simd_dot(ab, ab))) : 0
+                let d = simd_length(p - (a + ab * t))
+                if d < best { best = d; hit = i }
+            }
+        }
+        guard hit >= 0 else { return nil }
+        let (mid, dir) = Picking.midpoint(m.edges[hit])
+        return Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3<Double>(mid), b: SIMD3<Double>(dir))
+    }
+
     // The shape cut across a picked edge, for the 2D angle editor.
     func section(_ node: Node, _ pick: Pick) -> Section? {
         guard let s = shape(node) else { return nil }
@@ -1174,6 +1304,16 @@ struct Section: Equatable {
     }
 }
 
+// An earlier treatment's edges clicked to work on again: the layer (through merges, by each merge's level and the part's
+// place in it, then its level among the layers there), the edges clicked (as they were before it, sharp) and its others.
+struct Spot: Equatable {
+    var path: [Int]
+    var level: Int
+    var edges: [Pick]
+    var rest: [Pick]
+    var layer: Node
+}
+
 // Working on the corner along picked edges in the 2D section view: rounding it (outward or inward) or bevelling it.
 struct AngleEdit: Equatable {
     enum Treatment: Equatable { case rounded, angled }
@@ -1188,10 +1328,15 @@ struct AngleEdit: Equatable {
     var radius: Double
     var legs: SIMD2<Double>
     var roundedCorners = false
+    // Earlier treatments' edges clicked: each made again from its sharp edge (whatever kind it was, it becomes this one).
+    var edits: [Spot] = []
+    // The picks of edges still sharp: treated anew.
+    var fresh: [Pick]
 
     init(body: UUID, picks: [Pick], section: Section) {
         self.body = body
         self.picks = picks
+        self.fresh = picks
         self.section = section
         runs = section.runs
         let room = max(0.2, min(runs.x, runs.y))
@@ -1232,9 +1377,22 @@ struct AngleEdit: Equatable {
         legs = SIMD2(max(0.01, legs.x), max(0.01, legs.y))
     }
 
+    // Starting from an earlier treatment's own values.
+    mutating func adopt(_ layer: Node) {
+        switch layer {
+        case .round(_, _, let r): treatment = .rounded; rounding = .outbound; radius = r
+        case .cove(_, _, let r): treatment = .rounded; rounding = .inbound; radius = r
+        case .bevel(_, _, let l, let c): treatment = .angled; legs = l; roundedCorners = c > 0
+        default: break
+        }
+    }
+
     // The treatment around a node, for the picked edges or for the whole shape.
     func wrapping(_ node: Node, whole: Bool) -> Node {
-        let p = whole ? [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] : picks
+        wrapping(node, picks: whole ? [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] : picks)
+    }
+
+    func wrapping(_ node: Node, picks p: [Pick]) -> Node {
         switch (treatment, rounding) {
         case (.rounded, .outbound): return .round(of: node, picks: p, radius: radius)
         case (.rounded, .inbound): return .cove(of: node, picks: p, radius: radius)
@@ -1363,6 +1521,8 @@ final class Workbench: DesignHost {
     var hover = Hover()
     var editBody: UUID?
     var edgePicks: [Pick] = []
+    // Where each pick was clicked on its shape (to tell a face an earlier treatment made).
+    var pickPoints: [Pick: SIMD3<Double>] = [:]
     var hollowOpen: [Pick] = []
     var hollowWalls: [Wall] = []
     var hollowThickness = 2.0
@@ -2485,13 +2645,30 @@ final class Workbench: DesignHost {
 
     // Opens the 2D angle editor for the picked edges: the camera flies to the edge and turns to look along it,
     // then the cut through the shape takes the whole view.
+    // A pick on a face an earlier rounding, bevel or inward rounding made works on that treatment again, from the sharp edge
+    // it was made on: the cut is taken there, the editor starts from its values, and applying replaces it.
     func workWithAngles() {
         guard let id = editBody, let b = body(id), let first = edgePicks.first, !angleOpening else { return }
         angleOpening = true
-        let node = b.node, picks = edgePicks, clearance = settings.clearance
+        let node = b.node, picks = edgePicks, points = pickPoints, clearance = settings.clearance
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
-            let section = Kernel.shared.section(node, first)
+            let k = Kernel.shared
+            k.clearance = clearance
+            // Clicks on treated faces: the layers they lead to, each layer's clicked edges together.
+            var spots: [Spot] = [], fresh: [Pick] = []
+            for pk in picks {
+                guard let at = points[pk], let s = k.treatedAt(node, at) else { fresh.append(pk); continue }
+                if let i = spots.firstIndex(where: { $0.path == s.path && $0.level == s.level }) { spots[i].edges += s.edges } else { spots.append(s) }
+            }
+            for i in spots.indices { spots[i].rest = k.rest(of: spots[i].layer, without: spots[i].edges) }
+            // The cut: across the first clicked edge, as it was (sharp) when it's an earlier treatment's.
+            var section: Section?, frame = matrix_identity_double4x4
+            if let s = spots.first, points[first] != nil, let inner = s.layer.inner {
+                section = k.section(inner, s.edges[0])
+                frame = Self.frame(node, s.path)
+            } else {
+                section = k.section(node, first)
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let section, self.mode == .angles, let b = self.body(id) else {
@@ -2499,19 +2676,35 @@ final class Workbench: DesignHost {
                         if section == nil { self.flash(L("This edge can't be shown in a cut")) }
                         return
                     }
-                    let m = b.place.matrix
+                    let m = b.place.matrix * frame
                     let at = m * SIMD4(section.point, 1)
                     let along = simd_normalize((m * SIMD4(section.direction, 0)).xyz)
                     self.cameraBeforeAngles = self.camera
                     self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
-                        withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) {
-                            self.angleEdit = AngleEdit(body: id, picks: picks, section: section)
-                        }
+                        var e = AngleEdit(body: id, picks: picks, section: section)
+                        e.edits = spots
+                        e.fresh = fresh
+                        if let l = spots.first?.layer { e.adopt(l) }
+                        withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) { self.angleEdit = e }
                         self.angleOpening = false
                     }
                 }
             }
         }
+    }
+
+    // The placement from a part reached through merges (each merge's level, then the part's place in it) to its shape.
+    nonisolated static func frame(_ node: Node, _ path: [Int]) -> simd_double4x4 {
+        var m = matrix_identity_double4x4, n = node, i = 0
+        while i + 1 < path.count {
+            var g: Node? = n
+            for _ in 0..<path[i] { g = g?.inner }
+            guard case .group(_, let parts) = g, parts.indices.contains(path[i + 1]) else { break }
+            m = m * parts[path[i + 1]].place.matrix
+            n = parts[path[i + 1]].node
+            i += 2
+        }
+        return m
     }
 
     private func glideInset() {
@@ -2542,10 +2735,15 @@ final class Workbench: DesignHost {
         cameraBeforeAngles = nil
     }
 
-    // Applies the editor's rounding or bevel to the picked edges, to the whole shape, or to every selected shape.
+    // Applies the editor's rounding or bevel to the picked edges, to the whole shape, or to every selected shape. Edges an
+    // earlier treatment made faces along are treated anew from their sharp edges, in its place; "all edges" means every
+    // edge, earlier treatments' too.
     func applyAngles(whole: Bool = false, everyShape: Bool = false) {
         guard let e = angleEdit else { return }
-        let made = (everyShape ? selected : body(e.body).map { [$0] } ?? []).map { (id: $0.id, was: $0.node, node: e.wrapping($0.node, whole: whole || everyShape)) }
+        let all = whole || everyShape
+        let made = (everyShape ? selected : body(e.body).map { [$0] } ?? []).map { b in
+            (id: b.id, was: b.node, node: all ? everyEdge(b.node, e) : treated(b.node, e))
+        }
         tryThen(made.map { $0.node }) { [weak self] in
             guard let self, made.allSatisfy({ self.body($0.id)?.node == $0.was }) else { return }
             self.commit { d in
@@ -2555,6 +2753,53 @@ final class Workbench: DesignHost {
             }
             self.edgePicks = []
             self.closeAngles()
+        }
+    }
+
+    // The editor's treatment of the picked edges: each earlier layer clicked made again (its other edges kept as they were,
+    // beneath), the edges still sharp treated on top.
+    func treated(_ node: Node, _ e: AngleEdit) -> Node {
+        var n = node
+        // Deepest first: a layer made two leaves the levels above it as they were.
+        for s in e.edits.sorted(by: { ($0.path.count, $0.level) > ($1.path.count, $1.level) }) {
+            n = rewriting(n, path: s.path, level: s.level) { layer in
+                guard let of = layer.inner else { return layer }
+                return e.wrapping(s.rest.isEmpty ? of : layer.withPicks(s.rest, of: of), picks: s.edges)
+            }
+        }
+        if !e.fresh.isEmpty { n = e.wrapping(n, picks: e.fresh) }
+        return n
+    }
+
+    // Every edge treated: each run of treatments one over another (between hollows and cuts) made this one, of every
+    // edge, in their place; with none, on top.
+    func everyEdge(_ node: Node, _ e: AngleEdit) -> Node {
+        var layers: [Node] = []
+        var n: Node? = node
+        while let c = n { layers.append(c); n = c.inner }
+        guard var result = layers.last else { return node }
+        var pending = false, any = false
+        for layer in layers.dropLast().reversed() {
+            switch layer {
+            case .round, .cove, .bevel:
+                pending = true
+                any = true
+            default:
+                if pending { result = e.wrapping(result, whole: true); pending = false }
+                result = layer.wrapping(result)
+            }
+        }
+        if pending || !any { result = e.wrapping(result, whole: true) }
+        return result
+    }
+
+    // A layer rewritten, inside the merges along `path` (each merge's level and the part's place in it).
+    private func rewriting(_ node: Node, path: [Int], level: Int, _ f: (Node) -> Node) -> Node {
+        guard path.count >= 2 else { return rewrite(node, level: level) { f($0) } }
+        return rewrite(node, level: path[0]) { g in
+            guard case .group(let op, var parts) = g, parts.indices.contains(path[1]) else { return g }
+            parts[path[1]].node = rewriting(parts[path[1]].node, path: Array(path.dropFirst(2)), level: level, f)
+            return .group(op: op, parts: parts)
         }
     }
 

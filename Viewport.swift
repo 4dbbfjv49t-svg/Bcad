@@ -1165,6 +1165,8 @@ final class CadView: MTKView {
             } else {
                 lib.edgePicks = [pk]
             }
+            // Where it was clicked: on a face an earlier treatment made, that treatment is worked on again.
+            lib.pickPoints[pk] = hv.point
             drag = .none
             return
         case .select, .thread:

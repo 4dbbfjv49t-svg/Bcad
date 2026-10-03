@@ -115,8 +115,8 @@ enum SelfTest {
         check("merge is one solid", merged.map { $0.with { bk_piece_count($0) } } == 1 && k.takeProblems().isEmpty)
         _ = k.shape(.group(op: Int32(BK_UNION), parts: [base, Part(node: box, place: Placement(move: SIMD3(40, 0, 0)))]))
         check("shapes apart merge without complaint", k.takeProblems().isEmpty)
-        let corner = k.shape(.group(op: Int32(BK_UNION), parts: [base, Part(node: box, place: Placement(move: SIMD3(20, 20, 20)))]))
-        check("shapes touching at a corner merge into one piece", corner.map { $0.with { bk_piece_count($0) } } == 1 && k.takeProblems().isEmpty)
+        let atCorner = k.shape(.group(op: Int32(BK_UNION), parts: [base, Part(node: box, place: Placement(move: SIMD3(20, 20, 20)))]))
+        check("shapes touching at a corner merge into one piece", atCorner.map { $0.with { bk_piece_count($0) } } == 1 && k.takeProblems().isEmpty)
 
         let plane = Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1))
         let up = mesh(.split(of: box, plane: plane, side: 0))?.volume ?? 0, down = mesh(.split(of: box, plane: plane, side: 1))?.volume ?? 0
@@ -1021,8 +1021,8 @@ enum SelfTest {
         lib.selection = [parts3[0].id, parts3[1].id]
         lib.combine(Int32(BK_UNION))
         settle()
-        let pair = lib.selection.first.flatMap { lib.body($0) }
-        lib.selection = [pair?.id, parts3[2].id].compactMap { $0 }
+        let firstTwo = lib.selection.first.flatMap { lib.body($0) }
+        lib.selection = [firstTwo?.id, parts3[2].id].compactMap { $0 }
         lib.combine(Int32(BK_UNION))
         settle()
         let all3 = lib.selection.first.flatMap { lib.body($0) }
@@ -1035,13 +1035,13 @@ enum SelfTest {
             lib.unmerge(m.id)
             settle()
         }
-        let apart = lib.doc.bodies
-        let linked = apart.count == 3 && Set(apart.compactMap { $0.link?.id }).count == 1 && apart.allSatisfy { $0.node == box }
-        check("a merge switched off: its parts shapes again, the merge kept", linked, "\(apart.count) shapes")
+        let switchedOff = lib.doc.bodies
+        let linked = switchedOff.count == 3 && Set(switchedOff.compactMap { $0.link?.id }).count == 1 && switchedOff.allSatisfy { $0.node == box }
+        check("a merge switched off: its parts shapes again, the merge kept", linked, "\(switchedOff.count) shapes")
         let unmergedFile = dir.appendingPathComponent("unmerged.3mf")
         try? ThreeMF.write(unmergedFile, meshes: [], doc: lib.doc)
         check("a merge switched off is kept in its file", (try? ThreeMF.read(unmergedFile))?.doc == lib.doc)
-        if let first = apart.first {
+        if let first = switchedOff.first {
             lib.setPlace(first.id) { $0.move.z += 5 }
             lib.remerge(first.id)
             settle()
@@ -1052,6 +1052,44 @@ enum SelfTest {
             return p.count == 3 && r == 1 && abs(p[0].place.move.z - 15) < 1e-9
         }()
         check("switched on again: merged as edited, its rounding back", remerged && lib.note == nil, lib.note ?? "")
+
+        // Working on a rounding again: a click on its face finds it and the edge it was made on (sharp); applied, it's made
+        // anew from that edge (2 mm becomes 1 mm, or a bevel in its place), and "all edges" replaces it too.
+        let roundEdge = Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3(0, -10, 10), b: SIMD3(1, 0, 0))
+        let once = Solid(name: "Once", color: Palette.colors[0], node: .round(of: box, picks: [roundEdge], radius: 2), place: Placement(move: SIMD3(0, 0, 10)))
+        use([once])
+        let onRounding = SIMD3<Double>(0, -8 - 2 * 0.5.squareRoot(), 8 + 2 * 0.5.squareRoot())
+        let spot = k.queue.sync { k.treatedAt(once.node, onRounding) }
+        check("a click on a rounding's face finds the rounding and its sharp edge", spot?.level == 0 && spot?.path.isEmpty == true && spot?.rest.isEmpty == true
+              && simd_length((spot?.edges.first?.a ?? .zero) - SIMD3(0, -10, 10)) < 0.5, "\(String(describing: spot?.edges))")
+        func applyEdit(_ change: (inout AngleEdit) -> Void) {
+            guard let spot else { return }
+            var e = AngleEdit(body: once.id, picks: [roundEdge], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(1, 0, 0)))
+            e.edits = [spot]
+            e.fresh = []
+            e.adopt(spot.layer)
+            change(&e)
+            lib.angleEdit = e
+            lib.note = nil
+            lib.applyAngles()
+            settle()
+        }
+        let sharpEdge = spot?.edges.first ?? roundEdge
+        applyEdit { $0.radius = 1 }
+        check("worked on again: the rounding made anew from its sharp edge", lib.body(once.id)?.node == .round(of: box, picks: [sharpEdge], radius: 1)
+              && abs((lib.meshes[once.id]?.volume ?? 0) - (8000 - (1 - Double.pi / 4) * 20)) < 0.5, String(format: "%.2f mm³", lib.meshes[once.id]?.volume ?? 0))
+        use([once])
+        applyEdit { $0.treatment = .angled; $0.legs = SIMD2(1, 1) }
+        check("a rounding worked on as a bevel is replaced by it", lib.body(once.id)?.node == .bevel(of: box, picks: [sharpEdge], legs: SIMD2(1, 1), corner: 0)
+              && abs((lib.meshes[once.id]?.volume ?? 0) - 7990) < 0.5, String(format: "%.2f mm³", lib.meshes[once.id]?.volume ?? 0))
+        use([once])
+        let everyPick = Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)
+        var allEdges = AngleEdit(body: once.id, picks: [everyPick], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(1, 0, 0)))
+        allEdges.radius = 1
+        lib.angleEdit = allEdges
+        lib.applyAngles(whole: true)
+        settle()
+        check("all edges: an earlier rounding is replaced, not rounded over", lib.body(once.id)?.node == .round(of: box, picks: [everyPick], radius: 1))
 
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
