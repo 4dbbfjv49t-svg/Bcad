@@ -187,6 +187,8 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why);
 // Models made as tools (roundings, hollows): a turned outline (closed, counter-clockwise round its region), and a
 // flat-sided solid from its corners and faces (corner loops, turned outward when they come inward); volumes worked out.
 std::shared_ptr<Model> turnedModel(std::vector<Elem> profile);
+// ∮ r²/2 dz along a profile piece: its share of the area moment about the axis (times the angle turned: the volume).
+double profileMoment(const Elem &e);
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
 // A shape of a model, or of two shapes merged (op as BK_UNION …).
 Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place = Affine());

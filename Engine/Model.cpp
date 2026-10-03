@@ -800,4 +800,6 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   return true;
 }
 
+double profileMoment(const Elem &e) { return moment(e); }
+
 }  // namespace bce

@@ -196,7 +196,12 @@ Ends endsOf(const Solid &s, const std::vector<char> &usable) {
 // The way an edge leaves one of its ends (into the edge).
 V3 leaving(const Solid::Edge &e, int end) {
   const auto &p = e.pts;
-  return end == 0 ? unit(p[1] - p[0]) : unit(p[p.size() - 2] - p.back());
+  V3 chord = end == 0 ? unit(p[1] - p[0]) : unit(p[p.size() - 2] - p.back());
+  if (e.geom.kind != EdgeGeom::Circle || !e.geom.exact) return chord;
+  // Round a circle: the circle's own tangent there (a chord leaves half a chord's turn off it).
+  V3 centre = e.geom.place.point({0, 0, e.geom.z}), axis = unit(e.geom.place.vector({0, 0, 1}));
+  V3 at = end == 0 ? p.front() : p.back(), t = unit(cross(axis, at - centre));
+  return dot(t, chord) < 0 ? -t : t;
 }
 
 bool shareFace(const Solid::Edge &a, const Solid::Edge &b) { return a.f0 == b.f0 || a.f0 == b.f1 || a.f1 == b.f0 || a.f1 == b.f1; }
