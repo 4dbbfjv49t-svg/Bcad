@@ -843,6 +843,15 @@ int main() {
     is("bevel: softened", bk_chamfer(box, &ke, edge, 1, 2, 2, 0.5, &miss), 8000 - 40 - 2 * 0.25 * (1 / std::tan(3 * PI / 8) - PI / 8) * 20, 1e-3, 9);
     // Every edge: three bevels at each corner cut it off flat (a tetrahedron of 2/3 mm³ more), as OpenCascade's kernel does.
     is("bevel: every edge, the corners cut off flat", bk_chamfer(box, &kb, body, 1, 2, 2, 0, &miss), 8000 - 12 * 40 + 8 * (8 - 2) - 8 * 2.0 / 3, 1e-6, 26);
+    {
+      // A leg longer than the 1 mm plate is thick: the bevel runs on past the front, cutting into the bottom (exact: 7.5 mm³
+      // off). Two bevels whose legs on the front add up to more than it: their flats meet in a ridge (exact: 6.8108 off).
+      double plate1[3] = {20, 20, 1}, top1[6] = {0, -10, 0.5, 1, 0, 0}, both1[12] = {0, -10, 0.5, 1, 0, 0, 0, -10, -0.5, 1, 0, 0};
+      int ke2[2] = {ke, ke};
+      BKShape *thin = keep(bk_primitive(BK_BOX, plate1));
+      is("bevel: a leg past the face beside it, running on", bk_chamfer(thin, &ke, top1, 1, 0.5, 2, 0, &miss), 392.5, 1e-6, 6);
+      is("bevel: two across a narrow face, meeting in a ridge", bk_chamfer(thin, ke2, both1, 2, 0.5, 0.7, 0, &miss), 393.189189, 1e-5, 7);
+    }
 
     // Runs of edges meeting smoothly: a box's sides rounded, then its top.
     double ups[24];

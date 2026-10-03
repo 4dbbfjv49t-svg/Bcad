@@ -703,7 +703,7 @@ double distanceTo(const std::vector<V3> &pts, V3 q) {
 }
 
 Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease> &treated, double tol, const Crease *self = nullptr,
-            double radius = 0, bool byFace = true) {
+            double radius = 0, bool byFace = true, double openWithin = -1) {
   Runs out;
   std::vector<std::vector<int>> faceOf;
   auto loops = sliceAcross(s, c, i, &faceOf);
@@ -790,7 +790,7 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
   int faceA = firstIsA ? f1 : f2, faceB = firstIsA ? f2 : f1;
   if (radius > 0) {
     // As far as a rounding of the radius asked reaches: past its circle, and its tool's reach out past it.
-    double within = std::max(out.a, out.b) + 4 * radius;
+    double within = openWithin >= 0 ? openWithin : std::max(out.a, out.b) + 4 * radius;
     V3 nB2 = unit(p2(dot(c.nb[i], X), dot(c.nb[i], Y)));
     out.aOpen = open(firstIsA ? 1 : -1, firstIsA ? j1 : j2, firstIsA ? h1 : h2, p2(0, 1), within, out.aNext, out.aWay, out.aNextFace);
     out.bOpen = open(firstIsA ? -1 : 1, firstIsA ? j2 : j1, firstIsA ? h2 : h1, nB2, within, out.bNext, out.bWay, out.bNextFace);
@@ -1833,7 +1833,9 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     // Measured across its middle (a point of its own there: a straight edge has only its ends).
     Crease c = whole;
     size_t mid = pointAt(c, mainAlongOf(whole));
-    Runs r = runsAt(s, c, mid, work, std::max(tol, d), &whole, t.kind == Treatment::Round ? t.radius : 0);
+    // (A bevel's flat reaches no further than its legs, and its tool a little past.)
+    Runs r = runsAt(s, c, mid, work, std::max(tol, d), &whole, t.kind == Treatment::Round ? t.radius : t.kind == Treatment::Bevel ? std::max(t.legA, t.legB) : 0,
+                    true, t.kind == Treatment::Bevel ? 3 * std::max(t.legA, t.legB) : -1);
     double la = r.aShared ? r.a / 2 : r.a, lb = r.bShared ? r.b / 2 : r.b;
     double phi = c.angleAt(mid) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
     if (t.kind == Treatment::Round) {
@@ -1894,10 +1896,23 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       most = std::min(most, std::min(ra, rb));
     } else if (t.kind == Treatment::Cove) {
       most = std::min(most, std::min(la, lb));
-    } else if (t.legA > la * (1 - 1e-9) || t.legB > lb * (1 - 1e-9)) {
-      fit.fits = false;
-      fit.why = "bevel: too large for these edges";
-      return s;
+    } else {
+      // A leg longer than the face beside it is wide, open past its end and no other treatment's: the bevel runs on past
+      // it (as a rounding spills over), taking all of it, its flat cutting into the face beyond. One side at most, at an
+      // outside corner.
+      bool overA = t.legA > la * (1 - 1e-9), overB = t.legB > lb * (1 - 1e-9);
+      bool spillA = overA && !overB && phi < pi && r.aOpen && !r.aShared;
+      bool spillB = overB && !overA && phi < pi && r.bOpen && !r.bShared;
+      // Two bevels across one face, together wider than it: their flats meet in a ridge over it (the face gone), as long
+      // as neither reaches past its far side.
+      bool meetA = overA && r.aShared && t.legA < r.a * (1 - 1e-9), meetB = overB && r.bShared && t.legB < r.b * (1 - 1e-9);
+      if (spillA || meetA) consumed.insert(c.fa[mid]), overA = overA && !meetA;
+      if (spillB || meetB) consumed.insert(c.fb[mid]), overB = overB && !meetB;
+      if ((overA && !spillA) || (overB && !spillB)) {
+        fit.fits = false;
+        fit.why = "bevel: too large for these edges";
+        return s;
+      }
     }
   }
   for (int f : flats) {
@@ -1910,6 +1925,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       if (!consumed.count(f)) most = std::min(most, faceRoom(s, f, setback));
       continue;
     }
+    if (consumed.count(f)) continue;
     // A bevel's legs: each edge's on this face (A's or B's by which side of its crease the face is).
     std::fill(legs.begin(), legs.end(), 0.0);
     for (const auto &c : work) {
@@ -2677,11 +2693,13 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   }
 
   // The tools taken away one by one, then those added; failing that, each kind all together.
-  auto made = [&](bool together) {
+  // `how`: those taken away together (1), those added together (2), else one by one.
+  auto made = [&](int how) {
     Solid r = base;
     for (int op : {BK_SUBTRACT, BK_UNION}) {
       const std::vector<Solid> &tools = op == BK_SUBTRACT ? take : add;
       if (tools.empty()) continue;
+      bool together = how & (op == BK_SUBTRACT ? 1 : 2);
       if (!together) {
         for (size_t i = 0; i < tools.size(); i++) {
           Solid next = step(r, tools[i], op);
@@ -2746,8 +2764,11 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         for (auto &tool : *list)
           for (auto &f : tool.faces)
             if (!f.geom.flat && !f.aux) f.blend = true;
-    result = made(false);
-    if (!closed(result) && take.size() + add.size() > 1) result = made(true);
+    result = made(0);
+    if (!closed(result) && take.size() + add.size() > 1) result = made(3);
+    // Or one kind together, the other one by one.
+    for (int how : {1, 2})
+      if (!closed(result) && !take.empty() && !add.empty()) result = made(how);
     if ((done = !result.tri.empty() && closed(result))) break;
   }
   if (!done && !fillCut.empty()) {
@@ -2758,8 +2779,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       for (auto &tool : *list)
         for (auto &f : tool.faces)
           if (!f.geom.flat && !f.aux) f.blend = true;
-    result = made(false);
-    if (!closed(result) && take.size() + add.size() > 1) result = made(true);
+    result = made(0);
+    if (!closed(result) && take.size() + add.size() > 1) result = made(3);
+    for (int how : {1, 2})
+      if (!closed(result) && !take.empty() && !add.empty()) result = made(how);
     done = !result.tri.empty() && closed(result);
   }
   if (!done) return coveChecked ? tooWide() : tooLarge();
