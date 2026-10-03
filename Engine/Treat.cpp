@@ -1719,7 +1719,8 @@ double faceRoom(const Solid &s, int f, const std::vector<double> &setback) {
 
 }  // namespace
 
-Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
+// With `spare`, every edge asked for: edges beside a hair's remnant of a face left as they are.
+static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto, bool spare) {
   fit = TreatFit();
   const Solid &base = onto ? *onto : s;
   std::vector<Crease> creases = creasesOf(s, t.kinds.data(), t.picks.data(), (int)t.kinds.size(), &fit.missing);
@@ -1729,6 +1730,17 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   double tol = 1e-7 * (1 + size);
   bool picked = false;
   for (int k : t.kinds) picked = picked || k == BK_PICK_EDGE || k == BK_PICK_CORNER;
+  bool whole = spare;
+  // Each face's area (told when first asked).
+  std::vector<double> areas;
+  auto areaOf = [&](int f) {
+    if (areas.empty()) {
+      areas.assign(s.faces.size(), 0);
+      for (size_t t3 = 0; t3 < s.triFace.size(); t3++)
+        areas[s.triFace[t3]] += norm(cross(s.p[s.tri[3 * t3 + 1]] - s.p[s.tri[3 * t3]], s.p[s.tri[3 * t3 + 2]] - s.p[s.tri[3 * t3]])) / 2;
+    }
+    return areas[f];
+  };
   // How far along a crease its own middle lies: where a run goes on into a seam (two roundings meeting at a corner, going
   // on from the sharp edge that ends there), the middle of its longest edge that isn't one, else its middle.
   auto mainAlongOf = [&](const Crease &c) {
@@ -1766,13 +1778,19 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     size_t at = pointAt(m, mainAlongOf(c));
     double angle = m.angleAt(at);
     if ((blendA || blendB) && std::fabs(angle - 180) < 35) continue;
+    // Beside a rounding, a knife's edge (its faces a few degrees apart): where the rounding runs out against a face at a
+    // graze, with nothing there to treat, unless picked as such.
+    if ((blendA || blendB) && !picked && (angle < 15 || angle > 345)) continue;
     // Two roundings either side all along (the seam where they cross at a corner): part of that corner, not an edge of the
     // shape, unless picked as such (or going on from a sharp edge: then part of its run).
     if (seam && !picked) continue;
-    if (blendA || blendB) {
-      // (By how far the outline goes before it turns: where the faces fold back on each other, nowhere.)
+    if (blendA || blendB || (whole && std::min(areaOf(c.fa[at]), areaOf(c.fb[at])) < 1.0)) {
+      // (By how far the outline goes before it turns: where the faces fold back on each other, nowhere.) With every edge
+      // asked for, beside any face no wider than a few chord errors (a hair's remnant of a face where roundings met): no
+      // edge of the shape's to treat either.
       Runs r = runsAt(s, m, at, {}, std::max(tol, d), nullptr, 0, false);
       if ((blendA && r.a < 4 * d) || (blendB && r.b < 4 * d)) continue;
+      if (whole && (r.a < 4 * d || r.b < 4 * d)) continue;
     }
     work.push_back(c);
   }
@@ -1864,6 +1882,8 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
   }
   for (int f : flats) {
+    // With every edge asked for, a hair's remnant of a face (where roundings met) may be used up.
+    if (whole && areaOf(f) < 16 * d * d) continue;
     if (t.kind != Treatment::Bevel) {
       if (!consumed.count(f)) most = std::min(most, faceRoom(s, f, setback));
       continue;
@@ -2731,6 +2751,20 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   if (pieces(result) > was && add.empty() && dropIslands(result, was, 0.02)) finish(result, d);
   if (pieces(result) != was) return coveChecked ? tooWide() : tooLarge();
   return result;
+}
+
+Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
+  Solid made = treatedAs(s, t, d, fit, onto, false);
+  // Every edge asked for and not every one fitting: those beside a hair's remnant of a face (where roundings or cuts met)
+  // left as they are, if then the rest fit.
+  bool whole = !t.kinds.empty();
+  for (int k : t.kinds) whole = whole && k == BK_PICK_BODY;
+  if (fit.fits || !whole) return made;
+  TreatFit spared;
+  Solid other = treatedAs(s, t, d, spared, onto, true);
+  if (!spared.fits) return made;
+  fit = spared;
+  return other;
 }
 
 bool foldThin(Solid &r, double width) { return fold(r, width, false); }

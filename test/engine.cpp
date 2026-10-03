@@ -1080,6 +1080,13 @@ int main() {
       is("bevel: a ring cut aslant, all round", bk_chamfer(cutRing, &kb, body, 1, 0.87252, 1.4573, 0, &miss), 1099.5708, 2, 5);
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
+      // Every edge bevelled after every edge rounded (c501): the hair-thin remnants of faces where roundings met are left as
+      // they are, the rest bevelled (OpenCascade's 4567.990 mm³).
+      double can501[2] = {18.3527, 27.7191}, at501[3] = {-0.950215, -1.85683, -0.327635}, n501[3] = {-0.738288, -0.877353, 0.235435};
+      BKShape *cut501 = keep(bk_split(keep(bk_primitive(BK_CYLINDER, can501)), at501, n501, 1));
+      BKShape *round501 = keep(bk_fillet(cut501, &kb, body, 1, 1.54905, &mr, &miss));
+      is("bevel: every edge of a cut cylinder rounded all round", round501 ? bk_chamfer(round501, &kb, body, 1, 0.401328, 1.12913, 0, &miss) : nullptr,
+         4567.990, 5);
     }
     for (BKShape *s : made) bk_free(s);
     bk_free(box);
