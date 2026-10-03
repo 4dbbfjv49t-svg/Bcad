@@ -693,6 +693,135 @@ int main() {
     bk_free(box), bk_free(box2), bk_free(cyl);
   }
 
+  // MARK: edges and hollows
+  // Sections across edges; roundings, inward roundings and bevels against exact volumes (and OpenCascade's figures where
+  // a corner is a matter of convention), closed and as many faces; hollows with openings and walls of their own.
+  {
+    double b20[3] = {20, 20, 20}, body[6] = {0}, mr;
+    int miss, ke = BK_PICK_EDGE, kf = BK_PICK_FACE, kb = BK_PICK_BODY, kc = BK_PICK_CORNER;
+    BKShape *box = bk_primitive(BK_BOX, b20);
+    std::vector<BKShape *> made;
+    auto keep = [&](BKShape *s) { return made.push_back(s), s; };
+    auto at = [](BKShape *s, double x, double y, double z) {
+      double m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+      return bk_transform(s, m);
+    };
+    struct Got {
+      double volume = -1;
+      int faces = 0;
+      bool shut = false;
+      std::string why;
+    };
+    auto look = [&](BKShape *s) {
+      Got g;
+      if (!s) return g.why = bk_last_error(), g;
+      BKMesh *m = bk_mesh(s, 0.05);
+      double sv;
+      g.volume = m->volume, g.faces = m->faceCount, g.shut = closed(m, sv, g.why) && bk_piece_count(s) == 1;
+      bk_mesh_free(m);
+      return g;
+    };
+    auto says = [](const Got &g) { return fmt("volume %.4f · faces %.0f ", g.volume, g.faces) + g.why; };
+    auto is = [&](const char *name, BKShape *s, double want, double tol, int faces = -1) {
+      Got g = look(keep(s));
+      check(name, g.shut && near(g.volume, want, tol) && (faces < 0 || g.faces == faces), says(g) + fmt(" (want %.4f)", want));
+    };
+    double edge[6] = {0, -10, 10, 1, 0, 0}, top[6] = {0, 0, 1, 0, 0, 10}, bottom[6] = {0, 0, -1, 0, 0, -10}, corner[6] = {0, 0, 1, 10, 10, 10};
+    auto t0 = std::chrono::steady_clock::now();
+
+    BKSection *sec = bk_section(box, ke, edge, 10);
+    check("section: across a box's edge, 90° and one outline", sec && near(sec->angle, 90, 1e-9) && sec->loopCount == 1, sec ? fmt("%.4f° · %.0f loops", sec->angle, sec->loopCount) : bk_last_error());
+    if (sec) bk_section_free(sec);
+
+    double one = 8000 - (4 - PI) * 20;
+    is("round: one edge", bk_fillet(box, &ke, edge, 1, 2, &mr, &miss), one, 1e-6, 7);
+    is("round: a corner pick takes its edge", bk_fillet(box, &kc, corner, 1, 2, &mr, &miss), one, 1e-6, 7);
+    // The top face's edges: each edge's rounding, less where two meet at a corner (the cylinders' common part counted once).
+    is("round: a face's edges", bk_fillet(box, &kf, top, 1, 2, &mr, &miss), 8000 - 4 * (4 - PI) * 20 + 4 * (16 - 8.0 / 3 - 4 * PI), 0.01, 10);
+    is("round: every edge (balls at the corners)", bk_fillet(box, &kb, body, 1, 2, &mr, &miss), 4096 + 3072 + 192 * PI + 32 * PI / 3, 1e-6, 26);
+    double w20[3] = {20, 20, 20};
+    {
+      // A rounded polyhedron is its corners' inner one grown by the radius (Steiner): inner volume, area, edges' turns, ball.
+      double rho = 20 * (2 - std::sqrt(2.0)) / 2, k = (rho - 1) / rho, leg = 20 * k, hyp = leg * std::sqrt(2.0);
+      double inner = leg * leg / 2 * 18, area = leg * leg + (2 * leg + hyp) * 18, turns = 18 * 2 * PI + 2 * (2 * leg + hyp) * PI / 2;
+      is("round: every edge of a wedge", bk_fillet(keep(bk_primitive(BK_WEDGE, w20)), &kb, body, 1, 1, &mr, &miss), inner + area + turns / 2 + 4 * PI / 3, 1e-4, 20);
+    }
+    BKShape *big = bk_fillet(box, &ke, edge, 1, 40, &mr, &miss);
+    check("round: too large is refused, saying the most that fits", !big && mr > 19 && mr < 20, fmt("most %.2f · ", mr) + bk_last_error());
+    double cy[2] = {20, 20}, hc[2] = {8, 30};
+    BKShape *cyl = keep(bk_primitive(BK_CYLINDER, cy)), *holed = keep(bk_boolean(BK_SUBTRACT, box, keep(bk_primitive(BK_CYLINDER, hc))));
+    double rim[6] = {10, 0, 10, 0, 1, 0}, hrim[6] = {4, 0, 10, 0, 1, 0};
+    {
+      // A rim's rounding by Pappus: the section's area turned round the axis at its centroid.
+      double A = 4 * (1 - PI / 4), rc = (4 * 9 - PI * (8 + 8 / (3 * PI))) / A;
+      is("round: a cylinder's rim, in step with its circle", bk_fillet(cyl, &ke, rim, 1, 2, &mr, &miss), PI * 100 * 20 - 2 * PI * rc * A, 1e-3, 4);
+      double a = 1 - PI / 4, rh = (4.5 - PI / 4 * (5 - 4 / (3 * PI))) / a;
+      is("round: a hole's rim", bk_fillet(holed, &ke, hrim, 1, 1, &mr, &miss), 8000 - PI * 16 * 20 - 2 * PI * rh * a, 1e-3, 8);
+    }
+    BKShape *L = keep(bk_boolean(BK_UNION, box, keep(at(box, 20, 0, -10))));
+    double inside[6] = {10, 0, 0, 0, 1, 0};
+    is("round: an inside corner is filled", bk_fillet(L, &ke, inside, 1, 2, &mr, &miss), 16000 + (4 - PI) * 20, 1e-6, 11);
+    is("cove: one edge", bk_cove(box, &ke, edge, 1, 3, &mr, &miss), 8000 - PI * 9 / 4 * 20, 0.01, 7);
+    // Every edge: each cylinder's quarter, less where two (Steinmetz) and three (the tricylinder) meet at a corner.
+    is("cove: every edge", bk_cove(box, &kb, body, 1, 3, &mr, &miss), 8000 - 12 * 9 * PI / 4 * 20 + 8 * (3 * 2.0 / 3 - (2 - std::sqrt(2.0))) * 27, 0.5, 18);
+    is("bevel: 2 × 4 mm", bk_chamfer(box, &ke, edge, 1, 2, 4, 0, &miss), 8000 - 80, 1e-6, 7);
+    // Softened: each of the bevel's edges (135°) rounded, ρ²(cot(φ/2) − (π − φ)/2) per edge.
+    is("bevel: softened", bk_chamfer(box, &ke, edge, 1, 2, 2, 0.5, &miss), 8000 - 40 - 2 * 0.25 * (1 / std::tan(3 * PI / 8) - PI / 8) * 20, 1e-3, 9);
+    // Every edge: three bevels at each corner cut it off flat (a tetrahedron of 2/3 mm³ more), as OpenCascade's kernel does.
+    is("bevel: every edge, the corners cut off flat", bk_chamfer(box, &kb, body, 1, 2, 2, 0, &miss), 8000 - 12 * 40 + 8 * (8 - 2) - 8 * 2.0 / 3, 1e-6, 26);
+
+    // Runs of edges meeting smoothly: a box's sides rounded, then its top.
+    double ups[24];
+    int k4[4] = {ke, ke, ke, ke};
+    double cs[4][2] = {{-10, -10}, {-10, 10}, {10, -10}, {10, 10}};
+    for (int i = 0; i < 4; i++) {
+      double q[6] = {cs[i][0], cs[i][1], 0, 0, 0, 1};
+      for (int j = 0; j < 6; j++) ups[6 * i + j] = q[j];
+    }
+    BKShape *up2 = keep(bk_fillet(box, k4, ups, 4, 2, &mr, &miss)), *up1 = keep(bk_fillet(box, k4, ups, 4, 1, &mr, &miss));
+    {
+      // 1 mm round a top whose corners are rounded 2 mm: straight parts, and at each corner the section turned a quarter.
+      double sec1 = 1.5 - PI / 4 * (1 + 4 / (3 * PI));
+      is("round: a top round its rounded corners", bk_fillet(up2, &kf, top, 1, 1, &mr, &miss), 8000 - 4 * (4 - PI) * 20 - 4 * (1 - PI / 4) * 16 - 4 * PI / 2 * sec1, 0.1, 18);
+    }
+    // As wide as the corners: a ball's eighth there.
+    is("round: a top as wide as its rounded corners", bk_fillet(up2, &kf, top, 1, 2, &mr, &miss), 8000 - 4 * (4 - PI) * 20 - 4 * (4 - PI) * 16 - 4 * (PI * 4 / 4 * 2 - 4 * PI / 3 * 8 / 8), 0.5);
+    // Wider than the corners (OpenCascade's 7917.562 mm³; the section's circle cut off at the corner's axis here).
+    is("round: a top wider than its rounded corners", bk_fillet(up1, &kf, top, 1, 2, &mr, &miss), 7917.562, 1);
+    printf("  sections, roundings, coves and bevels in %.0f ms\n", ms(t0));
+
+    t0 = std::chrono::steady_clock::now();
+    auto hollow = [&](BKShape *s, const double *open, int openCount, const double *walls, const double *thick, int wallCount, double t, const BKShape *sharp = nullptr) {
+      const BKShape *sh[1] = {sharp};
+      return bk_hollow(s, sharp ? sh : nullptr, sharp ? 1 : 0, open, openCount, walls, thick, wallCount, t, &miss);
+    };
+    double five = 5, four = 4, side[6] = {1, 0, 0, 10, 0, 0};
+    is("hollow: shut", hollow(box, nullptr, 0, nullptr, nullptr, 0, 2), 8000 - 4096, 1e-6, 12);
+    is("hollow: the top open", hollow(box, top, 1, nullptr, nullptr, 0, 2), 8000 - 16 * 16 * 18, 1e-6, 11);
+    is("hollow: the top open, a 5 mm bottom", hollow(box, top, 1, bottom, &five, 1, 2), 8000 - 16 * 16 * 15, 1e-6, 11);
+    is("hollow: a cylinder open at the top", hollow(cyl, top, 1, nullptr, nullptr, 0, 1.5), PI * (100 * 20 - 8.5 * 8.5 * 18.5), 1e-3, 5);
+    double s20[1] = {20};
+    is("hollow: a ball", hollow(keep(bk_primitive(BK_SPHERE, s20)), nullptr, 0, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);
+    BKShape *thick = hollow(box, top, 1, nullptr, nullptr, 0, 12);
+    check("hollow: walls too thick are refused", !thick, thick ? "made" : bk_last_error());
+    BKShape *roundAll = keep(bk_fillet(box, &kb, body, 1, 2, &mr, &miss));
+    double roundVolume = 4096 + 3072 + 192 * PI + 32 * PI / 3;
+    is("hollow: a rounded cube (walls as thick as its rounding: a sharp void)", hollow(roundAll, nullptr, 0, nullptr, nullptr, 0, 2), roundVolume - 4096, 1e-3);
+    is("hollow: a rounded cube, its top open", hollow(roundAll, top, 1, nullptr, nullptr, 0, 2), roundVolume - 16 * 16 * 18, 1e-3);
+    is("hollow: a rounded cube, a thicker wall of its own", hollow(roundAll, nullptr, 0, side, &four, 1, 2), roundVolume - 14 * 16 * 16, 1e-3);
+    {
+      // Thinner walls than the rounding: the void rounded by the rest (round the same middles).
+      double rho = 1, inner = 18;
+      double v = inner * inner * inner - (12 * (1 - PI / 4) * rho * rho * (inner - 2 * rho) + 8 * (1 - PI / 6) * rho * rho * rho);
+      is("hollow: a rounded cube, walls thinner than its rounding", hollow(roundAll, nullptr, 0, nullptr, nullptr, 0, 1), roundVolume - v, 0.05);
+    }
+    // OpenCascade's 3309.562 mm³: the cube rounded 1 mm up its sides, 2 mm round its top, its top open.
+    is("hollow: sides and top rounded differently, the top open", hollow(keep(bk_fillet(up1, &kf, top, 1, 2, &mr, &miss)), top, 1, nullptr, nullptr, 0, 2, box), 3309.562, 1);
+    printf("  hollows in %.0f ms\n", ms(t0));
+    for (BKShape *s : made) bk_free(s);
+    bk_free(box);
+  }
+
   // MARK: speed
   {
     double sph[1] = {200}, cyl[2] = {20, 20};

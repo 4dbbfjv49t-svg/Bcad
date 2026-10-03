@@ -308,7 +308,9 @@ bool treatedVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool i
     double kk = dot(na, nb), det = 1 - kk * kk;
     if (std::fabs(det) < 1e-9) continue;
     double alpha = (-oA + oB * kk) / det, beta = (-oB + oA * kk) / det;
-    V3 at = c.pts[m] + na * alpha + nb * beta, dir = c.tangent(m);
+    // Picked at the edge's middle (an edge of two points: halfway along it, not at its end).
+    V3 mid = c.pts.size() == 2 ? (c.pts[0] + c.pts[1]) / 2.0 : c.pts[m];
+    V3 at = mid + na * alpha + nb * beta, dir = c.tangent(m);
     std::tuple<long, long, long> key;
     if (t.kind == Treatment::Round) {
       double rad = t.radius - std::max(oA, oB);
