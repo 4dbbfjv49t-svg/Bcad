@@ -484,9 +484,10 @@ bool ringTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 centre, V3 axis, int aro
 }
 
 // A cross-section swept from point to point of a run (each point its own frame and outline, all with as many points),
-// its ends closed.
+// its ends closed. A face for each of the outline's runs (`runOf`: each side's run; an arc's chords one face), else each
+// side its own.
 Solid sweptTool(const std::vector<V3> &E, const std::vector<V3> &U, const std::vector<V3> &N, const std::vector<std::vector<V3>> &outlines,
-                bool closed) {
+                bool closed, const std::vector<int> &runOf = {}) {
   Solid out;
   size_t n = E.size(), k = outlines[0].size();
   for (size_t i = 0; i < n; i++)
@@ -494,15 +495,18 @@ Solid sweptTool(const std::vector<V3> &E, const std::vector<V3> &U, const std::v
   out.n.assign(out.p.size(), V3{});
   size_t rows = closed ? n : n - 1;
   auto id = [&](size_t i, size_t j) { return (uint32_t)((i % n) * k + j % k); };
-  for (size_t j = 0; j < k; j++) {
+  bool byRun = runOf.size() == k;
+  size_t sides = byRun ? (size_t)*std::max_element(runOf.begin(), runOf.end()) + 1 : k;
+  for (size_t j = 0; j < sides; j++) {
     Solid::Face f;
     out.faces.push_back(f);
   }
   for (size_t i = 0; i < rows; i++)
     for (size_t j = 0; j < k; j++) {
       uint32_t a = id(i, j), b = id(i, j + 1), c = id(i + 1, j + 1), dd = id(i + 1, j);
-      out.triangle(a, b, c, (int)j);
-      out.triangle(a, c, dd, (int)j);
+      int face = byRun ? runOf[j] : (int)j;
+      out.triangle(a, b, c, face);
+      out.triangle(a, c, dd, face);
     }
   if (!closed) {
     for (int end = 0; end < 2; end++) {
@@ -1925,10 +1929,11 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
         }
         std::vector<V3> E, U, N;
         std::vector<std::vector<V3>> outlines;
+        std::vector<int> runOf;
         for (size_t i = 0; i < n; i++) {
           V3 u = c.ia[a + i];
           E.push_back(c.pts[a + i]), U.push_back(u), N.push_back(unit(c.na[a + i] - u * dot(c.na[a + i], u)));
-          outlines.push_back(pointsOf(per[i][q], chords));
+          outlines.push_back(pointsOf(per[i][q], chords, i == 0 ? &runOf : nullptr));
         }
         for (int e = 0; e < 2; e++) {
           size_t i = e == 0 ? a : b;
@@ -1949,7 +1954,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
             E.push_back(Ex), U.push_back(U.back()), N.push_back(N.back()), outlines.push_back(outlines.back());
           }
         }
-        put(per[0][q].fill, q, sweptTool(E, U, N, outlines, false));
+        put(per[0][q].fill, q, sweptTool(E, U, N, outlines, false, runOf));
       }
     }
     for (auto &[key, parts] : made) {
@@ -2162,10 +2167,11 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           }
           std::vector<V3> E, U, N;
           std::vector<std::vector<V3>> outlines;
+          std::vector<int> runOf;
           for (size_t i = 0; i < n; i++) {
             V3 u = c.ia[i];
             E.push_back(c.pts[i]), U.push_back(u), N.push_back(unit(c.na[i] - u * dot(c.na[i], u)));
-            outlines.push_back(pointsOf(per[i][k], chords));
+            outlines.push_back(pointsOf(per[i][k], chords, i == 0 ? &runOf : nullptr));
           }
           if (!c.closed) {
             for (int end = 0; end < 2; end++) {
@@ -2187,7 +2193,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
               }
             }
           }
-          Solid tool = sweptTool(E, U, N, outlines, c.closed);
+          Solid tool = sweptTool(E, U, N, outlines, c.closed, runOf);
           if (per[0][k].fill && !c.closed)
             for (int end = 0; end < 2; end++) {
               size_t i = end == 0 ? 0 : n - 1;
