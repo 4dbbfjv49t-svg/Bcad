@@ -535,6 +535,8 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
   uint32_t cap = (uint32_t)half.faces.size() - 1;
   // The cap's sides that no other cap triangle shares: its outline.
   std::unordered_map<Key, std::vector<std::pair<Key, V3>>, KeyHash> next;
+  // (Walked from in the order first met, not the table's.)
+  std::vector<Key> firstSeen;
   std::set<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>> sides;
   auto arr = [](Key k) { return std::array<uint64_t, 3>{k.x, k.y, k.z}; };
   for (size_t t = 0; t < half.triFace.size(); t++)
@@ -545,7 +547,9 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
     for (int k = 0; k < 3; k++) {
       V3 a = half.p[half.tri[3 * t + k]], b = half.p[half.tri[3 * t + (k + 1) % 3]];
       if (sides.count({arr(keyOf(b)), arr(keyOf(a))})) continue;
-      next[keyOf(a)].push_back({keyOf(b), b});
+      auto &outs = next[keyOf(a)];
+      if (outs.empty()) firstSeen.push_back(keyOf(a));
+      outs.push_back({keyOf(b), b});
     }
   }
   std::unordered_map<Key, V3, KeyHash> where;
@@ -560,8 +564,8 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
         for (int k = 0; k < 3; k++)
           owner[{arr(keyOf(half.p[half.tri[3 * t + (k + 1) % 3]])), arr(keyOf(half.p[half.tri[3 * t + k]]))}] = (int)half.triFace[t];
   std::set<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>> used;
-  for (auto &[start, outs] : next) {
-    for (auto &first : outs) {
+  for (const Key &start : firstSeen) {
+    for (auto &first : next[start]) {
       if (used.count({arr(start), arr(first.first)})) continue;
       std::vector<std::pair<double, double>> loop;
       std::vector<int> faces;

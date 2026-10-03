@@ -326,7 +326,10 @@ struct Cutter {
         std::vector<uint32_t> pts{u, v};
         for (uint32_t q : X.onEdge[X.edgeOf(u, v)]) pts.push_back(q);
         V3 dir = P[v] - P[u];
-        std::sort(pts.begin(), pts.end(), [&](uint32_t p1, uint32_t p2) { return dot(P[p1] - P[u], dir) < dot(P[p2] - P[u], dir); });
+        std::sort(pts.begin(), pts.end(), [&](uint32_t p1, uint32_t p2) {
+          double d1 = dot(P[p1] - P[u], dir), d2 = dot(P[p2] - P[u], dir);
+          return d1 < d2 || (d1 == d2 && p1 < p2);
+        });
         for (size_t i = 0; i + 1 < pts.size(); i++) {
           V3 mid = (P[pts[i]] + P[pts[i + 1]]) * 0.5;
           if (where(f, yt, mid) >= 0 && where(f, yt, P[pts[i]]) >= 0 && where(f, yt, P[pts[i + 1]]) >= 0) Y.cut[ty].segs.push_back({pts[i], pts[i + 1]});
@@ -360,7 +363,10 @@ struct Cutter {
     if (found.size() < 2) return;
     // All on one line: in order along it, each next two joined.
     V3 dir = cross(cross(a[1] - a[0], a[2] - a[0]), cross(b[1] - b[0], b[2] - b[0]));
-    std::sort(found.begin(), found.end(), [&](uint32_t p, uint32_t q) { return dot(P[p], dir) < dot(P[q], dir); });
+    std::sort(found.begin(), found.end(), [&](uint32_t p, uint32_t q) {
+      double dp = dot(P[p], dir), dq = dot(P[q], dir);
+      return dp < dq || (dp == dq && p < q);
+    });
     for (size_t i = 0; i + 1 < found.size(); i++) {
       A.cut[ta].segs.push_back({found[i], found[i + 1]});
       B.cut[tb].segs.push_back({found[i], found[i + 1]});
@@ -406,7 +412,10 @@ struct Cutter {
         std::sort(pts.begin(), pts.end());
         pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
         V3 dir = P[v] - P[u];
-        std::sort(pts.begin(), pts.end(), [&](uint32_t p1, uint32_t p2) { return dot(P[p1] - P[u], dir) < dot(P[p2] - P[u], dir); });
+        std::sort(pts.begin(), pts.end(), [&](uint32_t p1, uint32_t p2) {
+          double d1 = dot(P[p1] - P[u], dir), d2 = dot(P[p2] - P[u], dir);
+          return d1 < d2 || (d1 == d2 && p1 < p2);
+        });
         int prev = local.get(rep(u));
         for (uint32_t q : pts) {
           if (local.has(q)) {
@@ -636,10 +645,14 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepG
     boxesB[t] = {vmin(a, vmin(b, d)), vmax(a, vmax(b, d))};
   }
   Boxes tree(boxesB);
+  // Taken in order (the tree's own order is the standard library's to choose), so points are numbered alike everywhere.
+  std::vector<uint64_t> pairs;
   for (uint32_t t = 0; t < c.A.w.count(); t++) {
     V3 a = c.P[c.A.corner(t, 0)], b = c.P[c.A.corner(t, 1)], d = c.P[c.A.corner(t, 2)];
-    tree.overlapping({vmin(a, vmin(b, d)), vmax(a, vmax(b, d))}, [&](uint32_t u) { c.pairOf(t, u); });
+    tree.overlapping({vmin(a, vmin(b, d)), vmax(a, vmax(b, d))}, [&](uint32_t u) { pairs.push_back((uint64_t)t << 32 | u); });
   }
+  std::sort(pairs.begin(), pairs.end());
+  for (uint64_t k : pairs) c.pairOf((uint32_t)(k >> 32), (uint32_t)(k & 0xffffffffu));
   // Crossing points made a hair apart by different roads (an edge through a triangle beside another edge through a
   // triangle, at what is one place) are one point: the triangulations would otherwise have to keep them apart at the
   // scale of rounding, which they can't. A hair is `merge` of the shapes' size: 10⁻¹¹ by default; where a rounding's

@@ -58,8 +58,9 @@ if [[ "$ENGINE" == occt ]]; then
 else
   KSOURCES=(Engine/*.cpp)
 fi
+# No fused multiply-adds: the engine's results then come out bit for bit as on any other machine (its tests run on Linux).
 for f in $KSOURCES; do
-  "${CXX[@]}" -O3 -c "$f" -o "$WORK/${f:t:r}.o"
+  "${CXX[@]}" -O3 -ffp-contract=off -c "$f" -o "$WORK/${f:t:r}.o"
   KERNEL+=("$WORK/${f:t:r}.o")
 done
 SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift)

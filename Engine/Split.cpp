@@ -111,11 +111,14 @@ Solid cut(const Solid &s, V3 p, V3 n, int side) {
     V3 e1 = unit(std::fabs(c.x) < 0.9 ? cross(c, V3{1, 0, 0}) : cross(c, V3{0, 1, 0}));
     V3 e2 = cross(c, e1);
     double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
-    std::unordered_map<uint32_t, std::pair<double, double>> uv;
+    // The outline's points in the order they come round it (so they go into the triangulation alike everywhere).
+    std::vector<std::pair<uint32_t, std::pair<double, double>>> uv;
+    std::unordered_map<uint32_t, int> seen;
     for (auto &e : outline)
       for (uint32_t q : {e.first, e.second}) {
+        if (!seen.emplace(q, 1).second) continue;
         double u = dot(out.pts[q] - p, e1), v = dot(out.pts[q] - p, e2);
-        uv[q] = {u, v};
+        uv.push_back({q, {u, v}});
         lo[0] = std::min(lo[0], u), lo[1] = std::min(lo[1], v), hi[0] = std::max(hi[0], u), hi[1] = std::max(hi[1], v);
       }
     double cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2, r = 10 * std::max({hi[0] - lo[0], hi[1] - lo[1], 1e-6});

@@ -120,7 +120,8 @@ bool flatInset(const Model &m, const Affine &W, const std::vector<double> &move,
     centre = centre / (double)on.size();
     V3 e1 = unit(pts[on[0]] - centre), e2 = cross(n[f], e1);
     std::sort(on.begin(), on.end(), [&](int a, int b) {
-      return std::atan2(dot(pts[a] - centre, e2), dot(pts[a] - centre, e1)) < std::atan2(dot(pts[b] - centre, e2), dot(pts[b] - centre, e1));
+      double ta = std::atan2(dot(pts[a] - centre, e2), dot(pts[a] - centre, e1)), tb = std::atan2(dot(pts[b] - centre, e2), dot(pts[b] - centre, e1));
+      return ta < tb || (ta == tb && a < b);
     });
     loops.push_back(on);
   }
@@ -885,8 +886,9 @@ bool slabsOf(const Solid &S, const std::vector<double> &depth, double size, bool
     bool same = f1 == f2 || (dot(cn[3 * t1 + cornerOf(t1, a)], cn[3 * t2 + cornerOf(t2, a)]) > smooth &&
                              dot(cn[3 * t1 + cornerOf(t1, b)], cn[3 * t2 + cornerOf(t2, b)]) > smooth);
     if (same) {
+      // Joined to the lower number, so each patch's root is its first triangle whatever order the sides come in.
       uint32_t r1 = find(t1), r2 = find(t2);
-      if (r1 != r2) up[r1] = r2;
+      if (r1 != r2) up[std::max(r1, r2)] = std::min(r1, r2);
     }
   }
   std::map<uint32_t, std::vector<uint32_t>> patches;

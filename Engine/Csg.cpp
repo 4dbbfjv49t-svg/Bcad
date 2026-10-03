@@ -401,7 +401,9 @@ void tidy(Welded &w, double eps) {
       if (a < b && l2 < eps * eps) shorts.push_back({l2, a, b});
     }
   if (shorts.empty()) return;
-  std::sort(shorts.begin(), shorts.end(), [](const Short &x, const Short &y) { return x.l2 < y.l2; });
+  std::sort(shorts.begin(), shorts.end(), [](const Short &x, const Short &y) {
+    return x.l2 != y.l2 ? x.l2 < y.l2 : x.a != y.a ? x.a < y.a : x.b < y.b;
+  });
   std::vector<char> dead(nt, 0);
   std::vector<std::vector<uint32_t>> around(w.pts.size());
   for (size_t t = 0; t < nt; t++)

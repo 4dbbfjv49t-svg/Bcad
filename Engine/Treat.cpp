@@ -1434,7 +1434,10 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
     for (V3 p : pts) mid += p;
     mid = mid / (double)pts.size();
     V3 n = s.faces[f].geom.pn, e1 = unit(pts[0] - mid), e2 = cross(n, e1);
-    std::sort(pts.begin(), pts.end(), [&](V3 a, V3 b) { return std::atan2(dot(a - mid, e2), dot(a - mid, e1)) < std::atan2(dot(b - mid, e2), dot(b - mid, e1)); });
+    std::sort(pts.begin(), pts.end(), [&](V3 a, V3 b) {
+      double ta = std::atan2(dot(a - mid, e2), dot(a - mid, e1)), tb = std::atan2(dot(b - mid, e2), dot(b - mid, e1));
+      return ta != tb ? ta < tb : a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
+    });
     int face = B.face(0, s.faces[f].geom);
     for (size_t j = 1; j + 1 < pts.size(); j++) B.triangle(pts[0], pts[j], pts[j + 1], face);
   }
@@ -1494,7 +1497,8 @@ bool fold(Solid &r, double width, bool auxOnly) {
   std::vector<uint32_t> at(r.p.size());
   for (size_t i = 0; i < r.p.size(); i++) at[i] = id.emplace(pkey(r.p[i]), (uint32_t)id.size()).first->second;
   size_t nt = r.triFace.size();
-  std::unordered_map<uint64_t, std::vector<uint32_t>> sides;
+  // (In order: the lengths are summed the same way on every machine.)
+  std::map<uint64_t, std::vector<uint32_t>> sides;
   for (size_t t = 0; t < nt; t++)
     for (int k = 0; k < 3; k++) {
       uint32_t a = at[r.tri[3 * t + k]], b = at[r.tri[3 * t + (k + 1) % 3]];
