@@ -446,7 +446,7 @@ struct ToolRail: View {
             ToolButton(icon: "arrow.down.to.line", title: Action.drop.label, key: Keys.label(s.key(.drop)), tint: lib.accent3, size: 30) { lib.perform(.drop) }
             divider
             ToolButton(icon: "scissors", title: Action.split.label, key: Keys.label(s.key(.split)), tint: lib.accent2, lit: lib.mode == .split, size: 30) { lib.perform(.split) }
-            ToolButton(icon: "app", title: Action.round.label, key: Keys.label(s.key(.round)), tint: lib.accent2, lit: lib.mode == .round, size: 30) { lib.perform(.round) }
+            ToolButton(icon: "angle", title: Action.angles.label, key: Keys.label(s.key(.angles)), tint: lib.accent2, lit: lib.mode == .angles, size: 30) { lib.perform(.angles) }
             ToolButton(icon: "square.dashed.inset.filled", title: Action.hollow.label, key: Keys.label(s.key(.hollow)), tint: lib.accent2,
                        lit: lib.mode == .hollow, size: 30) { lib.perform(.hollow) }
             ToolButton(icon: "ruler", title: Action.measure.label, key: Keys.label(s.key(.measure)), tint: lib.accent2,
@@ -499,7 +499,6 @@ struct ModeBar: View {
 
     private var title: String {
         switch lib.mode {
-        case .round: L("Round edges")
         case .hollow: L("Hollow")
         case .measure: L("Ruler")
         default: L("Split")
@@ -508,7 +507,6 @@ struct ModeBar: View {
 
     private var hint: String {
         switch lib.mode {
-        case .round: lib.edgePicks.isEmpty ? L("Click an edge, a corner or a face · ⇧ adds more") : L("Drag up or down on the pick to round it · Enter applies")
         case .hollow: L("Click faces to open them · ⌥-click a face for its own wall")
         case .measure:
             lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
@@ -526,7 +524,6 @@ struct ModeBar: View {
             .padding(.leading, 4)
             HStack(spacing: 10) {
                 switch lib.mode {
-                case .round: round
                 case .hollow: hollow
                 case .measure: measure
                 default: split
@@ -541,24 +538,6 @@ struct ModeBar: View {
         .padding(.vertical, 8)
         .glassBar(18)
         .halo(lib.accent2, 8)
-    }
-
-    @ViewBuilder private var round: some View {
-        let all = lib.edgePicks.contains { $0.kind == Int32(BK_PICK_BODY) }
-        Chip(text: L("All edges") + " · A", chosen: all, tint: lib.accent2) {
-            if let b = lib.editBody ?? lib.selection.last {
-                lib.editBody = b
-                lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
-            }
-        }
-        MMField(value: lib.roundRadius, unit: L("mm"), range: 0.01...1000, width: 58) { v in
-            lib.roundRadius = v
-            lib.previewRound()
-        }
-        Button(L("Apply")) { lib.commitRound() }
-            .buttonStyle(PillStyle(tint: lib.accent2))
-            .frame(width: 90)
-            .disabled(lib.edgePicks.isEmpty)
     }
 
     // The distance between the ends, along each axis, and the gap between surfaces when it differs.
@@ -1418,6 +1397,12 @@ struct AnglesScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             Hint(text: picks.isEmpty ? L("Click an edge, a corner or a face · ⇧ adds more") : (all ? L("All edges") : L("{n} picks", ["n": picks.count])))
                 .contentTransition(.opacity)
+            Chip(text: L("All edges") + " · A", chosen: all, tint: lib.accent2) {
+                if let b = lib.editBody ?? lib.selection.last {
+                    lib.editBody = b
+                    lib.edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)]
+                }
+            }
             if !picks.isEmpty {
                 Button { lib.workWithAngles() } label: {
                     Label(L("Work with angles"), systemImage: "angle")
@@ -1979,7 +1964,7 @@ struct SettingsPane: View {
         [(L("New · Open · Save"), "⌘N  ⌘O  ⌘S"), (L("Export STL · STEP"), "⇧⌘E  ⌥⌘E"), (L("Undo · Redo"), "⌘Z  ⇧⌘Z"),
          (L("Duplicate · Delete"), "⌘D  ⌫"), (L("Select all"), "⌘A"), (L("Merge"), "⌘U"), (L("Subtract · Intersect"), "⌘⌫  ⌘I"),
          (L("Ungroup"), "⇧⌘G"), (L("Add thread"), "⌘B"), (L("Nudge"), "← → ↑ ↓  PgUp PgDn"), (L("Nudge ×10"), "⇧ + ←→↑↓"),
-         (L("Views: iso, front, back, left, right, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("Round all edges"), "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
+         (L("Views: iso, front, back, left, right, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("All edges") + " (" + L("Angles") + ")", "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
          (L("Apply · Cancel"), "Enter  Esc"), (L("Add to selection"), "⇧/⌘ click"), (L("Orbit"), L("drag empty space")),
          (L("Pan"), L("two-finger scroll · ⇧ drag")), (L("Zoom"), L("pinch · ⌥ scroll")), (L("Move freely"), L("hold ⌘ while dragging")),
          (L("Keep proportions"), L("hold ⇧ while resizing")), (L("Symmetric resizing"), L("hold ⌥ while resizing"))]

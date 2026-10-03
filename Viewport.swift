@@ -333,7 +333,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 rim.w = 0.45 * glow
             }
             let c = SIMD3<Float>(b.color) / 255
-            let facePicking = ((lib.mode == .round || lib.mode == .angles) && lib.hover.edge < 0 && lib.hover.corner < 0) || lib.mode == .hollow
+            let facePicking = (lib.mode == .angles && lib.hover.edge < 0 && lib.hover.corner < 0) || lib.mode == .hollow
             var faceHover = facePicking && hovered ? Int32(lib.hover.face) : -1
             if lib.mode == .measure, let mh = lib.measureHover, mh.snap == .face, mh.body == b.id { faceHover = Int32(mh.index) }
             var u = BodyU(model: model, normalM: nm, color: SIMD4(c, 1), rim: rim, hoverFace: faceHover, flags: selected ? 1 : 0)
@@ -352,7 +352,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setVertexBytes(&mm, length: 64, index: 2)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: g.edgeCount)
             }
-            if lib.mode == .round || lib.mode == .angles {
+            if lib.mode == .angles {
                 if lib.editBody == b.id {
                     let faces = lib.edgePicks.filter { $0.kind == Int32(BK_PICK_FACE) }.compactMap { Picking.face(m, $0) }
                     tint(enc, m, g, model, nm, [(faces, SIMD4(accent2.x, accent2.y, accent2.z, 0.35))])
@@ -789,7 +789,7 @@ final class CadView: MTKView {
     var renderer: Renderer!
     var dragAxis: Int?
     var splitHandle: Int?   // 0, 1: tilt rings · 2: the move arrow
-    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), round, split, tilt(Int) }
+    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), split, tilt(Int) }
     private var drag: Drag = .none
     private var downAt = CGPoint.zero
     private var last = CGPoint.zero
@@ -800,7 +800,6 @@ final class CadView: MTKView {
     private var startPlane = SIMD3<Double>(0, 0, 0)
     private var startOffset = 0.0
     private var startTilt = SIMD2<Double>(0, 0)
-    private var startRadius = 0.0
     private var accum = 0.0
     private var tracking: NSTrackingArea?
     private var startBox: Box?
@@ -1098,7 +1097,7 @@ final class CadView: MTKView {
             let end = measureSnap(p, free: e.modifierFlags.contains(.option))
             if end != lib.measureHover { lib.measureHover = end }
         }
-        if lib.mode == .round || lib.mode == .angles {
+        if lib.mode == .angles {
             hv = roundHover(p)
         } else {
             let h = hitBody(p)
@@ -1149,25 +1148,6 @@ final class CadView: MTKView {
                 return
             }
             lib.pickHollowFace(Pick(kind: Int32(BK_PICK_FACE), a: f.normal, b: f.centroid), ownWall: own)
-            return
-        case .round:
-            let hv = roundHover(p)
-            lib.hover = hv
-            guard let id = hv.body, let pk = pick(for: hv) else { drag = shift ? .pan : .orbit; return }
-            if lib.editBody != id {
-                lib.clearPreview()
-                lib.editBody = id
-                lib.edgePicks = []
-            }
-            if shift {
-                if let i = lib.edgePicks.firstIndex(of: pk) { lib.edgePicks.remove(at: i) } else { lib.edgePicks.append(pk) }
-                drag = .none
-                return
-            }
-            if !lib.edgePicks.contains(pk) && !lib.edgePicks.contains(where: { $0.kind == Int32(BK_PICK_BODY) }) { lib.edgePicks = [pk] }
-            drag = .round
-            startRadius = 0
-            startPlane = hv.point
             return
         case .angles:
             let hv = roundHover(p)
@@ -1281,12 +1261,6 @@ final class CadView: MTKView {
                 f = resize(s0 * f, axis: i, start: st, symmetric: symmetric, low: low) / s0
             }
             lib.stretch(starts, axis: i, by: f, uniform: uniform, symmetric: symmetric, low: low)
-        case .round:
-            let wpp = worldPerPoint(at: startPlane)
-            startRadius += Double(dy) * wpp * 0.6
-            let r = max(0.01, (abs(startRadius) * 100).rounded() / 100)
-            lib.roundRadius = r
-            lib.previewRound()
         case .split:
             guard let plane = lib.splitPlane else { return }
             startOffset += along(plane.normal, dx, dy)
@@ -1330,8 +1304,6 @@ final class CadView: MTKView {
                 lib.measure(end)
             }
             if !moved && (lib.mode == .select || lib.mode == .thread) && !e.modifierFlags.contains(.shift) { lib.selection = [] }
-        case .round:
-            if moved { lib.commitRound() } else { lib.clearPreview() }
         case .scaleAxis:
             if !moved { lib.undoLastIfUnchanged() } else { lib.finishScale() }
         case .ring, .body, .axis:

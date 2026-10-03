@@ -129,26 +129,24 @@ enum SelfTest {
 
         let edge = Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3(0, -10, 10), b: SIMD3(1, 0, 0))
         let face = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))
-        if own { skipped("rounding") } else {
-            let oneEdge = 8000 - (4 - Double.pi) * 20
-            let e = mesh(.round(of: box, picks: [edge], radius: 2))
-            check("round edge", abs((e?.volume ?? 0) - oneEdge) < 1 && e?.valid == true)
-            let corner = Pick(kind: Int32(BK_PICK_CORNER), a: SIMD3(0, 0, 1), b: SIMD3(10, 10, 10))
-            let c = mesh(.round(of: box, picks: [corner], radius: 2))
-            check("round corner", abs((c?.volume ?? 0) - oneEdge) < 1 && c?.valid == true)
-            let f = mesh(.round(of: box, picks: [face], radius: 2))
-            check("round face", f?.valid == true && (f?.volume ?? 8000) < 8000 - 60)
-            let all = mesh(.round(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 2))
-            check("round body", all?.valid == true && (all?.volume ?? 8000) < 8000 - 150 && manifold(all!))
-            let twice = Node.round(of: .round(of: box, picks: [edge], radius: 2), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3)
-            let t2 = mesh(twice)
-            check("round all edges after a rounding", t2?.valid == true && manifold(t2!) && (t2?.volume ?? 8000) < (e?.volume ?? 0))
-            let skewed = Solid(name: "Skewed", color: Palette.colors[0], node: twice, place: Placement(move: SIMD3(-3, -5, 13), turn: SIMD3(0, 0, -60), scale: SIMD3(1.75, 1.3, 1.3)))
-            check("world mesh of a scaled, rotated, rounded body", k.worldMesh(skewed)?.valid == true)
-            _ = k.takeProblems()
-            let tooBig = mesh(.round(of: box, picks: [edge], radius: 40))
-            check("too large radius reported", k.takeProblems().contains { $0.hasPrefix("max:") } && tooBig != nil)
-        }
+        let oneEdge = 8000 - (4 - Double.pi) * 20
+        let e = mesh(.round(of: box, picks: [edge], radius: 2))
+        check("round edge", abs((e?.volume ?? 0) - oneEdge) < 1 && e?.valid == true)
+        let corner = Pick(kind: Int32(BK_PICK_CORNER), a: SIMD3(0, 0, 1), b: SIMD3(10, 10, 10))
+        let c = mesh(.round(of: box, picks: [corner], radius: 2))
+        check("round corner", abs((c?.volume ?? 0) - oneEdge) < 1 && c?.valid == true)
+        let f = mesh(.round(of: box, picks: [face], radius: 2))
+        check("round face", f?.valid == true && (f?.volume ?? 8000) < 8000 - 60)
+        let all = mesh(.round(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 2))
+        check("round body", all?.valid == true && (all?.volume ?? 8000) < 8000 - 150 && manifold(all!))
+        let twice = Node.round(of: .round(of: box, picks: [edge], radius: 2), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3)
+        let t2 = mesh(twice)
+        check("round all edges after a rounding", t2?.valid == true && manifold(t2!) && (t2?.volume ?? 8000) < (e?.volume ?? 0))
+        let skewed = Solid(name: "Skewed", color: Palette.colors[0], node: twice, place: Placement(move: SIMD3(-3, -5, 13), turn: SIMD3(0, 0, -60), scale: SIMD3(1.75, 1.3, 1.3)))
+        check("world mesh of a scaled, rotated, rounded body", k.worldMesh(skewed)?.valid == true)
+        _ = k.takeProblems()
+        let tooBig = mesh(.round(of: box, picks: [edge], radius: 40))
+        check("too large radius reported", k.takeProblems().contains { $0.hasPrefix("max:") } && tooBig != nil)
 
         // Every bolt head and nut: its standard sizes fit at every thread; built at the smallest and largest, it's one closed
         // solid of the size known beforehand, as long as its length (plus a head that isn't countersunk).
@@ -197,81 +195,76 @@ enum SelfTest {
         let roundAll = Node.round(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 2)
         let uprights = [(-10.0, -10.0), (-10, 10), (10, -10), (10, 10)].map { Pick(kind: Int32(BK_PICK_EDGE), a: SIMD3($0.0, $0.1, 0), b: SIMD3(0, 0, 1)) }
         let upright = Node.round(of: box, picks: uprights, radius: 2)
-        if own { skipped("hollowing, rounding and bevelling") } else {
-            let hollows: [(String, Node, Double)] = [
-                ("hollow closed", .hollow(of: box, open: [], walls: [], thickness: 2), 8000 - 4096),
-                ("hollow open top", .hollow(of: box, open: [top], walls: [], thickness: 2), 8000 - 16 * 16 * 18),
-                ("hollow open top, 5 mm bottom", .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), 8000 - 16 * 16 * 15)
-            ]
-            for (name, node, want) in hollows {
-                let m = mesh(node)
-                check(name, m?.valid == true && abs((m?.volume ?? 0) - want) < 0.5, String(format: "%.2f / %.2f mm³", m?.volume ?? 0, want))
-            }
-            let cylTop = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))
-            let cup = mesh(.hollow(of: .primitive(.make(.cylinder)), open: [cylTop], walls: [], thickness: 1.5))
-            check("hollow cylinder", cup?.valid == true && abs((cup?.volume ?? 0) - .pi * (100 * 20 - 8.5 * 8.5 * 18.5)) < 1)
-            let lump = Node.group(op: Int32(BK_UNION), parts: [base, Part(node: .primitive(Primitive(kind: .cylinder, size: [12, 30])), place: Placement(move: SIMD3(10, 0, 5)))])
-            _ = k.takeProblems()
-            let shell = mesh(.hollow(of: lump, open: [], walls: [], thickness: 1.5))
-            check("hollow merged shape", shell?.valid == true && !k.takeProblems().contains("hollow") && (shell?.volume ?? 0) < (mesh(lump)?.volume ?? 0))
-            _ = mesh(.hollow(of: box, open: [top], walls: [], thickness: 12))
-            check("too thick walls reported", k.takeProblems().contains("hollow"))
-
-            // Rounded shapes: hollowed with walls as thick as the rounding (the defaults), closed and with the top open; a
-            // bevel and a rounding beside an earlier rounding; different roundings, and a wall of its own, hollowed.
-            let roundAllVolume = mesh(roundAll)?.volume ?? 0
-            let roundShell = mesh(.hollow(of: roundAll, open: [], walls: [], thickness: 2))
-            check("rounded cube hollowed", roundShell?.valid == true && abs((roundShell?.volume ?? 0) - (roundAllVolume - 4096)) < 1 && !k.takeProblems().contains("hollow"),
-                  String(format: "%.2f / %.2f mm³", roundShell?.volume ?? 0, roundAllVolume - 4096))
-            let roundCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 2))
-            check("rounded cube hollowed with its top open", roundCup?.valid == true && (roundCup?.volume ?? 0) > 0 && (roundCup?.volume ?? 0) < (roundShell?.volume ?? 0)
-                  && !k.takeProblems().contains("hollow"), String(format: "%.2f mm³", roundCup?.volume ?? 0))
-            let thinCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 1))
-            check("rounded cube hollowed with thinner walls than its rounding", thinCup?.valid == true && (thinCup?.volume ?? 0) > 0 && !k.takeProblems().contains("hollow"))
-            let uprightVolume = mesh(upright)?.volume ?? 0
-            let bevelBeside = mesh(.bevel(of: upright, picks: [edge], legs: SIMD2(2, 2), corner: 0))
-            check("bevel beside a rounding", bevelBeside?.valid == true && (bevelBeside?.volume ?? 8000) < uprightVolume - 30 && !k.takeProblems().contains("bevel"),
-                  String(format: "%.2f mm³", bevelBeside?.volume ?? 0))
-            let roundBeside = mesh(.round(of: upright, picks: [face], radius: 2))
-            check("rounding beside a rounding", roundBeside?.valid == true && (roundBeside?.volume ?? 8000) < uprightVolume - 30 && k.takeProblems().isEmpty)
-            // Different roundings meeting at the corners (1 mm up the sides, 2 mm round the top) hollow in moments, not minutes.
-            let started = Date()
-            let mixedCup = mesh(.hollow(of: .round(of: .round(of: box, picks: uprights, radius: 1), picks: [top], radius: 2), open: [top], walls: [], thickness: 2))
-            let took = Date().timeIntervalSince(started)
-            check("a cube rounded 1 mm up its sides and 2 mm round its top is hollowed", mixedCup?.valid == true && abs((mixedCup?.volume ?? 0) - 3309.6) < 1
-                  && !k.takeProblems().contains("hollow") && took < 30, String(format: "%.2f mm³ · %.1f s", mixedCup?.volume ?? 0, took))
-            // A face with a wall of its own beside roundings gets just that wall (4 mm on +x, 2 mm elsewhere).
-            let side = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(1, 0, 0), b: SIMD3(10, 0, 0))
-            let ownWall = mesh(.hollow(of: roundAll, open: [], walls: [Wall(face: side, thickness: 4)], thickness: 2))
-            check("a rounded cube with a thicker wall of its own", ownWall?.valid == true && abs((ownWall?.volume ?? 0) - (roundAllVolume - 14 * 16 * 16)) < 1
-                  && !k.takeProblems().contains("hollow"), String(format: "%.2f / %.2f mm³", ownWall?.volume ?? 0, roundAllVolume - 14 * 16 * 16))
+        let hollows: [(String, Node, Double)] = [
+            ("hollow closed", .hollow(of: box, open: [], walls: [], thickness: 2), 8000 - 4096),
+            ("hollow open top", .hollow(of: box, open: [top], walls: [], thickness: 2), 8000 - 16 * 16 * 18),
+            ("hollow open top, 5 mm bottom", .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), 8000 - 16 * 16 * 15)
+        ]
+        for (name, node, want) in hollows {
+            let m = mesh(node)
+            check(name, m?.valid == true && abs((m?.volume ?? 0) - want) < 0.5, String(format: "%.2f / %.2f mm³", m?.volume ?? 0, want))
         }
+        let cylTop = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))
+        let cup = mesh(.hollow(of: .primitive(.make(.cylinder)), open: [cylTop], walls: [], thickness: 1.5))
+        check("hollow cylinder", cup?.valid == true && abs((cup?.volume ?? 0) - .pi * (100 * 20 - 8.5 * 8.5 * 18.5)) < 1)
+        let lump = Node.group(op: Int32(BK_UNION), parts: [base, Part(node: .primitive(Primitive(kind: .cylinder, size: [12, 30])), place: Placement(move: SIMD3(10, 0, 5)))])
+        _ = k.takeProblems()
+        let shell = mesh(.hollow(of: lump, open: [], walls: [], thickness: 1.5))
+        check("hollow merged shape", shell?.valid == true && !k.takeProblems().contains("hollow") && (shell?.volume ?? 0) < (mesh(lump)?.volume ?? 0))
+        _ = mesh(.hollow(of: box, open: [top], walls: [], thickness: 12))
+        check("too thick walls reported", k.takeProblems().contains("hollow"))
+
+        // Rounded shapes: hollowed with walls as thick as the rounding (the defaults), closed and with the top open; a
+        // bevel and a rounding beside an earlier rounding; different roundings, and a wall of its own, hollowed.
+        let roundAllVolume = mesh(roundAll)?.volume ?? 0
+        let roundShell = mesh(.hollow(of: roundAll, open: [], walls: [], thickness: 2))
+        check("rounded cube hollowed", roundShell?.valid == true && abs((roundShell?.volume ?? 0) - (roundAllVolume - 4096)) < 1 && !k.takeProblems().contains("hollow"),
+              String(format: "%.2f / %.2f mm³", roundShell?.volume ?? 0, roundAllVolume - 4096))
+        let roundCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 2))
+        check("rounded cube hollowed with its top open", roundCup?.valid == true && (roundCup?.volume ?? 0) > 0 && (roundCup?.volume ?? 0) < (roundShell?.volume ?? 0)
+              && !k.takeProblems().contains("hollow"), String(format: "%.2f mm³", roundCup?.volume ?? 0))
+        let thinCup = mesh(.hollow(of: roundAll, open: [top], walls: [], thickness: 1))
+        check("rounded cube hollowed with thinner walls than its rounding", thinCup?.valid == true && (thinCup?.volume ?? 0) > 0 && !k.takeProblems().contains("hollow"))
+        let uprightVolume = mesh(upright)?.volume ?? 0
+        let bevelBeside = mesh(.bevel(of: upright, picks: [edge], legs: SIMD2(2, 2), corner: 0))
+        check("bevel beside a rounding", bevelBeside?.valid == true && (bevelBeside?.volume ?? 8000) < uprightVolume - 30 && !k.takeProblems().contains("bevel"),
+              String(format: "%.2f mm³", bevelBeside?.volume ?? 0))
+        let roundBeside = mesh(.round(of: upright, picks: [face], radius: 2))
+        check("rounding beside a rounding", roundBeside?.valid == true && (roundBeside?.volume ?? 8000) < uprightVolume - 30 && k.takeProblems().isEmpty)
+        // Different roundings meeting at the corners (1 mm up the sides, 2 mm round the top) hollow in moments, not minutes.
+        let started = Date()
+        let mixedCup = mesh(.hollow(of: .round(of: .round(of: box, picks: uprights, radius: 1), picks: [top], radius: 2), open: [top], walls: [], thickness: 2))
+        let took = Date().timeIntervalSince(started)
+        check("a cube rounded 1 mm up its sides and 2 mm round its top is hollowed", mixedCup?.valid == true && abs((mixedCup?.volume ?? 0) - 3309.6) < 1
+              && !k.takeProblems().contains("hollow") && took < 30, String(format: "%.2f mm³ · %.1f s", mixedCup?.volume ?? 0, took))
+        // A face with a wall of its own beside roundings gets just that wall (4 mm on +x, 2 mm elsewhere).
+        let side = Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(1, 0, 0), b: SIMD3(10, 0, 0))
+        let ownWall = mesh(.hollow(of: roundAll, open: [], walls: [Wall(face: side, thickness: 4)], thickness: 2))
+        check("a rounded cube with a thicker wall of its own", ownWall?.valid == true && abs((ownWall?.volume ?? 0) - (roundAllVolume - 14 * 16 * 16)) < 1
+              && !k.takeProblems().contains("hollow"), String(format: "%.2f / %.2f mm³", ownWall?.volume ?? 0, roundAllVolume - 14 * 16 * 16))
 
         let oval = mesh(.primitive(Primitive(kind: .oval, size: [20, 12, 90, 20])))
         check("oval cylinder", oval?.valid == true && abs((oval?.volume ?? 0) - .pi * 10 * 6 * 20) < 1, String(format: "%.2f mm³", oval?.volume ?? 0))
         let skew = mesh(.primitive(Primitive(kind: .oval, size: [20, 12, 60, 20])))
         let skewWant = Double.pi * 10 * 6 * sin(Double.pi / 3) * 20
         check("skewed oval cylinder", skew?.valid == true && abs((skew?.volume ?? 0) - skewWant) < 1, String(format: "%.2f / %.2f mm³", skew?.volume ?? 0, skewWant))
-        if own { skipped("bevels and inward roundings") } else {
-            let bevel = mesh(.bevel(of: box, picks: [edge], legs: SIMD2(2, 4), corner: 0))
-            check("bevel 2 × 4 mm", bevel?.valid == true && abs((bevel?.volume ?? 0) - (8000 - 80)) < 0.5, String(format: "%.2f mm³", bevel?.volume ?? 0))
-            let soft = mesh(.bevel(of: box, picks: [edge], legs: SIMD2(2, 2), corner: 0.5))
-            check("softened bevel", soft?.valid == true && (soft?.volume ?? 8000) < 8000 - 40, String(format: "%.2f mm³", soft?.volume ?? 0))
-            let cove = mesh(.cove(of: box, picks: [edge], radius: 3))
-            let coveWant = 8000 - Double.pi * 9 / 4 * 20
-            check("inward rounding", cove?.valid == true && abs((cove?.volume ?? 0) - coveWant) < 1, String(format: "%.2f / %.2f mm³", cove?.volume ?? 0, coveWant))
-            let coves = mesh(.cove(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1))
-            check("inward rounding on all edges", coves?.valid == true && (coves?.volume ?? 8000) < 8000 && manifold(coves!))
-        }
+        let bevel = mesh(.bevel(of: box, picks: [edge], legs: SIMD2(2, 4), corner: 0))
+        check("bevel 2 × 4 mm", bevel?.valid == true && abs((bevel?.volume ?? 0) - (8000 - 80)) < 0.5, String(format: "%.2f mm³", bevel?.volume ?? 0))
+        let soft = mesh(.bevel(of: box, picks: [edge], legs: SIMD2(2, 2), corner: 0.5))
+        check("softened bevel", soft?.valid == true && (soft?.volume ?? 8000) < 8000 - 40, String(format: "%.2f mm³", soft?.volume ?? 0))
+        let cove = mesh(.cove(of: box, picks: [edge], radius: 3))
+        let coveWant = 8000 - Double.pi * 9 / 4 * 20
+        check("inward rounding", cove?.valid == true && abs((cove?.volume ?? 0) - coveWant) < 1, String(format: "%.2f / %.2f mm³", cove?.volume ?? 0, coveWant))
+        let coves = mesh(.cove(of: box, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1))
+        check("inward rounding on all edges", coves?.valid == true && (coves?.volume ?? 8000) < 8000 && manifold(coves!))
         let holed = mesh(.group(op: Int32(BK_SUBTRACT), parts: [base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())]))
         let rims = holed?.circles.filter { abs($0.radius - 4) < 1e-6 && abs($0.center.x) < 1e-6 && abs($0.center.y) < 1e-6 && abs(abs($0.center.z) - 10) < 1e-6 } ?? []
         check("a hole's rims are found", rims.count >= 2, "\(holed?.circles.count ?? 0) circles")
         let topEdges = mesh(box).map { Picking.faceEdges($0, Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(0, 0, 1), b: SIMD3(0, 0, 10))).count }
         check("a face knows its edges", topEdges == 4, "\(topEdges ?? 0) edges")
-        if own { skipped("cuts for the angle editor, threaded holes") } else {
-            let cut = k.section(box, edge)
-            check("cut through an edge", cut.map { abs($0.angle - 90) < 0.01 && $0.loops.count == 1 } == true, cut.map { String(format: "%.1f° · %d loops", $0.angle, $0.loops.count) } ?? "none")
-
+        let cut = k.section(box, edge)
+        check("cut through an edge", cut.map { abs($0.angle - 90) < 0.01 && $0.loops.count == 1 } == true, cut.map { String(format: "%.1f° · %d loops", $0.angle, $0.loops.count) } ?? "none")
+        if own { skipped("threaded holes") } else {
             let block = Part(node: .primitive(Primitive(kind: .box, size: [30, 30, 20])), place: Placement())
             let bolt = Part(node: .fastener(Fastener(kind: .rod, size: 4)), place: Placement())
             let t0 = Date()
@@ -281,22 +274,22 @@ enum SelfTest {
 
         var doc = Document()
         let mixed = SIMD3<UInt8>(12, 34, 56)
-        // On Bcad's own engine: shapes it makes (a holed block, a half sphere, an oval, a hex ring).
-        let ownShapes = [Solid(name: "Cube", color: mixed, node: box),
-                         Solid(name: "Holed", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [
-                             base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())
-                         ]), place: Placement(move: SIMD3(40, 0, 10))),
-                         Solid(name: "Half", color: Palette.colors[2], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-40, 0, 10))),
-                         Solid(name: "Oval", color: Palette.colors[3], node: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])), place: Placement(move: SIMD3(0, 40, 10))),
-                         Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
-        doc.bodies = own ? ownShapes : [Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2)),
-                      Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(40, 0, 15))),
-                      Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10))),
-                      Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
-                      Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
-                                                                 picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
-                      Solid(name: "Bevelled", color: Palette.colors[4], node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10))),
-                      Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
+        // Treated shapes (hollowed, inward-rounded, bevelled) on either engine; bolts on OpenCascade's, a holed block and a
+        // half sphere on Bcad's own.
+        let treated = [Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
+                       Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
+                                                                  picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
+                       Solid(name: "Bevelled", color: Palette.colors[4], node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10))),
+                       Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
+        let cube = Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2))
+        doc.bodies = own ? [cube,
+                            Solid(name: "Holed", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [
+                                base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())
+                            ]), place: Placement(move: SIMD3(40, 0, 10))),
+                            Solid(name: "Half", color: Palette.colors[6], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-80, 0, 10)))] + treated
+            : [cube,
+               Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(40, 0, 15))),
+               Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10)))] + treated
         let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
         let u3 = dir.appendingPathComponent("test.3mf")
         try? ThreeMF.write(u3, meshes: meshes, doc: doc)
@@ -588,64 +581,62 @@ enum SelfTest {
         }
 
         // A treatment that doesn't fit never enters the document (it's said once); one that fits goes in.
-        if own { skipped("hollowing in the workbench") } else {
-            let roundAllVolume = k.queue.sync { k.mesh(roundAll)?.volume ?? 0 }
-            let plain = Solid(name: "Plain", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
-            use([plain])
-            lib.selection = [plain.id]
-            lib.enter(.hollow)
-            lib.hollowOpen = [top]
-            lib.hollowThickness = 12
-            lib.note = nil
-            let unchanged = lib.doc
-            lib.commitHollow()
-            settle()
-            check("walls that don't fit change nothing and say so", lib.doc == unchanged && lib.mode == .hollow
-                  && lib.note == L("These walls don't fit this shape — try thinner walls"), lib.note ?? "no message")
-            lib.cancelMode()
-            let softCube = Solid(name: "Soft", color: Palette.colors[1], node: roundAll, place: Placement(move: SIMD3(0, 0, 10)))
-            use([softCube])
-            lib.selection = [softCube.id]
-            lib.enter(.hollow)
-            lib.hollowOpen = [top]
-            lib.hollowThickness = 2
-            lib.note = nil
-            lib.commitHollow()
-            settle()
-            let cupped = lib.body(softCube.id).map { if case .hollow = $0.node { true } else { false } } == true
-            check("a rounded cube is hollowed with its top open", cupped && lib.mode == .select && lib.note == nil
-                  && (lib.meshes[softCube.id]?.volume ?? 0) < roundAllVolume - 1000, lib.note ?? "")
+        let roundAllVolume = k.queue.sync { k.mesh(roundAll)?.volume ?? 0 }
+        let plain = Solid(name: "Plain", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
+        use([plain])
+        lib.selection = [plain.id]
+        lib.enter(.hollow)
+        lib.hollowOpen = [top]
+        lib.hollowThickness = 12
+        lib.note = nil
+        let unchanged = lib.doc
+        lib.commitHollow()
+        settle()
+        check("walls that don't fit change nothing and say so", lib.doc == unchanged && lib.mode == .hollow
+              && lib.note == L("These walls don't fit this shape — try thinner walls"), lib.note ?? "no message")
+        lib.cancelMode()
+        let softCube = Solid(name: "Soft", color: Palette.colors[1], node: roundAll, place: Placement(move: SIMD3(0, 0, 10)))
+        use([softCube])
+        lib.selection = [softCube.id]
+        lib.enter(.hollow)
+        lib.hollowOpen = [top]
+        lib.hollowThickness = 2
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        let cupped = lib.body(softCube.id).map { if case .hollow = $0.node { true } else { false } } == true
+        check("a rounded cube is hollowed with its top open", cupped && lib.mode == .select && lib.note == nil
+              && (lib.meshes[softCube.id]?.volume ?? 0) < roundAllVolume - 1000, lib.note ?? "")
 
-            // Hollow on a hollowed shape changes that hollow (beneath a later rounding too) rather than hollowing it again;
-            // a sphere's one surface can't be opened.
-            let shut = Solid(name: "Shut", color: Palette.colors[2], node: .hollow(of: box, open: [], walls: [], thickness: 2), place: Placement(move: SIMD3(0, 0, 10)))
-            use([shut])
-            lib.selection = [shut.id]
-            lib.hollowThickness = 1
-            lib.enter(.hollow)
-            let loaded = lib.hollowThickness == 2 && lib.hollowOpen.isEmpty && lib.editBody == shut.id
-            lib.pickHollowFace(top, ownWall: false)
-            lib.note = nil
-            lib.commitHollow()
-            settle()
-            check("a hollowed box gets its top opened later", loaded && lib.body(shut.id)?.node == .hollow(of: box, open: [top], walls: [], thickness: 2)
-                  && abs((lib.meshes[shut.id]?.volume ?? 0) - (8000 - 16 * 16 * 18)) < 0.5 && lib.note == nil, lib.note ?? "")
-            lib.enter(.hollow)
-            lib.pickHollowFace(Pick(kind: top.kind, a: top.a, b: top.b + SIMD3(0.01, 0.01, 0)), ownWall: false)
-            check("clicking an opening again closes it", lib.hollowOpen.isEmpty && lib.hollowThickness == 2)
-            lib.cancelMode()
-            let roundedShut = Solid(name: "Rounded shut", color: Palette.colors[3], node: .round(of: .hollow(of: box, open: [], walls: [], thickness: 2), picks: uprights, radius: 1),
-                                    place: Placement(move: SIMD3(0, 0, 10)))
-            use([roundedShut])
-            lib.selection = [roundedShut.id]
-            lib.enter(.hollow)
-            lib.pickHollowFace(top, ownWall: false)
-            lib.note = nil
-            lib.commitHollow()
-            settle()
-            check("a hollow beneath a rounding is opened in place",
-                  lib.body(roundedShut.id)?.node == .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: uprights, radius: 1) && lib.note == nil, lib.note ?? "")
-        }
+        // Hollow on a hollowed shape changes that hollow (beneath a later rounding too) rather than hollowing it again;
+        // a sphere's one surface can't be opened.
+        let shut = Solid(name: "Shut", color: Palette.colors[2], node: .hollow(of: box, open: [], walls: [], thickness: 2), place: Placement(move: SIMD3(0, 0, 10)))
+        use([shut])
+        lib.selection = [shut.id]
+        lib.hollowThickness = 1
+        lib.enter(.hollow)
+        let loaded = lib.hollowThickness == 2 && lib.hollowOpen.isEmpty && lib.editBody == shut.id
+        lib.pickHollowFace(top, ownWall: false)
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        check("a hollowed box gets its top opened later", loaded && lib.body(shut.id)?.node == .hollow(of: box, open: [top], walls: [], thickness: 2)
+              && abs((lib.meshes[shut.id]?.volume ?? 0) - (8000 - 16 * 16 * 18)) < 0.5 && lib.note == nil, lib.note ?? "")
+        lib.enter(.hollow)
+        lib.pickHollowFace(Pick(kind: top.kind, a: top.a, b: top.b + SIMD3(0.01, 0.01, 0)), ownWall: false)
+        check("clicking an opening again closes it", lib.hollowOpen.isEmpty && lib.hollowThickness == 2)
+        lib.cancelMode()
+        let roundedShut = Solid(name: "Rounded shut", color: Palette.colors[3], node: .round(of: .hollow(of: box, open: [], walls: [], thickness: 2), picks: uprights, radius: 1),
+                                place: Placement(move: SIMD3(0, 0, 10)))
+        use([roundedShut])
+        lib.selection = [roundedShut.id]
+        lib.enter(.hollow)
+        lib.pickHollowFace(top, ownWall: false)
+        lib.note = nil
+        lib.commitHollow()
+        settle()
+        check("a hollow beneath a rounding is opened in place",
+              lib.body(roundedShut.id)?.node == .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: uprights, radius: 1) && lib.note == nil, lib.note ?? "")
         let ball = k.queue.sync { k.mesh(.primitive(.make(.sphere))) }, cubeMesh = k.queue.sync { k.mesh(box) }
         check("a sphere's one surface can't be opened, a box's faces can", ball.map { Picking.alone($0, 0) } == true
               && cubeMesh.map { m in !m.faceInfo.isEmpty && m.faceInfo.indices.allSatisfy { !Picking.alone(m, $0) } } == true)
@@ -713,39 +704,40 @@ enum SelfTest {
         lib.splitOffset = 0
         check("the split plane covers every cut through the selection", uncovered == 0, "\(uncovered) points outside")
 
-        // Angles on a shape with rounded edges: a 2 mm bevel beside the rounding goes in.
-        if own { skipped("the angle editor") } else {
-            let upstanding = Solid(name: "Upright", color: Palette.colors[3], node: upright, place: Placement(move: SIMD3(0, 0, 10)))
-            use([upstanding])
-            lib.selection = [upstanding.id]
-            lib.choose(.angles)
-            if let section = k.queue.sync({ k.section(upright, edge) }) {
-                var a = AngleEdit(body: upstanding.id, picks: [edge], section: section)
-                a.treatment = .angled
-                a.legs = SIMD2(2, 2)
-                lib.angleEdit = a
-                lib.note = nil
-                lib.applyAngles()
-                settle()
-            }
-            let bevelled = lib.body(upstanding.id).map { if case .bevel = $0.node { true } else { false } } == true
-            check("an Angles bevel beside a rounding goes in", bevelled && lib.angleEdit == nil && lib.note == nil, lib.note ?? "")
-
-            // The angle editor opens on a side face of a rounded, hollowed cup.
-            let cupBody = Solid(name: "Cup", color: Palette.colors[4], node: .hollow(of: .round(of: box, picks: [top], radius: 2), open: [top], walls: [], thickness: 2),
-                            place: Placement(move: SIMD3(0, 0, 10)))
-            use([cupBody])
-            lib.selection = [cupBody.id]
-            lib.choose(.move)
-            lib.choose(.angles)
-            lib.edgePicks = [Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(-1, 0, 0), b: SIMD3(-10, 0, -1))]
-            let opening = Date()
-            lib.workWithAngles()
-            while lib.angleEdit == nil && Date().timeIntervalSince(opening) < 60 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-            check("the angle editor opens on a rounded, hollowed cup", lib.angleEdit != nil, String(format: "%.1f s · %@", Date().timeIntervalSince(opening), lib.note ?? ""))
-            lib.closeAngles()
-            lib.cancelMode()
+        // Angles is the one way to round, bevel or round inward, its key R (once the rounding tool's): on a shape with rounded
+        // edges, a 2 mm bevel beside the rounding goes in.
+        let upstanding = Solid(name: "Upright", color: Palette.colors[3], node: upright, place: Placement(move: SIMD3(0, 0, 10)))
+        use([upstanding])
+        lib.selection = [upstanding.id]
+        lib.choose(.move)
+        lib.perform(.angles)
+        check("R opens Angles", lib.settings.key(.angles) == "KeyR" && lib.screen == .angles && lib.mode == .angles && lib.editBody == upstanding.id)
+        if let section = k.queue.sync({ k.section(upright, edge) }) {
+            var a = AngleEdit(body: upstanding.id, picks: [edge], section: section)
+            a.treatment = .angled
+            a.legs = SIMD2(2, 2)
+            lib.angleEdit = a
+            lib.note = nil
+            lib.applyAngles()
+            settle()
         }
+        let bevelled = lib.body(upstanding.id).map { if case .bevel = $0.node { true } else { false } } == true
+        check("an Angles bevel beside a rounding goes in", bevelled && lib.angleEdit == nil && lib.note == nil, lib.note ?? "")
+
+        // The angle editor opens on a side face of a rounded, hollowed cup.
+        let cupBody = Solid(name: "Cup", color: Palette.colors[4], node: .hollow(of: .round(of: box, picks: [top], radius: 2), open: [top], walls: [], thickness: 2),
+                        place: Placement(move: SIMD3(0, 0, 10)))
+        use([cupBody])
+        lib.selection = [cupBody.id]
+        lib.choose(.move)
+        lib.choose(.angles)
+        lib.edgePicks = [Pick(kind: Int32(BK_PICK_FACE), a: SIMD3(-1, 0, 0), b: SIMD3(-10, 0, -1))]
+        let opening = Date()
+        lib.workWithAngles()
+        while lib.angleEdit == nil && Date().timeIntervalSince(opening) < 60 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        check("the angle editor opens on a rounded, hollowed cup", lib.angleEdit != nil, String(format: "%.1f s · %@", Date().timeIntervalSince(opening), lib.note ?? ""))
+        lib.closeAngles()
+        lib.cancelMode()
 
         // Problems left by other work (a save, a cut) aren't said at the next rebuild.
         _ = k.queue.sync { k.mesh(.hollow(of: box, open: [top], walls: [], thickness: 13)) }
@@ -754,7 +746,7 @@ enum SelfTest {
         check("nothing left over from other work is said later", lib.note == nil, lib.note ?? "")
 
         // A file from an earlier version keeps colours as palette numbers: it opens, with those colours.
-        let oldNode = own ? box : roundAll
+        let oldNode = roundAll
         let earlier = Document(bodies: [Solid(name: "Old", color: Palette.colors[2], node: oldNode, place: Placement(move: SIMD3(0, 0, 10)))])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -766,10 +758,8 @@ enum SelfTest {
         check("a file from an earlier version opens", oldJSON.contains("\"color\":2") && lib.doc.bodies.first?.color == Palette.colors[2]
               && lib.doc.bodies.first?.node == oldNode && lib.doc.bodies.first.map { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) } == true)
 
-        // A rounded and hollowed cube (a cube with a hole cut in it on Bcad's own engine), a ring and a torus saved together
-        // reopen with every shape shown and nothing said.
-        let cupNode: Node = own ? .group(op: Int32(BK_SUBTRACT), parts: [base, Part(node: .primitive(Primitive(kind: .cylinder, size: [14, 20])), place: Placement(move: SIMD3(0, 0, 5)))])
-            : .hollow(of: roundAll, open: [top], walls: [], thickness: 2)
+        // A rounded and hollowed cube, a ring and a torus saved together reopen with every shape shown and nothing said.
+        let cupNode: Node = .hollow(of: roundAll, open: [top], walls: [], thickness: 2)
         let kept = Document(bodies: [
             Solid(name: "Cup", color: Palette.colors[0], node: cupNode, place: Placement(move: SIMD3(0, 0, 10))),
             Solid(name: "Ring", color: Palette.colors[1], node: .primitive(.make(.ring)), place: Placement(move: SIMD3(30, 0, 2.5))),

@@ -1001,14 +1001,15 @@ final class Kernel: @unchecked Sendable {
 // MARK: - Settings
 
 enum Action: String, CaseIterable, Codable {
-    case move, rotate, scale, round, split, hollow, measure, drop, frame, hide, showAll
+    // Angles was once a separate rounding tool's key: settings saved then know it by that name.
+    case move, rotate, scale, angles = "round", split, hollow, measure, drop, frame, hide, showAll
 
     var name: String {
         switch self {
         case .move: "Move"
         case .rotate: "Rotate"
         case .scale: "Scale"
-        case .round: "Round edges"
+        case .angles: "Angles"
         case .split: "Split"
         case .hollow: "Hollow"
         case .measure: "Measure"
@@ -1082,10 +1083,10 @@ enum Paths {
 }
 
 enum Mode: Equatable {
-    case select, round, split, hollow, angles, thread, measure
+    case select, split, hollow, angles, thread, measure
 
     // A tool with its own bar at the bottom in place of the inspector.
-    var isTool: Bool { [.round, .split, .hollow, .measure].contains(self) }
+    var isTool: Bool { [.split, .hollow, .measure].contains(self) }
 }
 
 // The inspector's screens: its segments and the gizmo they bring.
@@ -1348,7 +1349,6 @@ final class Workbench: DesignHost {
     var hover = Hover()
     var editBody: UUID?
     var edgePicks: [Pick] = []
-    var roundRadius = 2.0
     var hollowOpen: [Pick] = []
     var hollowWalls: [Wall] = []
     var hollowThickness = 2.0
@@ -1384,8 +1384,6 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var built: [UUID: Node] = [:]
     @ObservationIgnored private var builtClearance = -1.0
     @ObservationIgnored private var pendingBuild = false
-    @ObservationIgnored private var previewBusy = false
-    @ObservationIgnored private var previewAgain = false
     // New shapes being tried before they go into the document.
     @ObservationIgnored private(set) var trying = false
     @ObservationIgnored private var flashTask: Task<Void, Never>?
@@ -2050,52 +2048,6 @@ final class Workbench: DesignHost {
         }
     }
 
-    // MARK: rounding
-
-    func commitRound() {
-        guard let id = editBody, let b = body(id), !edgePicks.isEmpty, roundRadius >= 0.01 else { return }
-        let node = Node.round(of: b.node, picks: edgePicks, radius: roundRadius)
-        tryThen([node]) { [weak self] in
-            guard let self, self.body(id)?.node == b.node else { return }
-            self.commit { d in
-                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = node }
-            }
-            self.edgePicks = []
-        }
-    }
-
-    // Live rounding while dragging: builds the rounded shape in the background, newest radius wins.
-    func previewRound() {
-        guard let id = editBody, let b = body(id), !edgePicks.isEmpty else { return }
-        if previewBusy { previewAgain = true; return }
-        previewBusy = true
-        let node = Node.round(of: b.node, picks: edgePicks, radius: roundRadius)
-        let clearance = settings.clearance
-        Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
-            let (mesh, problems) = Kernel.shared.attempt(node)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self.previewBusy = false
-                    guard self.mode == .round, self.editBody == id else { return }
-                    if let mesh {
-                        self.meshes[id] = mesh
-                        self.built[id] = node
-                    }
-                    self.report(problems)
-                    if self.previewAgain { self.previewAgain = false; self.previewRound() }
-                }
-            }
-        }
-    }
-
-    // Puts back the body's own mesh after a preview that wasn't applied.
-    func clearPreview() {
-        guard let id = editBody, let b = body(id), built[id] != b.node else { return }
-        built[id] = nil
-        rebuildScene()
-    }
-
     // After a move or turn: shapes stay where the drag left them, as after a resize.
     func finishTransform() {
         sceneVersion += 1
@@ -2425,9 +2377,8 @@ final class Workbench: DesignHost {
     }
 
     func choose(_ s: Screen) {
-        // The current screen again does nothing, unless a tool (split, round, hollow) has the inspector hidden.
+        // The current screen again does nothing, unless a tool (split, hollow, the ruler) has the inspector hidden.
         guard s != screen || mode.isTool else { return }
-        if mode == .round { clearPreview() }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
             switch s {
@@ -2576,7 +2527,6 @@ final class Workbench: DesignHost {
 
     func enter(_ m: Mode) {
         if m == .split && selection.isEmpty { flash(L("Select a shape to split")); return }
-        if mode == .round { clearPreview() }
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
@@ -2590,7 +2540,6 @@ final class Workbench: DesignHost {
     func cancelMode() {
         if angleEdit != nil { closeAngles(); return }
         if mode == .measure, measureA != nil { clearMeasure(); return }
-        if mode == .round { clearPreview() }
         withAnimation(Neon.spring) {
             if mode != .select { mode = .select } else { selection = [] }
             edgePicks = []
@@ -2742,7 +2691,6 @@ final class Workbench: DesignHost {
         case "Enter":
             if angleEdit != nil { applyAngles(); return true }
             if mode == .split { split(); return true }
-            if mode == .round { commitRound(); return true }
             if mode == .hollow { commitHollow(); return true }
             return false
         case "Backspace":
@@ -2751,7 +2699,7 @@ final class Workbench: DesignHost {
             nudge(name, big: shift); return true
         case "KeyX" where mode == .split, "KeyZ" where mode == .split:
             withAnimation(Neon.spring) { splitAxis = name == "KeyX" ? 0 : 2 }; return true
-        case "KeyA" where mode == .round || mode == .angles && angleEdit == nil:
+        case "KeyA" where mode == .angles && angleEdit == nil:
             if let b = editBody ?? selection.last { editBody = b; edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] }
             return true
         default: break
@@ -2770,7 +2718,7 @@ final class Workbench: DesignHost {
         case .move: choose(.move)
         case .rotate: choose(.rotate)
         case .scale: choose(.resize)
-        case .round: enter(.round)
+        case .angles: choose(.angles)
         case .split: enter(.split)
         case .hollow: enter(.hollow)
         case .measure: enter(.measure)
@@ -3046,7 +2994,7 @@ struct BcadApp: App {
                 Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift])
                 Divider()
                 Button(L("Split")) { lib.enter(.split) }
-                Button(L("Round edges")) { lib.enter(.round) }
+                Button(L("Angles")) { lib.choose(.angles) }
                 Divider()
                 Button(L("Hollow")) { lib.enter(.hollow) }
                 Button(L("Measure")) { lib.enter(.measure) }
