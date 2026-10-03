@@ -421,7 +421,9 @@ jobs:
           $U hold Cylinder 0.5 0.5 60; sleep 2
           $U key 15; sleep 2
           $U key 0; sleep 1
-          $U press "Work with angles"; sleep 6
+          $U press "Work with angles"
+          for t in 1 2 3 4 5 6; do date +%T; shot "ui-05-cyl-$t" 0; sleep 1; done
+          sleep 4
           $U press "Angled corner"; sleep 3
           shot ui-06-bevel-editor 1
           $U press Apply; sleep 8
