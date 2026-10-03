@@ -400,7 +400,10 @@ bool ringTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 centre, V3 axis, int aro
     for (size_t i = 0; i < n; i++) {
       const auto &r = sec.runs[i];
       V3 p = rh(r.p), q = rh(sec.runs[(i + 1) % n].p);
-      if (p.x <= 0) return false;
+      // On the axis (a section cut off there) within rounding: on it.
+      if (std::fabs(p.x) < 1e-9 * (1 + R)) p.x = 0;
+      if (std::fabs(q.x) < 1e-9 * (1 + R)) q.x = 0;
+      if (p.x < 0) return false;
       if (!r.arc) {
         profile.push_back(Elem::line(p.x, p.y, q.x, q.y));
         continue;
@@ -1311,6 +1314,13 @@ double faceRoom(const Solid &s, int f, const std::vector<double> &setback) {
       if (it == from.end()) break;
       i = it->second;
     }
+    // The loop may have started part way along a side: its two parts, last and first, one side.
+    while (loop.size() > 3 && loop.back().t == loop.front().t &&
+           std::fabs(cross2(unit(loop.back().b - loop.back().a), unit(loop.front().b - loop.front().a))) < 1e-9 &&
+           dot(loop.back().b - loop.back().a, loop.front().b - loop.front().a) > 0) {
+      loop.front().a = loop.back().a;
+      loop.pop_back();
+    }
     std::vector<V3> outline;
     for (auto &sd : loop) outline.push_back(sd.a);
     if (loop.size() < 3 || area2(outline) <= 0) continue;
@@ -1368,6 +1378,11 @@ double faceRoom(const Solid &s, int f, const std::vector<double> &setback) {
       lines.swap(left);
       for (size_t j = 0; j < lines.size(); j++)
         if (dot(lines[j].d, lines[(j + 1) % lines.size()].d) < -1 + 1e-9) lines.clear();
+      // Two left side by side running the same way: one (the first's line).
+      for (size_t j = 0; lines.size() > 3 && j < lines.size();) {
+        if (dot(lines[j].d, lines[(j + 1) % lines.size()].d) > 1 - 1e-12) lines.erase(lines.begin() + (long)((j + 1) % lines.size()));
+        else j++;
+      }
     }
     if (lines.size() < 3) room = std::min(room, k);
   }
@@ -1955,6 +1970,13 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
             for (size_t k = 0; k < n && even; k++) even = std::fabs(angle[k] - 2 * pi * k / n) < 1e-7;
             if (even) around = (int)n, x0 = e1;
           }
+        }
+        // A section reaching past the axis (a bevel wide on a small disc) cut off there: nothing lies beyond it.
+        V3 out = (E - centre) - axis * dot(E - centre, axis), g = p2(dot(U, unit(out)), dot(N, unit(out)));
+        for (auto &sec : secs) {
+          bool cutAway;
+          Section2 part = clipped(asRuns(sec, d), g, -norm(out), cutAway);
+          if (cutAway && part.runs.size() >= 2) sec = part;
         }
         for (const auto &sec : secs) {
           Solid tool;

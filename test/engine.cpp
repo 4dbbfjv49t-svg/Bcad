@@ -861,6 +861,17 @@ int main() {
       // A face both opened and given a wall of its own: open (as OpenCascade's kernel takes it).
       double cy[2] = {25.0234, 25.4184}, cyTop[6] = {0, 0, 1, 0, 0, 12.7092}, three = 3.03;
       is("hollow: a face both opened and walled is open (OpenCascade's 2680.0055)", hollow(keep(bk_primitive(BK_CYLINDER, cy)), cyTop, 1, cyTop, &three, 1, 1.15996), 2680.0055, 1e-3);
+      // A bevel wider than a small disc's edge reaches past the axis: its tool cut off there (OpenCascade's 1652.8131).
+      double cone2[3] = {19.5542, 5.66193, 12.1836}, rim[6] = {-2.83097, 0, 6.0918, 0.0980171, -0.995185, 0};
+      is("bevel: a narrow cone's top rim, wide on the top", bk_chamfer(keep(bk_primitive(BK_CONE, cone2)), &ke, rim, 1, 2.14342, 1.59471, 0, &miss), 1652.8131, 0.05);
+      // A face whose outline was walked from part way along a side: its two parts one side (OpenCascade's 942.7708).
+      double slab[3] = {29.2304, 26.1938, 11.7463}, peg[2] = {12.8745, 13.187};
+      BKShape *pegged = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, slab)), keep(at(keep(bk_primitive(BK_CYLINDER, peg)), -0.532917, 3.19933, 5.03263))));
+      is("round: a box and a cylinder's common part all round", bk_fillet(pegged, &kb, body, 1, 1.22653, &mr, &miss), 942.7708, 0.01);
+      // An opening beside a curved face, walls elsewhere thick: out only as far as it must go.
+      double base[6] = {0, 0, -1, 0, 0, -3.14088}, d12[1] = {12.5635}, Ro = d12[0] / 2, wallBase = 2.48502;
+      is("hollow: a half ball open below, a thick wall picked there too", hollow(keep(bk_primitive(BK_HEMISPHERE, d12)), base, 1, base, &wallBase, 1, 1.60785),
+         2 * PI / 3 * (Ro * Ro * Ro - (Ro - 1.60785) * (Ro - 1.60785) * (Ro - 1.60785)), 0.01);
       // Rounded all round, then bevelled all round: nothing left to bevel (the roundings meet their faces smoothly, a bowl's
       // inside a hair off its mesh), so as it was.
       double bowl[2] = {28.7095, 2.81855};

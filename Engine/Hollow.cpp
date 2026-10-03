@@ -341,7 +341,14 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     return ovalVoid(C, X, Y, Z, world[0], world[1], world[2], r.d, out);
   }
   std::vector<Elem> moved;
-  if (!outlineInset(prof, move, moved)) return false;
+  if (!outlineInset(prof, move, moved)) {
+    // An opening moved out so far that a curved piece beside it no longer reaches it (a dome round an open base): only
+    // just out instead, as far as needed to break through.
+    bool opening = false;
+    for (double &mv : move)
+      if (mv < 0) mv = -0.02 * r.size, opening = true;
+    if (!opening || !outlineInset(prof, move, moved)) return false;
+  }
   std::shared_ptr<Model> model = m.kind == Model::Turned ? turnedModel(moved) : sweptModel(m.a, m.b, m.phi, moved);
   mesh(shapeOf(model, Wn), r.d, out);
   return out.meshVolume() > 1e-9 * r.size * r.size * r.size;
