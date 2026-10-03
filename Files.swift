@@ -241,7 +241,7 @@ extension SIMD3 where Scalar == Double {
 }
 
 extension Document {
-    var valid: Bool { bodies.allSatisfy { $0.node.valid && $0.place.valid } }
+    var valid: Bool { bodies.allSatisfy { $0.node.valid && $0.place.valid && ($0.link.map { $0.shell.valid && $0.place.valid } ?? true) } }
 }
 
 extension Placement {

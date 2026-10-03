@@ -114,7 +114,9 @@ enum SelfTest {
         let merged = k.shape(.group(op: Int32(BK_UNION), parts: [base, touching]))
         check("merge is one solid", merged.map { $0.with { bk_piece_count($0) } } == 1 && k.takeProblems().isEmpty)
         _ = k.shape(.group(op: Int32(BK_UNION), parts: [base, Part(node: box, place: Placement(move: SIMD3(40, 0, 0)))]))
-        check("separate pieces reported", k.takeProblems().contains("pieces"))
+        check("shapes apart merge without complaint", k.takeProblems().isEmpty)
+        let corner = k.shape(.group(op: Int32(BK_UNION), parts: [base, Part(node: box, place: Placement(move: SIMD3(20, 20, 20)))]))
+        check("shapes touching at a corner merge into one piece", corner.map { $0.with { bk_piece_count($0) } } == 1 && k.takeProblems().isEmpty)
 
         let plane = Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1))
         let up = mesh(.split(of: box, plane: plane, side: 0))?.volume ?? 0, down = mesh(.split(of: box, plane: plane, side: 1))?.volume ?? 0
@@ -1009,6 +1011,48 @@ enum SelfTest {
         let cleared = lib.measureA == nil && lib.mode == .measure
         lib.cancelMode()
         check("Esc clears the ruler, then leaves it", cleared && lib.mode == .select)
+        // Merging: any number of shapes, apart or touching; a merge merged with another shape takes it in as a part of its
+        // own; switched off (on its layer), its parts are shapes again to edit, and switched on they merge again with the
+        // layers the merge had (its rounding), as edited — after saving and opening too.
+        lib.cancelMode()
+        let parts3 = (0..<3).map { i in Solid(name: "Part \(i)", color: Palette.colors[i], node: box, place: Placement(move: SIMD3(Double(i) * 40, 0, 10))) }
+        use(parts3)
+        lib.note = nil
+        lib.selection = [parts3[0].id, parts3[1].id]
+        lib.combine(Int32(BK_UNION))
+        settle()
+        let pair = lib.selection.first.flatMap { lib.body($0) }
+        lib.selection = [pair?.id, parts3[2].id].compactMap { $0 }
+        lib.combine(Int32(BK_UNION))
+        settle()
+        let all3 = lib.selection.first.flatMap { lib.body($0) }
+        let threeParts: Bool = { if case .group(_, let p) = all3?.node { return p.count == 3 } else { return false } }()
+        check("shapes apart merge, and a merge merged again takes the new shape in", threeParts && lib.doc.bodies.count == 1 && lib.note == nil, lib.note ?? "")
+        if let m = all3 {
+            lib.doc.bodies = [Solid(id: m.id, name: m.name, color: m.color, node: .round(of: m.node, picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: m.place)]
+            lib.rebuildScene()
+            settle()
+            lib.unmerge(m.id)
+            settle()
+        }
+        let apart = lib.doc.bodies
+        let linked = apart.count == 3 && Set(apart.compactMap { $0.link?.id }).count == 1 && apart.allSatisfy { $0.node == box }
+        check("a merge switched off: its parts shapes again, the merge kept", linked, "\(apart.count) shapes")
+        let unmergedFile = dir.appendingPathComponent("unmerged.3mf")
+        try? ThreeMF.write(unmergedFile, meshes: [], doc: lib.doc)
+        check("a merge switched off is kept in its file", (try? ThreeMF.read(unmergedFile))?.doc == lib.doc)
+        if let first = apart.first {
+            lib.setPlace(first.id) { $0.move.z += 5 }
+            lib.remerge(first.id)
+            settle()
+        }
+        let again = lib.doc.bodies.first
+        let remerged: Bool = {
+            guard lib.doc.bodies.count == 1, case .round(.group(_, let p), _, let r) = again?.node else { return false }
+            return p.count == 3 && r == 1 && abs(p[0].place.move.z - 15) < 1e-9
+        }()
+        check("switched on again: merged as edited, its rounding back", remerged && lib.note == nil, lib.note ?? "")
+
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")

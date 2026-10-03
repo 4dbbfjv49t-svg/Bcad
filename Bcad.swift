@@ -566,6 +566,20 @@ struct Solid: Codable, Equatable, Identifiable, Sendable {
     var hidden = false
     var node: Node
     var place = Placement()
+    // A merge this shape was taken out of to be edited, to be made again (every shape carrying the same link is in it).
+    var link: MergeLink?
+}
+
+// A merge switched off: what it was made with (its operation, its placement, its name and colour, and the layers on it —
+// roundings, hollows — around a merge of its parts), and where this shape stood among its parts.
+struct MergeLink: Codable, Hashable, Sendable {
+    var id: UUID
+    var op: Int32
+    var order: Int
+    var shell: Node
+    var place: Placement
+    var name: String
+    var color: SIMD3<UInt8>
 }
 
 struct Document: Codable, Equatable, Sendable {
@@ -598,6 +612,7 @@ extension Solid {
         hidden = try c.decode(Bool.self, forKey: .hidden)
         node = try c.decode(Node.self, forKey: .node)
         place = try c.decode(Placement.self, forKey: .place)
+        link = try c.decodeIfPresent(MergeLink.self, forKey: .link)
     }
 }
 
@@ -824,7 +839,6 @@ final class Kernel: @unchecked Sendable {
                     result = placed
                 }
             }
-            if op == BK_UNION, parts.count > 1, let r = result, bk_piece_count(r) > 1 { problems.append("pieces") }
             return result
         case .split(let of, let plane, let side):
             guard let s = shape(of) else { return nil }
@@ -1844,6 +1858,7 @@ final class Workbench: DesignHost {
             var c = b
             c.id = UUID()
             c.name = b.name
+            c.link = nil
             c.place.move.x += max(10, settings.snap * 10)
             return c
         }
@@ -1878,10 +1893,26 @@ final class Workbench: DesignHost {
 
     func cutSelection() { if copySelection() { deleteSelection() } }
 
+    // Shapes coming in (pasted, added from a file): new ids, and the merges switched off among them their own (a merge's
+    // shapes coming in together can be merged again together, never with the ones they were copied from).
+    static func afresh(_ bodies: [Solid]) -> [Solid] {
+        var links: [UUID: UUID] = [:]
+        return bodies.map { b in
+            var c = b
+            c.id = UUID()
+            if let l = b.link {
+                let id = links[l.id] ?? UUID()
+                links[l.id] = id
+                c.link?.id = id
+            }
+            return c
+        }
+    }
+
     func paste() {
         guard let data = NSPasteboard.general.data(forType: Clip.type), let clip = try? JSONDecoder().decode(Clip.self, from: data),
               !clip.bodies.isEmpty, Document(bodies: clip.bodies).valid else { return }
-        insert(clip.bodies.map { var b = $0; b.id = UUID(); return b }, low: clip.low, high: clip.high)
+        insert(Self.afresh(clip.bodies), low: clip.low, high: clip.high)
     }
 
     // Shapes from Bcad files dropped on the window join this document (which stays the one open), each file's beside
@@ -1895,9 +1926,8 @@ final class Workbench: DesignHost {
                 let (d, shapes) = try ThreeMF.read(url)
                 var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
                 var looks: [UUID: Mesh] = [:]
-                let incoming = d.bodies.map { b -> Solid in
-                    var c = b
-                    c.id = UUID()
+                let fresh = Self.afresh(d.bodies)
+                let incoming = zip(d.bodies, fresh).map { b, c -> Solid in
                     if let s = shapes[b.id] {
                         for p in s.points { lo = simd_min(lo, SIMD3<Double>(p)); hi = simd_max(hi, SIMD3<Double>(p)) }
                         looks[c.id] = Mesh(saved: s, place: b.place)
@@ -1951,12 +1981,20 @@ final class Workbench: DesignHost {
         commit { d in for i in d.bodies.indices { d.bodies[i].hidden = false } }
     }
 
+    // Any number of shapes at once, touching or apart (apart, they stay apart within it; touching anywhere, they're one).
+    // A merge merged again with more shapes takes them in as parts of its own (one merge, every part to edit).
     func combine(_ op: Int32) {
         let parts = selection.compactMap { body($0) }
         guard parts.count >= 2 else { flash(L("Select two or more shapes")); return }
         let first = parts[0]
         let name = op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect")
-        let group = Solid(name: name, color: first.color, node: .group(op: op, parts: parts.map { Part(node: $0.node, place: $0.place, name: $0.name, color: $0.color) }))
+        let members = parts.flatMap { b -> [Part] in
+            if op == BK_UNION, case .group(BK_UNION, let inner) = b.node {
+                return inner.map { p in Part(node: p.node, place: Placement.from(b.place.matrix * p.place.matrix), name: p.name, color: p.color ?? b.color) }
+            }
+            return [Part(node: b.node, place: b.place, name: b.name, color: b.color)]
+        }
+        let group = Solid(name: name, color: first.color, node: .group(op: op, parts: members))
         let ids = Set(parts.map(\.id))
         tryThen([group.node]) { [weak self] in
             guard let self, parts.allSatisfy({ self.body($0.id) == $0 }) else { return }
@@ -1970,10 +2008,19 @@ final class Workbench: DesignHost {
     }
 
     func ungroup() {
-        guard let b = primary, case .group(_, let parts) = b.node else { flash(L("Select a merged shape")); return }
+        guard let b = primary else { flash(L("Select a merged shape")); return }
+        unmerge(b.id)
+    }
+
+    // A merge switched off: its parts shapes of their own again, to move, resize or treat, each remembering the merge (its
+    // layers too: a rounding of the merged shape comes back with it) so it can be switched on again, saved or not.
+    func unmerge(_ id: UUID) {
+        guard let b = body(id), case .group(let op, let parts) = b.node.base else { flash(L("Select a merged shape")); return }
+        let mergeID = UUID()
         let bodies = parts.enumerated().map { i, p in
             Solid(name: p.name ?? L("Part {n}", ["n": i + 1]), color: p.color ?? b.color, node: p.node,
-                  place: Placement.from(b.place.matrix * p.place.matrix))
+                  place: Placement.from(b.place.matrix * p.place.matrix),
+                  link: MergeLink(id: mergeID, op: op, order: i, shell: b.node, place: b.place, name: b.name, color: b.color))
         }
         commit { d in
             let at = d.bodies.firstIndex { $0.id == b.id } ?? d.bodies.count
@@ -1982,6 +2029,31 @@ final class Workbench: DesignHost {
         }
         selection = bodies.map(\.id)
     }
+
+    // The shapes of a merge switched off (as they are now, edited or not), merged again with the layers it had.
+    func remerge(_ id: UUID) {
+        guard let link = body(id)?.link else { return }
+        let members = doc.bodies.filter { $0.link?.id == link.id }.sorted { ($0.link?.order ?? 0) < ($1.link?.order ?? 0) }
+        guard !members.isEmpty else { return }
+        // In the merge's own frame, where its layers' picks are.
+        let back = link.place.matrix.inverse
+        let parts = members.map { m in Part(node: m.node, place: Placement.from(back * m.place.matrix), name: m.name, color: m.color) }
+        let node = link.shell.replacingBase { _ in .group(op: link.op, parts: parts) }
+        let merged = Solid(name: link.name, color: link.color, node: node, place: link.place)
+        let ids = Set(members.map(\.id))
+        tryThen([node]) { [weak self] in
+            guard let self, members.allSatisfy({ self.body($0.id) == $0 }) else { return }
+            self.commit { d in
+                let at = d.bodies.firstIndex { ids.contains($0.id) } ?? d.bodies.count
+                d.bodies.removeAll { ids.contains($0.id) }
+                d.bodies.insert(merged, at: min(at, d.bodies.count))
+            }
+            self.selection = [merged.id]
+        }
+    }
+
+    // The shapes of a merge switched off (as many as are left).
+    func mergeMembers(_ link: MergeLink) -> Int { doc.bodies.filter { $0.link?.id == link.id }.count }
 
     // MARK: split
 

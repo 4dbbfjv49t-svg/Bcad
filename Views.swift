@@ -828,6 +828,11 @@ struct LayerStack: View {
         let layers = lib.stack(item)
         VStack(alignment: .leading, spacing: 6) {
             SettingsTitle(text: L("Layers"))
+            // A shape taken out of a merge to edit: the merge, switched off, to switch on again.
+            if let link = item.link {
+                ToggleLine(title: link.op == BK_UNION ? L("Merge") : link.op == BK_SUBTRACT ? L("Subtract") : L("Intersect"),
+                           detail: L("{n} shapes", ["n": lib.mergeMembers(link)]), on: false) { lib.remerge(item.id) }
+            }
             ForEach(Array(layers.enumerated()), id: \.offset) { level, node in
                 LayerRow(item: item, level: level, node: node)
             }
@@ -902,10 +907,9 @@ struct LayerRow: View {
                 }
             }
         case .group(let op, let parts):
-            SettingLine(title: op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect"),
-                        detail: L("{n} shapes", ["n": parts.count])) {
-                Button(L("Ungroup")) { lib.ungroup() }.buttonStyle(PillStyle(tint: lib.accent)).frame(width: 110)
-            }
+            // On: merged. Off: its parts shapes of their own to edit, each with this switch to merge them again.
+            ToggleLine(title: op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect"),
+                       detail: L("{n} shapes", ["n": parts.count]), on: true) { lib.unmerge(item.id) }
         case .primitive(let p):
             SettingLine(title: L(p.name)) { EmptyView() }
         case .fastener(let f):
