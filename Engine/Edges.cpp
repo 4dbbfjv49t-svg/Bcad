@@ -526,7 +526,7 @@ bool creaseAt(const Solid &s, int kind, const double *pick, Crease &out, size_t 
   return true;
 }
 
-std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i) {
+std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i, std::vector<std::vector<int>> *faceOf) {
   V3 E = c.pts[i], x = -c.ia[i], y = unit(c.na[i] - x * dot(c.na[i], x)), z = cross(x, y);
   // Cut keeping the side behind the plane: its new face faces +z, its outline running counter-clockwise round it.
   Solid half = cut(s, E, -z, 0);
@@ -552,11 +552,19 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
   for (size_t t = 0; t < half.triFace.size(); t++)
     if (half.triFace[t] == cap)
       for (int k = 0; k < 3; k++) where[keyOf(half.p[half.tri[3 * t + k]])] = half.p[half.tri[3 * t + k]];
+  // Each outline side's face: the one whose triangle runs the side the other way (the cut keeps the shape's face numbers).
+  std::map<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>, int> owner;
+  if (faceOf)
+    for (size_t t = 0; t < half.triFace.size(); t++)
+      if (half.triFace[t] != cap)
+        for (int k = 0; k < 3; k++)
+          owner[{arr(keyOf(half.p[half.tri[3 * t + (k + 1) % 3]])), arr(keyOf(half.p[half.tri[3 * t + k]]))}] = (int)half.triFace[t];
   std::set<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>> used;
   for (auto &[start, outs] : next) {
     for (auto &first : outs) {
       if (used.count({arr(start), arr(first.first)})) continue;
       std::vector<std::pair<double, double>> loop;
+      std::vector<int> faces;
       Key at = start;
       V3 atP = where[start];
       std::pair<Key, V3> step = first;
@@ -564,6 +572,10 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
         used.insert({arr(at), arr(step.first)});
         V3 d = atP - E;
         loop.push_back({dot(d, x), dot(d, y)});
+        if (faceOf) {
+          auto o = owner.find({arr(at), arr(step.first)});
+          faces.push_back(o == owner.end() ? -1 : o->second);
+        }
         at = step.first, atP = step.second;
         if (at == start) break;
         auto it = next.find(at);
@@ -574,7 +586,10 @@ std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, 
         if (!go) break;
         step = *go;
       }
-      if (loop.size() >= 3) loops.push_back(loop);
+      if (loop.size() >= 3) {
+        loops.push_back(loop);
+        if (faceOf) faceOf->push_back(faces);
+      }
     }
   }
   return loops;

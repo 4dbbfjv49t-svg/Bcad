@@ -44,7 +44,8 @@ size_t pointAt(Crease &c, double along);
 
 // The cut across a crease at point i: the outlines of the solid in the plane square to the edge, in the end-on frame
 // (origin on the edge, face A leaving along -x, y its outward normal), outlines counter-clockwise, holes clockwise.
-std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i);
+// (With `faceOf`, each loop's sides' faces: side j from point j to the next.)
+std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i, std::vector<std::vector<int>> *faceOf = nullptr);
 
 // A treatment along picked edges: a rounding (outward), an inward rounding (cove) or a bevel (legs along faces A and B,
 // its edges with the faces rounded by `corner` when above zero).
