@@ -22,6 +22,8 @@
 
 namespace bce {
 
+thread_local CombineReport combineReport;
+
 namespace {
 
 uint64_t pairKey(uint32_t a, uint32_t b) { return (uint64_t)std::min(a, b) << 32 | std::max(a, b); }
@@ -430,8 +432,12 @@ struct Cutter {
         }
         for (auto [p, q] : cutT.segs) {
           p = rep(p), q = rep(q);
-          if (p == q || !local.has(p) || !local.has(q)) continue;
-          tri.keep(local.get(p), local.get(q));
+          if (p == q) continue;
+          if (!local.has(p) || !local.has(q)) {
+            combineReport.segsDropped++;
+            continue;
+          }
+          if (!tri.keep(local.get(p), local.get(q))) combineReport.keepsFailed++;
         }
       }
       // Points the triangulation made where two cuts crossed: put on the first cut in space too.
@@ -447,6 +453,8 @@ struct Cutter {
         P.push_back(r + (l - r) * it2->second.s);
         parent.push_back(global[i]);
       }
+      combineReport.crossingsMade += (long)tri.made().size();
+      combineReport.detours += tri.detours, combineReport.edgeFallbacks += tri.fallbacks;
       std::vector<int> pieces = tri.triangles();
       for (size_t k = 0; k < pieces.size(); k += 3) {
         uint32_t v[3] = {rep(global[pieces[k]]), rep(global[pieces[k + 1]]), rep(global[pieces[k + 2]])};
@@ -542,13 +550,15 @@ std::vector<Side> classify(Cutter &c, Part &X, const std::vector<Cutter::Piece> 
     }
     std::partial_sort(bySize.begin(), bySize.begin() + std::min<size_t>(4, bySize.size()), bySize.end(), std::greater<>());
     Side s = Out;
-    for (size_t k = 0; k < std::min<size_t>(4, bySize.size()); k++) {
+    bool sure = false;
+    for (size_t k = 0; k < std::min<size_t>(4, bySize.size()) && !sure; k++) {
       uint32_t i = bySize[k].second;
       V3 mid = (c.P[pieces[i].v[0]] + c.P[pieces[i].v[1]] + c.P[pieces[i].v[2]]) / 3;
       double w = winding(other, mid);
       s = w > 0.5 ? In : Out;
-      if (std::fabs(w - 0.5) > 0.2) break;
+      sure = std::fabs(w - 0.5) > 0.2;
     }
+    if (!sure) combineReport.unsure++;
     for (uint32_t i : reg) side[i] = s;
   }
   return side;
@@ -576,7 +586,21 @@ Welded gridded(const Solid &s, double step) {
 
 }  // namespace
 
+// Whether every side of every triangle is met by one running the other way (point numbers, not places).
+static bool balanced(const Welded &w) {
+  std::vector<uint64_t> fwd, back;
+  fwd.reserve(w.tri.size()), back.reserve(w.tri.size());
+  for (size_t t = 0; t < w.tri.size(); t += 3)
+    for (int k = 0; k < 3; k++) {
+      uint32_t a = w.tri[t + k], b = w.tri[t + (k + 1) % 3];
+      fwd.push_back((uint64_t)a << 32 | b), back.push_back((uint64_t)b << 32 | a);
+    }
+  std::sort(fwd.begin(), fwd.end()), std::sort(back.begin(), back.end());
+  return fwd == back;
+}
+
 Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepGrid) {
+  combineReport.calls++;
   Cutter c;
   double step;
   {
@@ -743,6 +767,7 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepG
     tidy(out, 1e-9 * scale);
     unneedle(out, 1e-9 * scale);
   }
+  if (!balanced(out)) combineReport.open++;
   unweld(out, result);
   result.grid = step;
   return result;

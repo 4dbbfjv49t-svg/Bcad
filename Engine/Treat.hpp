@@ -76,6 +76,10 @@ bool foldThin(Solid &r, double width);
 // Whether a mesh is closed: every side of a triangle met by one running the other way (points by position).
 bool shut(const Solid &s);
 
+// For tests: when not 0, a treatment's tools are taken in an order shuffled by this seed (the result should not depend on
+// it).
+extern int toolOrderSeed;
+
 // Hollowing: walls of `thickness` (faces picked as openings left out, others with walls of their own), and the shape
 // without its roundings to hollow instead when the shape itself won't (only what lies inside the shape kept).
 struct Hollowing {

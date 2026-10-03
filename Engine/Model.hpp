@@ -244,6 +244,14 @@ bool inside(const Solid &s, V3 q);
 // one surface joined, edges, corners and circles found again.
 // merge: crossing points this close (a part of the shapes' size) are one.
 Solid combine(const Solid &a, const Solid &b, int op, double merge = 1e-11, bool keepGrid = false);
+// What the mesh booleans on this thread ran into since it was last cleared (for tests and measuring): merges made, cuts
+// a triangle's triangulation couldn't keep or lost an end of, points it made where two cuts crossed, cuts led round an
+// outline corner, points put on a side that wasn't found, results left open, and regions judged inside or out by a
+// winding number too near a half to be sure.
+struct CombineReport {
+  long calls = 0, keepsFailed = 0, segsDropped = 0, crossingsMade = 0, detours = 0, edgeFallbacks = 0, open = 0, unsure = 0;
+};
+extern thread_local CombineReport combineReport;
 Solid cut(const Solid &s, V3 p, V3 n, int side);
 // Whether two faces lie on one surface (one plane facing one way; one turned profile piece in one place).
 bool sameForm(const FaceGeom &a, const FaceGeom &b);

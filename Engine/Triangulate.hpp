@@ -105,6 +105,10 @@ class Tri2 {
   double px(int i) const { return x[i]; }
   double py(int i) const { return y[i]; }
 
+  // Points to go on an edge that wasn't there (put in where they lie instead), and kept segments led round an outline
+  // corner: counted, for measuring.
+  int fallbacks = 0, detours = 0;
+
  private:
   struct T {
     int v[3];

@@ -2753,6 +2753,29 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       }
     }
   };
+  // (For tests: the tools in another order, each one's pieces going with it.)
+  auto shuffle = [&]() {
+    if (!toolOrderSeed) return;
+    uint64_t state = (uint64_t)toolOrderSeed * 0x9E3779B97F4A7C15ull + 1;
+    std::map<std::pair<bool, size_t>, std::vector<Solid>> moved;
+    for (bool fill : {false, true}) {
+      std::vector<Solid> &list = fill ? add : take;
+      std::vector<size_t> order(list.size());
+      std::iota(order.begin(), order.end(), 0);
+      for (size_t i = order.size(); i > 1; i--) {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        std::swap(order[i - 1], order[(state >> 33) % i]);
+      }
+      std::vector<Solid> next;
+      for (size_t i = 0; i < order.size(); i++) {
+        next.push_back(std::move(list[order[i]]));
+        auto it = piecesOf.find({fill, order[i]});
+        if (it != piecesOf.end()) moved[{fill, i}] = std::move(it->second);
+      }
+      list.swap(next);
+    }
+    piecesOf.swap(moved);
+  };
   // Inward roundings exact first; where their cylinders only touch at a corner, a little wider each there.
   Solid result;
   bool done = false;
@@ -2760,6 +2783,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     if (shadeBy > 0 && t.kind != Treatment::Cove) break;
     if (!tools(shadeBy)) return s;
     markAux(take, false), markAux(add, true);
+    shuffle();
     // A rounding's faces (its tools' curved ones that are left) meet the faces beside them smoothly: so marked for what's
     // done next.
     if (t.kind != Treatment::Bevel)
@@ -2780,6 +2804,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     fillHair = true;
     if (!tools(0)) return s;
     markAux(take, false), markAux(add, true);
+    shuffle();
     for (auto *list : {&take, &add})
       for (auto &tool : *list)
         for (auto &f : tool.faces)
@@ -2829,6 +2854,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   if (pieces(result) != was) return coveChecked ? tooWide() : tooLarge();
   return result;
 }
+
+int toolOrderSeed = 0;
 
 Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
   Solid made = treatedAs(s, t, d, fit, onto, false);

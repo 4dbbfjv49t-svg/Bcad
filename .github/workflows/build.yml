@@ -35,6 +35,20 @@ jobs:
           ./test/engine.sh
           echo "engine test took $(( $(date +%s) - start )) s"
 
+      - name: Corpus
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/digest"
+          start=$(date +%s)
+          ./test/corpus.sh --digest "$RUNNER_TEMP/digest/mac.txt"
+          echo "corpus took $(( $(date +%s) - start )) s"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digest-mac
+          path: ${{ runner.temp }}/digest/mac.txt
+
       - name: Restore OpenCascade
         id: occt
         uses: actions/cache/restore@v4
@@ -138,6 +152,36 @@ jobs:
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
 
+      - name: Launch Bcad's engine app and open a file
+        continue-on-error: true
+        run: |
+          APP="$RUNNER_TEMP/own/Bcad.app"
+          FILE="$RUNNER_TEMP/owntmp/bcad-selftest/test.3mf"
+          R="$RUNNER_TEMP/results"
+          mkdir -p "$R/shots"
+          ls -la "$FILE" || echo "no test.3mf from the self-test"
+          snap() {
+            sleep "$2"
+            screencapture -x "$R/shots/$1.png" || echo "screencapture failed"
+            if pgrep -x Bcad >/dev/null; then echo "$1: Bcad running"; else echo "$1: Bcad NOT running"; fi
+          }
+          quit() {
+            pkill -TERM -x Bcad || true
+            for i in $(seq 1 50); do pgrep -x Bcad >/dev/null || break; sleep 0.2; done
+            pkill -KILL -x Bcad 2>/dev/null || true
+          }
+          echo "▸ own 1 launch empty"
+          open --stdout "$R/own1.out" --stderr "$R/own1.err" "$APP"
+          snap own-1-empty 15
+          quit
+          echo "▸ own 2 cold launch with the file"
+          open -a "$APP" --stdout "$R/own2.out" --stderr "$R/own2.err" "$FILE"
+          snap own-2-cold-30s 30
+          quit
+          mkdir -p "$R/crashes"
+          cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null || echo "no crash reports"
+          for f in "$R"/own*.out "$R"/own*.err; do echo "── $f"; cat "$f"; done
+
       - name: Thumbnails
         if: always()
         continue-on-error: true
@@ -168,3 +212,57 @@ jobs:
           path: |
             ${{ runner.temp }}/results
             ${{ runner.temp }}/tmp/bcad-selftest
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Engine test
+        run: bash test/engine.sh
+
+      - name: Corpus
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/digest"
+          ./test/corpus.sh --digest "$RUNNER_TEMP/digest/linux.txt"
+
+      - name: Corpus, each case moved, turned, scaled and reordered
+        continue-on-error: true
+        run: ./test/corpus.sh --perturb | grep -v "^WRONG" | tail -60
+
+      - name: Corpus under the address and undefined-behaviour sanitizers
+        run: |
+          # A sanitizer's finding ends the run with 86; cases not as expected (1) are the step above's to report.
+          export ASAN_OPTIONS=detect_leaks=0:exitcode=86 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:exitcode=86
+          set +e
+          CORPUS_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" ./test/corpus.sh > "$RUNNER_TEMP/asan.txt" 2>&1
+          code=$?
+          tail -40 "$RUNNER_TEMP/asan.txt"
+          [ $code -ne 86 ] && [ $code -le 1 ]
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digest-linux
+          path: ${{ runner.temp }}/digest/linux.txt
+
+  compare:
+    needs: [mac, linux]
+    if: always()
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digest
+      - name: The same results on macOS and Linux
+        run: |
+          ls -la digest
+          if diff digest/mac.txt digest/linux.txt > digest/diff.txt; then echo "macOS and Linux agree on every case"; else echo "$(grep -c '^<' digest/diff.txt) lines differ:"; head -80 digest/diff.txt; exit 1; fi

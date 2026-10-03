@@ -157,10 +157,10 @@ int Tri2::insertOnEdge(int u, int v, double px, double py) {
     t = half.find(key(v, u));
     std::swap(u, v);
   }
-  if (t < 0 || !tris[t].alive) return insert(px, py);
+  if (t < 0 || !tris[t].alive) return fallbacks++, insert(px, py);
   int k = 0;
   while (k < 3 && tris[t].v[k] != u) k++;
-  if (k == 3) return insert(px, py);
+  if (k == 3) return fallbacks++, insert(px, py);
   int p = (int)x.size();
   x.push_back(px), y.push_back(py);
   splitEdge(t, k, p);
@@ -261,6 +261,7 @@ bool Tri2::keep(int a, int b) {
       double s = den != 0 ? ((x[R] - x[a]) * dy - (y[R] - y[a]) * dx) / den : 0.5;
       int via = s < 0.5 ? R : L;
       if (via == a || via == b) return false;
+      detours++;
       depth++;
       bool ok = keep(a, via) && keep(via, b);
       depth--;
