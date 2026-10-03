@@ -281,13 +281,13 @@ enum SelfTest {
                                                                   picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
                        Solid(name: "Bevelled", color: Palette.colors[4], node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10))),
                        Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
-        let cube = Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2))
-        doc.bodies = own ? [cube,
+        let roundedCube = Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2))
+        doc.bodies = own ? [roundedCube,
                             Solid(name: "Holed", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [
                                 base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())
                             ]), place: Placement(move: SIMD3(40, 0, 10))),
                             Solid(name: "Half", color: Palette.colors[6], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-80, 0, 10)))] + treated
-            : [cube,
+            : [roundedCube,
                Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(40, 0, 15))),
                Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10)))] + treated
         let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
@@ -581,7 +581,6 @@ enum SelfTest {
         }
 
         // A treatment that doesn't fit never enters the document (it's said once); one that fits goes in.
-        let roundAllVolume = k.queue.sync { k.mesh(roundAll)?.volume ?? 0 }
         let plain = Solid(name: "Plain", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
         use([plain])
         lib.selection = [plain.id]

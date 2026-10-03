@@ -138,6 +138,305 @@ jobs:
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
 
+      - name: Use the real app
+        continue-on-error: true
+        run: |
+          # Temporary: real mouse and keyboard events on the real app, controls found by their accessibility names.
+          # Bcad built on its own engine: R opens Angles, A picks every edge, the angle editor rounds them, then hollowing;
+          # a bevel on a cylinder; what the inspector says read after each.
+          R="$RUNNER_TEMP/results"
+          mkdir -p "$R/shots"
+          cat > "$RUNNER_TEMP/ui.swift" <<'SWIFT'
+          import AppKit
+          import ApplicationServices
+          import ImageIO
+
+          let a = Array(CommandLine.arguments.dropFirst())
+          guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "local.bohdan.bcad").first else { print("Bcad isn't running"); exit(1) }
+          let pid = app.processIdentifier
+          let root = AXUIElementCreateApplication(pid)
+
+          func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+              var v: CFTypeRef?
+              return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+          }
+          func texts(_ e: AXUIElement) -> [String] { [kAXDescriptionAttribute, kAXTitleAttribute, kAXValueAttribute].compactMap { value(e, $0) as? String } }
+          func kids(_ e: AXUIElement) -> [AXUIElement] { (value(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] }
+          func frame(_ e: AXUIElement) -> CGRect? {
+              guard let p = value(e, kAXPositionAttribute), let s = value(e, kAXSizeAttribute) else { return nil }
+              var pt = CGPoint.zero, sz = CGSize.zero
+              AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+              AXValueGetValue(s as! AXValue, .cgSize, &sz)
+              return CGRect(origin: pt, size: sz)
+          }
+          func all(_ e: AXUIElement, _ depth: Int = 0) -> [(AXUIElement, Int)] { depth > 60 ? [] : [(e, depth)] + kids(e).flatMap { all($0, depth + 1) } }
+          func find(_ label: String, _ n: Int) -> CGRect? {
+              let hits = all(root).filter { texts($0.0).contains(label) }.compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 }
+              return hits.count >= n ? hits[n - 1] : nil
+          }
+          func window() -> CGRect {
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+              for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid && (w[kCGWindowLayer as String] as? Int) == 0 {
+                  if let b = w[kCGWindowBounds as String], let r = CGRect(dictionaryRepresentation: b as! CFDictionary), r.width > 300 { return r }
+              }
+              return .zero
+          }
+          // The 3D view's middle: the window right of the 320-point side panel.
+          func middle() -> CGPoint { let w = window(); return CGPoint(x: w.minX + 320 + (w.width - 320) / 2, y: w.midY) }
+          func post(_ type: CGEventType, _ p: CGPoint, _ flags: CGEventFlags = []) {
+              let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
+              e?.flags = flags
+              e?.post(tap: .cghidEventTap)
+              usleep(25_000)
+          }
+          func click(_ p: CGPoint) {
+              post(.mouseMoved, p)
+              usleep(120_000)
+              post(.leftMouseDown, p)
+              post(.leftMouseUp, p)
+          }
+          func drag(_ from: CGPoint, _ to: CGPoint, _ flags: CGEventFlags = []) {
+              post(.mouseMoved, from)
+              usleep(120_000)
+              post(.leftMouseDown, from, flags)
+              for k in 1...24 { post(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * CGFloat(k) / 24, y: from.y + (to.y - from.y) * CGFloat(k) / 24), flags) }
+              post(.leftMouseUp, to, flags)
+          }
+          func flags(_ s: String?) -> CGEventFlags { ["option": .maskAlternate, "shift": .maskShift, "cmd": .maskCommand][s ?? ""] ?? [] }
+          // The pixels of a screenshot in each gizmo colour (red, green, blue), in screen points, over the 3D view only.
+          func colored(_ file: String) -> [[CGPoint]] {
+              guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return [[], [], []] }
+              let w = img.width, h = img.height
+              var px = [UInt8](repeating: 0, count: w * h * 4)
+              let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+              ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+              let s = CGFloat(w) / CGDisplayBounds(CGMainDisplayID()).width, win = window()
+              let view = CGRect(x: win.minX + 330, y: win.minY + 40, width: win.width - 330 - 320, height: win.height - 130)
+              var out: [[CGPoint]] = [[], [], []]
+              for y in 0..<h {
+                  for x in 0..<w {
+                      let p = CGPoint(x: CGFloat(x) / s, y: CGFloat(y) / s)
+                      guard view.contains(p) else { continue }
+                      let i = (y * w + x) * 4, r = Int(px[i]), g = Int(px[i + 1]), b = Int(px[i + 2])
+                      if r > 200 && g < 130 && b < 150 { out[0].append(p) }
+                      else if g > 200 && r < 150 && b < 190 && g - b > 50 { out[1].append(p) }
+                      else if b > 200 && r > 50 && r < 150 && g < 190 && b - g > 60 { out[2].append(p) }
+                  }
+              }
+              return out
+          }
+          func thin(_ v: [CGPoint], _ n: Int) -> [CGPoint] { stride(from: 0, to: v.count, by: max(1, v.count / n)).map { v[$0] } }
+          func gap(_ p: CGPoint, _ to: [CGPoint]) -> CGFloat { to.map { hypot($0.x - p.x, $0.y - p.y) }.min() ?? .infinity }
+
+          // Bcad in front first: a click on a window in the background only brings it forward.
+          if !["trusted", "tree"].contains(a[0]) {
+              app.activate()
+              usleep(400_000)
+          }
+          switch a[0] {
+          case "trusted":
+              print("accessibility trusted: \(AXIsProcessTrusted()) · window \(window())")
+          case "tree":
+              for (e, d) in all(root) where !texts(e).isEmpty { print(String(repeating: " ", count: d), texts(e).joined(separator: " | "), frame(e).map { "\($0)" } ?? "") }
+          case "button":
+              // The last button carrying the label, pressed through accessibility.
+              let hits = all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXButton" && texts($0.0).contains(a[1]) }
+              print("button \(a[1]) (\(hits.count) found):", hits.last.map { AXUIElementPerformAction($0.0, kAXPressAction as CFString).rawValue } ?? -1)
+          case "axpress":
+              let hit = all(root).first { texts($0.0).contains(a[1]) }
+              print("axpress \(a[1]):", hit.map { AXUIElementPerformAction($0.0, kAXPressAction as CFString).rawValue } ?? -1)
+          case "count":
+              print("shapes listed:", all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXStaticText" && texts($0.0).contains(a[1]) }.count)
+          case "hold":
+              // A press held for a while, at a spot in the element (fractions of its size).
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              let p = CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.minY + r.height * CGFloat(Double(a[3])!))
+              post(.mouseMoved, p)
+              usleep(600_000)
+              post(.leftMouseDown, p)
+              usleep(UInt32(Int(a[4])!) * 1000)
+              post(.leftMouseUp, p)
+              print("held \(a[1]) at \(p)")
+          case "press":
+              guard let r = find(a[1], a.count > 2 ? Int(a[2])! : 1) else { print("✗ no \(a[1])"); exit(0) }
+              var under: AXUIElement?
+              AXUIElementCopyElementAtPosition(root, Float(r.midX), Float(r.midY), &under)
+              click(CGPoint(x: r.midX, y: r.midY))
+              print("pressed \(a[1]) at \(r), under the pointer: \(under.map { texts($0) + [(value($0, kAXRoleAttribute) as? String) ?? ""] } ?? [])")
+          case "slide":
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              drag(CGPoint(x: r.midX, y: r.midY), CGPoint(x: r.minX + r.width * CGFloat(Double(a[2])!), y: r.midY))
+              print("slid \(a[1]) in \(r)")
+          case "click":
+              click(CGPoint(x: Double(a[1])!, y: Double(a[2])!))
+          case "dclick":
+              // A double click on the element: the second press carries click count 2.
+              guard let r = find(a[1], 1) else { print("✗ no \(a[1])"); exit(0) }
+              let p = CGPoint(x: r.midX, y: r.midY)
+              post(.mouseMoved, p)
+              usleep(150_000)
+              for n in [1, 2] {
+                  for t in [CGEventType.leftMouseDown, .leftMouseUp] {
+                      let e = CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)
+                      e?.setIntegerValueField(.mouseEventClickState, value: Int64(n))
+                      e?.post(tap: .cghidEventTap)
+                      usleep(30_000)
+                  }
+              }
+              print("double-clicked \(a[1]) at \(p)")
+          case "type":
+              for ch in a[1] {
+                  for down in [true, false] {
+                      let e = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
+                      var u = Array(String(ch).utf16)
+                      e?.keyboardSetUnicodeString(stringLength: u.count, unicodeString: &u)
+                      e?.post(tap: .cghidEventTap)
+                      usleep(30_000)
+                  }
+              }
+              print("typed \(a[1])")
+          case "pressr":
+              // Like press, among the controls at the window's right side (the inspector).
+              let w = window()
+              let hits = all(root).filter { texts($0.0).contains(a[1]) }.compactMap { frame($0.0) }.filter { $0.width > 0 && $0.height > 0 && $0.minX > w.maxX - 340 }
+              let n = a.count > 2 ? Int(a[2])! : 1
+              guard hits.count >= n else { print("✗ no \(a[1]) on the right"); exit(0) }
+              click(CGPoint(x: hits[n - 1].midX, y: hits[n - 1].midY))
+              print("pressed \(a[1]) at \(hits[n - 1])")
+          case "axshow":
+              // Scrolls the element into view through accessibility.
+              let hit = all(root).first { texts($0.0).contains(a[1]) }
+              print("axshow \(a[1]):", hit.map { AXUIElementPerformAction($0.0, "AXScrollToVisible" as CFString).rawValue } ?? -1)
+          case "scroll":
+              // Scroll-wheel lines at a point in the window (x y from its top left), negative to go down.
+              let w = window(), p = CGPoint(x: w.minX + CGFloat(Double(a[1])!), y: w.minY + CGFloat(Double(a[2])!))
+              post(.mouseMoved, p)
+              for _ in 0..<40 {
+                  let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: Int32(a[3])!, wheel2: 0, wheel3: 0)
+                  e?.location = p
+                  e?.post(tap: .cghidEventTap)
+                  usleep(20_000)
+              }
+              print("scrolled at \(p)")
+          case "viewarc":
+              // A drag along an arc round the 3D view's middle: from radius r (a fraction of the window's height) at angle 0,
+              // turning by the given degrees.
+              let m = middle(), r = window().height * CGFloat(Double(a[1])!), turn = Double(a[2])! * .pi / 180
+              let start = CGPoint(x: m.x + r, y: m.y)
+              post(.mouseMoved, start)
+              usleep(150_000)
+              post(.leftMouseDown, start)
+              for k in 1...24 {
+                  let t = turn * Double(k) / 24
+                  post(.leftMouseDragged, CGPoint(x: m.x + r * CGFloat(cos(t)), y: m.y - r * CGFloat(sin(t))))
+              }
+              post(.leftMouseUp, CGPoint(x: m.x + r * CGFloat(cos(turn)), y: m.y - r * CGFloat(sin(turn))))
+              print("arc at \(r) by \(a[2])°")
+          case "nums":
+              // The numbers in the inspector (the window's right side), row by row.
+              let w = window()
+              let fields = all(root).filter { (value($0.0, kAXRoleAttribute) as? String) == "AXTextField" }.compactMap { e -> (CGRect, String)? in
+                  guard let f = frame(e.0), f.minX > w.maxX - 340, let v = value(e.0, kAXValueAttribute) as? String else { return nil }
+                  return (f, v)
+              }.sorted { ($0.0.minY, $0.0.minX) < ($1.0.minY, $1.0.minX) }
+              print("\(a.count > 1 ? a[1] : "numbers"):", fields.map(\.1).joined(separator: " "))
+          case "handle":
+              // A resize handle (a[2]: 0 red, 1 green, 2 blue) found by its colour in a screenshot (a[1]), pulled outwards by a[3]
+              // points: its end nearer the other handles is the middle, the other its tip.
+              let sets = colored(a[1]), k = Int(a[2])!, mine = thin(sets[k], 400)
+              let others = thin(sets.enumerated().filter { $0.offset != k }.flatMap(\.element), 600)
+              guard mine.count > 10 else { print("✗ handle \(k) not found: \(sets.map(\.count)) pixels"); exit(0) }
+              var far = (mine[0], mine[0], CGFloat(0))
+              for p in mine { for q in mine { let d = hypot(p.x - q.x, p.y - q.y); if d > far.2 { far = (p, q, d) } } }
+              let (mid, tip) = gap(far.0, others) < gap(far.1, others) ? (far.0, far.1) : (far.1, far.0)
+              let u = CGPoint(x: (tip.x - mid.x) / far.2, y: (tip.y - mid.y) / far.2), n = CGFloat(Double(a[3])!)
+              let from = CGPoint(x: mid.x + (tip.x - mid.x) * 0.8, y: mid.y + (tip.y - mid.y) * 0.8)
+              drag(from, CGPoint(x: from.x + u.x * n, y: from.y + u.y * n), flags(a.count > 4 ? a[4] : nil))
+              print("pulled handle \(k) at \(from) by \(a[3]) (middle \(mid), tip \(tip); \(sets.map(\.count)) pixels)")
+          case "ring":
+              // The flat ring (blue) found in a screenshot (a[1]): from its point farthest from the other rings round by about a[2]
+              // degrees; with "back" (a[3]) the same way in reverse.
+              let sets = colored(a[1]), blue = thin(sets[2], 300), others = thin(sets[0] + sets[1], 600)
+              guard blue.count > 20 else { print("✗ ring not found: \(sets.map(\.count)) pixels"); exit(0) }
+              let c = CGPoint(x: blue.map(\.x).reduce(0, +) / CGFloat(blue.count), y: blue.map(\.y).reduce(0, +) / CGFloat(blue.count))
+              func angle(_ p: CGPoint) -> Double { atan2(Double(p.y - c.y), Double(p.x - c.x)) * 180 / .pi }
+              let start = blue.max { gap($0, others) < gap($1, others) }!, want = angle(start) + Double(a[2])!
+              let end = blue.min { abs(remainder(angle($0) - want, 360)) < abs(remainder(angle($1) - want, 360)) }!
+              let (from, to) = a.count > 3 && a[3] == "back" ? (end, start) : (start, end)
+              drag(from, to)
+              print("turned by the ring from \(from) to \(to), round \(c)")
+          case "view":
+              let m = middle()
+              click(CGPoint(x: m.x + CGFloat(Double(a[1])!), y: m.y + CGFloat(Double(a[2])!)))
+          case "viewdrag":
+              let m = middle()
+              drag(CGPoint(x: m.x + CGFloat(Double(a[1])!), y: m.y + CGFloat(Double(a[2])!)), CGPoint(x: m.x + CGFloat(Double(a[3])!), y: m.y + CGFloat(Double(a[4])!)),
+                   flags(a.count > 5 ? a[5] : nil))
+          default:
+              for down in [true, false] {
+                  let e = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(Int(a[1])!), keyDown: down)
+                  e?.flags = flags(a.count > 2 ? a[2] : nil)
+                  e?.post(tap: .cghidEventTap)
+                  usleep(40_000)
+              }
+          }
+          SWIFT
+          swiftc -O "$RUNNER_TEMP/ui.swift" -o "$RUNNER_TEMP/ui"
+          U="$RUNNER_TEMP/ui"
+          shot() { sleep "${2:-2}"; screencapture -x "$R/shots/$1.png"; pgrep -x Bcad >/dev/null && echo "$1: running" || echo "$1: NOT running"; }
+          crashes() { ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -c '^Bcad' || true; }
+          before=$(crashes)
+          APP="$RUNNER_TEMP/own/Bcad.app"
+          pkill -x Bcad || true
+          sleep 2
+          rm -rf "$HOME/Library/Application Support/Bcad"
+          defaults write com.apple.dock autohide -bool true && killall Dock && sleep 3
+          open -a "$APP"
+          shot ui-00-cold 12
+          $U trusted
+          grab() { sleep 1; screencapture -x "$R/h.png"; }
+          said() { $U tree | grep -iE "Volume|Size |Rounded|Angled|Hollow|failed|can't|don't fit|not in|Nothing|Some picked" | head -10 || true; }
+          echo "— a cube; R opens Angles; A picks every edge; Work with angles; Apply (rounded)"
+          $U hold Cube 0.5 0.5 60; sleep 2
+          $U key 15; sleep 2
+          shot ui-01-angles 1
+          $U tree | grep -E "Angles|Work with angles|All edges|Click an edge" | head -6 || true
+          $U key 0; sleep 1
+          $U button "Work with angles"; sleep 5
+          shot ui-02-editor 1
+          $U tree | grep -E "Rounded corner|Angled corner|Radius|picks" | head -6 || true
+          $U button "Apply"; sleep 5
+          shot ui-03-rounded 2
+          said
+          echo "— hollowed: O, then Enter (closed, 2 mm walls)"
+          $U key 31; sleep 2
+          shot ui-04-hollow-mode 1
+          $U key 36; sleep 5
+          shot ui-05-hollowed 2
+          said
+          echo "— a cylinder: R, A, Work with angles, Angled corner, Apply"
+          $U key 53; sleep 1
+          $U hold Cylinder 0.5 0.5 60; sleep 2
+          $U key 15; sleep 2
+          $U key 0; sleep 1
+          $U button "Work with angles"; sleep 5
+          $U axpress "Angled corner"; sleep 2
+          shot ui-06-bevel-editor 1
+          $U button "Apply"; sleep 5
+          shot ui-07-bevelled 2
+          said
+          echo "— undo twice"
+          $U key 6 cmd; sleep 2; $U key 6 cmd; sleep 2
+          shot ui-08-undone 2
+          $U key 12 cmd; shot ui-09-quit 2
+          $U press "Don't Save"; sleep 3
+          pkill -x Bcad || true
+          sleep 3
+          echo "new Bcad crash reports: $(( $(crashes) - before ))"
+          mkdir -p "$R/crashes"
+          cp ~/Library/Logs/DiagnosticReports/Bcad* "$R/crashes/" 2>/dev/null || true
+
       - name: Thumbnails
         if: always()
         continue-on-error: true

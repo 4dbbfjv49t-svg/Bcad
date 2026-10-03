@@ -231,7 +231,6 @@ bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move
 
 struct Ctx {
   const Rules &rules;
-  std::string why;
 };
 
 bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inMerge, Ctx &ctx, Solid &out);
@@ -259,7 +258,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     if (face >= placed.faces.size()) return false;
     double world = moveOf(r, placed.faces[face++].geom, sign, flip, inMerge), nr, nz;
     prof[k].normalAt(0.5, nr, nz);
-    double scale = m.kind == Model::Turned ? std::fabs(nr) * across + std::fabs(nz) * sz : std::fabs(nr) * across + std::fabs(nz) * sz;
+    double scale = std::fabs(nr) * across + std::fabs(nz) * sz;
     move[k] = world / std::max(scale, 1e-12);
   }
   std::vector<Elem> moved;
@@ -431,7 +430,7 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     double v = out.meshVolume(), all = whole.meshVolume();
     return v > 0 && v < all * 0.999 && pieces(out) == pieces(whole);
   }
-  Ctx ctx{rules, {}};
+  Ctx ctx{rules};
   Solid hole;
   if (!voidOf(s, Affine(), 1, false, false, ctx, hole)) return false;
   out = combine(whole, hole, BK_SUBTRACT);
