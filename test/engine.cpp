@@ -763,7 +763,9 @@ int main() {
     is("round: an inside corner is filled", bk_fillet(L, &ke, inside, 1, 2, &mr, &miss), 16000 + (4 - PI) * 20, 1e-6, 11);
     is("cove: one edge", bk_cove(box, &ke, edge, 1, 3, &mr, &miss), 8000 - PI * 9 / 4 * 20, 0.01, 7);
     // Every edge: each cylinder's quarter, less where two (Steinmetz) and three (the tricylinder) meet at a corner.
-    is("cove: every edge", bk_cove(box, &kb, body, 1, 3, &mr, &miss), 8000 - 12 * 9 * PI / 4 * 20 + 8 * (3 * 2.0 / 3 - (2 - std::sqrt(2.0))) * 27, 0.5, 18);
+    for (double r : {1.0, 3.0})
+      is(r == 1 ? "cove: every edge, 1 mm" : "cove: every edge, 3 mm", bk_cove(box, &kb, body, 1, r, &mr, &miss),
+         8000 - 12 * r * r * PI / 4 * 20 + 8 * (3 * 2.0 / 3 - (2 - std::sqrt(2.0))) * r * r * r, 0.5, 18);
     is("bevel: 2 × 4 mm", bk_chamfer(box, &ke, edge, 1, 2, 4, 0, &miss), 8000 - 80, 1e-6, 7);
     // Softened: each of the bevel's edges (135°) rounded, ρ²(cot(φ/2) − (π − φ)/2) per edge.
     is("bevel: softened", bk_chamfer(box, &ke, edge, 1, 2, 2, 0.5, &miss), 8000 - 40 - 2 * 0.25 * (1 / std::tan(3 * PI / 8) - PI / 8) * 20, 1e-3, 9);

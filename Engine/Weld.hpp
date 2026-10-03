@@ -58,6 +58,8 @@ inline Welded weld(const Solid &s, double step = 0) {
 // Triangles thinner than `eps` (a point that far or less off the line between two others) swapped away: the long side
 // for one from that point across to the neighbour's far corner (Csg.cpp).
 void unneedle(Welded &w, double eps);
+// Edges shorter than `eps` collapsed to a point where that keeps the surface closed (Csg.cpp).
+void tidy(Welded &w, double eps);
 
 // Back to a mesh: a vertex per point and face (normals differ from face to face, and at a point where a surface comes to
 // a tip); faces, their exact forms and deficits as given.

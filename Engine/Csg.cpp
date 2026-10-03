@@ -215,6 +215,8 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
   return true;
 }
 
+}  // namespace
+
 // Edges far shorter than anything a printer or a screen tells apart (a cut a hair from a corner) collapsed to a point, so
 // the mesh stays clean when it's handed on in floats. A collapse is made only where it keeps the surface closed, one
 // sheet and unflipped; the point kept is the one on more faces (a corner before a point inside a face).
@@ -329,8 +331,6 @@ void tidy(Welded &w, double eps) {
   w.tri.resize(3 * n), w.nrm.resize(3 * n), w.face.resize(n);
   if (!w.gap.empty()) w.gap.resize(6 * n);
 }
-
-}  // namespace
 
 bool sameForm(const FaceGeom &a, const FaceGeom &b) { return sameSurface(a, b); }
 
