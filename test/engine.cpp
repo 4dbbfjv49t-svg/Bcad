@@ -856,6 +856,11 @@ int main() {
       BKShape *thin = keep(bk_primitive(BK_BOX, plate1));
       is("bevel: a leg past the face beside it, running on", bk_chamfer(thin, &ke, top1, 1, 0.5, 2, 0, &miss), 392.5, 1e-6, 6);
       is("bevel: two across a narrow face, meeting in a ridge", bk_chamfer(thin, ke2, both1, 2, 0.5, 0.7, 0, &miss), 393.189189, 1e-5, 7);
+      // Every edge of a block with a slot (c578): the fills of its inside corners merge only in some orders (OpenCascade's
+      // 4928.0541 mm³; inside corners are finished a little differently).
+      double block578[3] = {14.5673, 23.7556, 16.9797}, slot578[3] = {7.50662, 18.9013, 16.2504};
+      BKShape *slotted = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, block578)), keep(at(keep(bk_primitive(BK_BOX, slot578)), -0.519449, -6.57891, 8.40813))));
+      is("bevel: every edge of a block with a slot", bk_chamfer(slotted, &kb, body, 1, 0.744838, 0.494177, 0, &miss), 4928.0541, 0.6);
     }
 
     // Runs of edges meeting smoothly: a box's sides rounded, then its top.
