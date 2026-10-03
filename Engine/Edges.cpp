@@ -363,17 +363,27 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
   if (missing) *missing = miss;
 
   // Runs meeting smoothly are taken whole (as OpenCascade rounds them): an edge going on from a chosen one's end the same
-  // way, beside one of its faces.
+  // way, beside one of its faces — or beside none, its faces going on smoothly from the edge's (where two roundings
+  // meet at a corner, the line between them goes on from the sharp edge that ends there).
   Ends ends = endsOf(s, usable);
-  const double smooth = std::cos(3 * M_PI / 180);
+  const double smooth = std::cos(3 * M_PI / 180), alike = std::cos(1.5 * M_PI / 180), along = std::cos(20 * M_PI / 180);
+  auto carriesOn = [&](const Solid::Edge &a, const Solid::Edge &b, V3 at) {
+    if (a.f0 < 0 || a.f1 < 0 || b.f0 < 0 || b.f1 < 0) return false;
+    V3 n0 = ix.normal(a.f0, at), n1 = ix.normal(a.f1, at), m0 = ix.normal(b.f0, at), m1 = ix.normal(b.f1, at);
+    return (dot(n0, m0) >= alike && dot(n1, m1) >= alike) || (dot(n0, m1) >= alike && dot(n1, m0) >= alike);
+  };
   auto onward = [&](int e, int end) {
     std::vector<int> next;
     V3 out = -leaving(s.edges[e], end);
     const auto &pts = s.edges[e].pts;
-    auto it = ends.find(keyOf(end == 0 ? pts.front() : pts.back()));
+    V3 at = end == 0 ? pts.front() : pts.back();
+    auto it = ends.find(keyOf(at));
     if (it == ends.end()) return next;
-    for (auto [o, oe] : it->second)
-      if (o != e && dot(leaving(s.edges[o], oe), out) >= smooth && shareFace(s.edges[e], s.edges[o])) next.push_back(o);
+    for (auto [o, oe] : it->second) {
+      if (o == e) continue;
+      double d = dot(leaving(s.edges[o], oe), out);
+      if (shareFace(s.edges[e], s.edges[o]) ? d >= smooth : d >= along && carriesOn(s.edges[e], s.edges[o], at)) next.push_back(o);
+    }
     return next;
   };
   std::vector<int> todo(chosen.begin(), chosen.end());

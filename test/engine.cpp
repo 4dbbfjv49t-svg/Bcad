@@ -931,11 +931,18 @@ int main() {
       double spandrel = (1 - PI / 4) * rr * rr, inset = rr * (10 - 3 * PI) / (12 - 3 * PI);
       is("round: a narrow cylinder's top rim, wide", bk_fillet(keep(bk_primitive(BK_CYLINDER, rod)), &ke, rodRim, 1, rr, &mr, &miss),
          PI * Rr * Rr * rod[1] - spandrel * 2 * PI * (Rr - inset), 1e-3);
-      // A top rounded, then bevelled all round: where the top's roundings cross at a corner is part of that corner, not an
-      // edge to bevel (OpenCascade's 6303.9067, within 0.02%).
+      // Two edges rounded where they meet at a corner, then the sharp edge ending there bevelled: the bevel runs on up the
+      // seam the two roundings meet along, to where they meet the top smoothly (OpenCascade's 7914.7425: its legs on the
+      // roundings measured as chords, so its bevel stays a hair wider to the end; not run on, 7916.83).
+      double cube20[3] = {20, 20, 20}, twoTop[12] = {0, 10, 10, 1, 0, 0, 10, 0, 10, 0, 1, 0}, upright[6] = {10, 10, 0, 0, 0, 1};
+      int ke2[2] = {BK_PICK_EDGE, BK_PICK_EDGE};
+      BKShape *corner = keep(bk_fillet(keep(bk_primitive(BK_BOX, cube20)), ke2, twoTop, 2, 3, &mr, &miss));
+      is("bevel: an edge running on into the seam between two roundings", bk_chamfer(corner, &ke, upright, 1, 1, 1, 0, &miss), 7914.7425, 0.4);
+      // A top rounded, then bevelled all round: each upright edge's bevel runs on up its seam (OpenCascade's 6303.9067; its
+      // four alike corners come out up to 1.2 apart, by which of its faces takes which leg).
       double b30[3] = {13.2815, 20.7227, 23.1038}, top30[6] = {0, 0, 1, 0, 0, b30[2] / 2};
       BKShape *roundTop = keep(bk_fillet(keep(bk_primitive(BK_BOX, b30)), &kf, top30, 1, 1.08193, &mr, &miss));
-      is("bevel: a box with its top rounded, all round", bk_chamfer(roundTop, &kb, body, 1, 0.786019, 0.658416, 0, &miss), 6303.9067, 1.5);
+      is("bevel: a box with its top rounded, all round", bk_chamfer(roundTop, &kb, body, 1, 0.786019, 0.658416, 0, &miss), 6303.9067, 2.5);
       // One edge rounded, then bevelled all round: the bevel runs on round the rounding's ends, each run one tool (cut piece
       // by piece, its straight part and its arc left a face between them). OpenCascade's 6092.0459.
       double b1509[3] = {11.3016, 19.6324, 27.8478}, side[6] = {-b1509[0] / 2, 0, b1509[2] / 2, 0, 1, 0};

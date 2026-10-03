@@ -307,8 +307,8 @@ bool roundCurved(const Cut2 &A, const Cut2 &B, double r, int which, Section2 &ou
 // Bevelling the corner at e: legs la along face A and lb along face B; taken away at an outside corner, added at an inside
 // one. With `soft` above zero its two edges with the faces rounded too.
 Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, double soft, int which, bool &fits, const Cut2 *A = nullptr,
-                     const Cut2 *B = nullptr) {
-  bool convex = cornerAngle(da, na, db) < pi;
+                     const Cut2 *B = nullptr, bool straightOut = false, int convexity = 0) {
+  bool convex = convexity ? convexity > 0 : cornerAngle(da, na, db) < pi;
   double m = reachOut(std::max(la, lb), which) * (convex ? 1 : -1);
   Section2 out;
   out.fill = !convex;
@@ -331,7 +331,13 @@ Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, dou
   // The bevel's line run on past each face, out to the tool's sides.
   auto past = [&](V3 from, V3 dir, V3 n) { return from + dir * (m / dot(dir, n)); };
   if (!(soft > 0.005) || !convex) {
-    out.runs = {lineRun(past(PA, PA - PB, na)), lineRun(O), lineRun(past(PB, PB - PA, nb))};
+    // Where the faces meet nearly flat (a seam between two roundings, at its end) the line lies almost along them, and
+    // runs out far before it clears them: straight out from each leg's end instead.
+    // (Or asked for, so sections swept along a run all have the same sides.)
+    if (!straightOut && std::fabs(dot(unit(PA - PB), na)) > 0.2 && std::fabs(dot(unit(PB - PA), nb)) > 0.2)
+      out.runs = {lineRun(past(PA, PA - PB, na)), lineRun(O), lineRun(past(PB, PB - PA, nb))};
+    else
+      out.runs = {lineRun(PA), lineRun(PA + na * m), lineRun(O), lineRun(PB + nb * m), lineRun(PB)};
   } else {
     Touch kA = touchAt(PA, ta, tna, dP, soft), kB = touchAt(PB, -dP, nP, tb, soft);
     fits = dot(kB.a - kA.b, dP) > 0;
@@ -344,7 +350,8 @@ Section2 bevelCorner(V3 e, V3 da, V3 na, V3 db, V3 nb, double la, double lb, dou
 
 // The sections a treatment takes at one point of a crease, in its end-on frame (u into face A, v face A's outward normal);
 // `fits` false when a softened bevel's roundings would cross.
-std::vector<Section2> sectionsAt(const Crease &c, size_t i, const Treatment &t, int which, bool *fits = nullptr) {
+std::vector<Section2> sectionsAt(const Crease &c, size_t i, const Treatment &t, int which, bool *fits = nullptr, bool straightOut = false,
+                                 int convexity = 0) {
   V3 U = c.ia[i], N = unit(c.na[i] - U * dot(c.na[i], U));
   V3 da = p2(1, 0), na = p2(0, 1), db = unit(p2(dot(c.ib[i], U), dot(c.ib[i], N))), nb = unit(p2(dot(c.nb[i], U), dot(c.nb[i], N)));
   bool convex = cornerAngle(da, na, db) < pi;
@@ -362,7 +369,7 @@ std::vector<Section2> sectionsAt(const Crease &c, size_t i, const Treatment &t, 
     break;
   case Treatment::Bevel: {
     bool ok;
-    out.push_back(bevelCorner(p2(0, 0), da, na, db, nb, t.legA, t.legB, t.corner, which, ok));
+    out.push_back(bevelCorner(p2(0, 0), da, na, db, nb, t.legA, t.legB, t.corner, which, ok, nullptr, nullptr, straightOut, convexity));
     if (fits) *fits = ok;
     break;
   }
@@ -1312,10 +1319,14 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
 
 // What's left of tools' faces meant to lie outside what they cut (`aux`): thin bits (no wider than a few chord errors `d`,
 // where meshes meet near tangent) taken into the face beside each they share most of their outline with.
-void foldAux(Solid &r, double d) {
-  bool any = false;
+// Faces no wider than `width` (twice their area over their outline's length) taken into the face beside them they share
+// the most outline with: tools' helper faces (`auxOnly`, into faces that aren't), or any (a hair's remnant of a face where
+// two tools meet). Whether any was.
+bool fold(Solid &r, double width, bool auxOnly) {
+  bool any = !auxOnly;
   for (const auto &f : r.faces) any = any || f.aux;
-  if (!any) return;
+  if (!any) return false;
+  bool folded = false;
   std::unordered_map<PKey, uint32_t, PKeyHash> id;
   std::vector<uint32_t> at(r.p.size());
   for (size_t i = 0; i < r.p.size(); i++) at[i] = id.emplace(pkey(r.p[i]), (uint32_t)id.size()).first->second;
@@ -1344,27 +1355,33 @@ void foldAux(Solid &r, double d) {
       }
       double len = norm(p);
       outline[fa] += len, outline[fb] += len;
-      if (r.faces[fa].aux && !r.faces[fb].aux) beside[fa][fb] += len;
-      if (r.faces[fb].aux && !r.faces[fa].aux) beside[fb][fa] += len;
+      if (!auxOnly || (r.faces[fa].aux && !r.faces[fb].aux)) beside[fa][fb] += len;
+      if (!auxOnly || (r.faces[fb].aux && !r.faces[fa].aux)) beside[fb][fa] += len;
     }
     bool changed = false;
     for (const auto &[f, near] : beside) {
+      if (of[f].empty()) continue;
       double area = 0;
       for (uint32_t t : of[f]) {
         V3 a = r.p[r.tri[3 * t]], b = r.p[r.tri[3 * t + 1]], c = r.p[r.tri[3 * t + 2]];
         area += norm(cross(b - a, c - a)) / 2;
       }
-      if (!(outline[f] > 0) || 2 * area / outline[f] > 4 * d) continue;
-      int into = near.begin()->first;
+      if (!(outline[f] > 0) || 2 * area / outline[f] > width) continue;
+      int into = -1;
       for (const auto &[g, len] : near)
-        if (len > near.at(into)) into = g;
+        if (!of[g].empty() && (into < 0 || len > near.at(into))) into = g;
+      if (into < 0) continue;
       for (uint32_t t : of[f]) r.triFace[t] = (uint32_t)into;
+      of[into].insert(of[into].end(), of[f].begin(), of[f].end()), of[f].clear();
       r.faces[into].deficit += r.faces[f].deficit, r.faces[f].deficit = 0;
-      changed = true;
+      changed = folded = true;
     }
     if (!changed) break;
   }
+  return folded;
 }
+
+void foldAux(Solid &r, double d) { fold(r, 4 * d, true); }
 
 // How far a flat face's sides can move in before the face is gone: each side moves in by k times its own setback
 // (`setback` per mesh edge, 0 for an edge left as it is), and the largest k that leaves some of the face. Moved in, a side
@@ -1499,6 +1516,27 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   double tol = 1e-7 * (1 + size);
   bool picked = false;
   for (int k : t.kinds) picked = picked || k == BK_PICK_EDGE || k == BK_PICK_CORNER;
+  // How far along a crease its own middle lies: where a run goes on into a seam (two roundings meeting at a corner, going
+  // on from the sharp edge that ends there), the middle of its longest edge that isn't one, else its middle.
+  auto mainAlongOf = [&](const Crease &c) {
+    double whole = c.length / 2, run = 0, longest = -1;
+    size_t at0 = 0;
+    bool seams = false;
+    for (int e : c.edges) {
+      size_t a = at0, b = at0 + s.edges[e].pts.size() - 1;
+      if (b >= c.pts.size()) return c.length / 2;
+      double len = 0;
+      for (size_t i = a; i < b; i++) len += norm(c.pts[i + 1] - c.pts[i]);
+      size_t m = (a + b) / 2;
+      if (s.faces[c.fa[m]].blend && s.faces[c.fb[m]].blend) {
+        seams = true;
+      } else if (len > longest) {
+        longest = len, whole = run + len / 2;
+      }
+      run += len, at0 = b;
+    }
+    return seams && longest >= 0 ? whole : c.length / 2;
+  };
   std::vector<Crease> work;
   for (auto &c : creases) {
     if (t.kind == Treatment::Cove && c.angle >= 179) continue;
@@ -1511,13 +1549,15 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       blendA = blendA || s.faces[c.fa[k]].blend, blendB = blendB || s.faces[c.fb[k]].blend;
       seam = seam && s.faces[c.fa[k]].blend && s.faces[c.fb[k]].blend;
     }
-    if ((blendA || blendB) && std::fabs(c.angle - 180) < 35) continue;
+    Crease m = c;
+    size_t at = pointAt(m, mainAlongOf(c));
+    double angle = m.angleAt(at);
+    if ((blendA || blendB) && std::fabs(angle - 180) < 35) continue;
     // Two roundings either side all along (the seam where they cross at a corner): part of that corner, not an edge of the
-    // shape, unless picked as such.
+    // shape, unless picked as such (or going on from a sharp edge: then part of its run).
     if (seam && !picked) continue;
     if (blendA || blendB) {
-      Crease m = c;
-      Runs r = runsAt(s, m, pointAt(m, m.length / 2), {}, std::max(tol, d));
+      Runs r = runsAt(s, m, at, {}, std::max(tol, d));
       if ((blendA && r.a < 4 * d) || (blendB && r.b < 4 * d)) continue;
     }
     work.push_back(c);
@@ -1548,7 +1588,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   for (const auto &whole : work) {
     // Measured across its middle (a point of its own there: a straight edge has only its ends).
     Crease c = whole;
-    size_t mid = pointAt(c, c.length / 2);
+    size_t mid = pointAt(c, mainAlongOf(whole));
     Runs r = runsAt(s, c, mid, work, std::max(tol, d), &whole);
     double la = r.aShared ? r.a / 2 : r.a, lb = r.bShared ? r.b / 2 : r.b;
     double phi = c.angleAt(mid) * pi / 180, half = (phi < pi ? phi : 2 * pi - phi) / 2;
@@ -1572,11 +1612,16 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
     // A bevel's legs: each edge's on this face (A's or B's by which side of its crease the face is).
     std::fill(legs.begin(), legs.end(), 0.0);
-    for (const auto &c : work)
+    for (const auto &c : work) {
+      size_t at0 = 0;
       for (size_t q = 0; q < c.edges.size(); q++) {
         int e = c.edges[q];
-        if (s.edges[e].f0 == f || s.edges[e].f1 == f) legs[c.edges[q]] = c.fa[0] == f || (c.fa.size() > 1 && c.fa[c.fa.size() / 2] == f) ? t.legA : t.legB;
+        // By the side of the crease the face is on along this edge (a run's faces change where it goes on into a seam).
+        size_t m = std::min(at0 + (s.edges[e].pts.size() - 1) / 2, c.fa.size() - 1);
+        at0 += s.edges[e].pts.size() - 1;
+        if (s.edges[e].f0 == f || s.edges[e].f1 == f) legs[e] = c.fa[m] == f ? t.legA : t.legB;
       }
+    }
     if (faceRoom(s, f, legs) < 1 - 1e-9) {
       fit.fits = false;
       fit.why = "bevel: too large for these edges";
@@ -1911,14 +1956,34 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
         continue;
       }
       // Swept from point to point, each its own frame and section; a hair on past a joint, onto the face at a free end.
+      // Where its faces come to meet flat at a free end (a seam between two roundings, going on from a sharp edge, ending
+      // where both meet a third face smoothly) the treatment comes to nothing: it stops where they last meet at an angle
+      // (its sections there the same way out as the run's).
+      bool stopped[2] = {false, false};
+      auto flat = [&](size_t i) { return std::fabs(c.angleAt(i) - 180) < 0.3; };
+      if (before < 0)
+        while (a < b && flat(a)) a++, stopped[0] = true;
+      if (after < 0)
+        while (b > a && flat(b)) b--, stopped[1] = true;
+      if (b == a) continue;
       size_t n = b - a + 1;
       std::vector<std::vector<Section2>> per(n);
       bool fits = true;
-      for (size_t i = 0; i < n; i++) per[i] = sectionsAt(c, a + i, tw, which, &fits);
+      int convexity = 0;
+      if (stopped[0] || stopped[1]) {
+        Crease m = c;
+        convexity = m.angleAt(pointAt(m, mainAlongOf(c))) < 180 ? 1 : -1;
+      }
+      for (size_t i = 0; i < n; i++) per[i] = sectionsAt(c, a + i, tw, which, &fits, false, convexity);
       if (!fits) return false;
       size_t count = per[0].size();
       for (size_t i = 0; i < n; i++)
         if (per[i].size() != count) return false;
+      bool alike = true;
+      for (size_t i = 1; i < n; i++)
+        for (size_t q = 0; q < count; q++) alike = alike && per[i][q].runs.size() == per[0][q].runs.size();
+      if (!alike)
+        for (size_t i = 0; i < n; i++) per[i] = sectionsAt(c, a + i, tw, which, &fits, true, convexity);
       double spanHere = 0;
       for (const auto &p : per) spanHere = std::max(spanHere, spanOf(p));
       for (size_t q = 0; q < count; q++) {
@@ -1939,6 +2004,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           size_t i = e == 0 ? a : b;
           V3 T = c.tangent(i) * (e == 0 ? -1.0 : 1.0);
           double reach = hair(spanHere);
+          if (stopped[e]) continue;
           if ((e == 0 ? before : after) < 0) {
             std::vector<int> others;
             for (int f : facesAt(s, c.pts[i]))
@@ -1953,6 +2019,18 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           } else {
             E.push_back(Ex), U.push_back(U.back()), N.push_back(N.back()), outlines.push_back(outlines.back());
           }
+        }
+        // A seam swept round a bend tighter than its section reaches across folds through itself (each point of the section
+        // must move on along the run from one step to the next): left as it is, the run's other pieces made.
+        size_t mid = (a + b) / 2;
+        if (s.faces[c.fa[mid]].blend && s.faces[c.fb[mid]].blend) {
+          bool folds = false;
+          for (size_t i = 0; i + 1 < E.size() && !folds; i++) {
+            V3 T = unit(E[i + 1] - E[i]);
+            for (size_t j = 0; j < outlines[i].size() && !folds; j++)
+              folds = dot(at3(E[i + 1], U[i + 1], N[i + 1], outlines[i + 1][j]) - at3(E[i], U[i], N[i], outlines[i][j]), T) <= 0;
+          }
+          if (folds) continue;
         }
         put(per[0][q].fill, q, sweptTool(E, U, N, outlines, false, runOf));
       }
@@ -2217,11 +2295,22 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   };
   std::vector<Corner> corners;
   if (t.kind == Treatment::Bevel && !(t.corner > 0.005)) {
-    std::map<std::tuple<double, double, double>, std::vector<size_t>> at;
+    // Each crease's end there: which crease, and its point at that end and the one next to it (a run's end piece, straight
+    // between flat faces, as a lone edge would be: a run going on into a seam at its other end still meets its corner).
+    struct End {
+      size_t i, k, next;
+    };
+    std::map<std::tuple<double, double, double>, std::vector<End>> at;
     for (size_t i = 0; i < work.size(); i++) {
       const Crease &c = work[i];
-      if (c.closed || c.edges.size() != 1 || c.angle >= 179 || !s.faces[c.fa[0]].geom.flat || !s.faces[c.fb[0]].geom.flat) continue;
-      for (V3 v : {c.pts.front(), c.pts.back()}) at[{v.x, v.y, v.z}].push_back(i);
+      size_t n = c.pts.size();
+      if (c.closed || n < 2) continue;
+      for (auto [k, next] : {std::pair<size_t, size_t>{0, 1}, {n - 1, n - 2}}) {
+        if (c.angleAt(k) >= 179 || !s.faces[c.fa[k]].geom.flat || !s.faces[c.fb[k]].geom.flat) continue;
+        if (c.edges.size() > 1 && s.edges[c.edges[k == 0 ? 0 : c.edges.size() - 1]].pts.size() != 2) continue;
+        V3 v = c.pts[k];
+        at[{v.x, v.y, v.z}].push_back({i, k, next});
+      }
     }
     for (auto &[key, list] : at) {
       if (list.size() != 3) continue;
@@ -2235,12 +2324,12 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
         V3 n = s.faces[f].geom.pn, dir[2], into[2];
         double leg[2];
         int k = 0;
-        for (size_t i : list) {
-          const Crease &c = work[i];
-          if (c.fa[0] != f && c.fb[0] != f) continue;
+        for (const End &end : list) {
+          const Crease &c = work[end.i];
+          if (c.fa[end.k] != f && c.fb[end.k] != f) continue;
           if (k == 2) break;
-          dir[k] = unit((c.pts.front() == V ? c.pts.back() : c.pts.front()) - V);
-          leg[k] = c.fa[0] == f ? t.legA : t.legB;
+          dir[k] = unit(c.pts[end.next] - V);
+          leg[k] = c.fa[end.k] == f ? t.legA : t.legB;
           k++;
         }
         if (k != 2) break;
@@ -2288,6 +2377,8 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       }
       Solid all = tools[0];
       for (size_t i = 1; i < tools.size(); i++) all = step(all, tools[i], BK_UNION);
+      // A tool left open takes nothing away (or anything): no result, not the shape as it was.
+      if (!closed(all)) return Solid();
       r = step(r, all, op);
     }
     // The corners cut off, each only where all it cuts lies near its corner.
@@ -2367,6 +2458,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   }
   foldAux(result, d);
   finish(result, d);
+  // A hair's remnant of a face left where two tools meet (a run's straight part and the part swept on from it): into the
+  // face beside it.
+  if (fold(result, 0.05 * d, false)) finish(result, d);
   if (pieces(result) != pieces(base)) return coveChecked ? tooWide() : tooLarge();
   return result;
 }
