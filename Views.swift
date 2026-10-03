@@ -42,7 +42,7 @@ struct RootView: View {
                                 VStack(spacing: 10) {
                                     Spacer()
                                     if tool {
-                                        ModeBar().transition(.move(edge: .bottom).combined(with: .haze))
+                                        ModeBar(mode: lib.mode).transition(.move(edge: .bottom).combined(with: .haze))
                                     }
                                     ShapeBar()
                                 }
@@ -496,9 +496,11 @@ struct ToolRail: View {
 
 struct ModeBar: View {
     @Environment(Workbench.self) private var lib
+    // The tool it was opened for: kept while it slides away, so it doesn't turn into another tool's bar on the way.
+    let mode: Mode
 
     private var title: String {
-        switch lib.mode {
+        switch mode {
         case .hollow: L("Hollow")
         case .measure: L("Ruler")
         default: L("Split")
@@ -506,7 +508,7 @@ struct ModeBar: View {
     }
 
     private var hint: String {
-        switch lib.mode {
+        switch mode {
         case .hollow: L("Click faces to open them · ⌥-click a face for its own wall")
         case .measure:
             lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
@@ -523,7 +525,7 @@ struct ModeBar: View {
             }
             .padding(.leading, 4)
             HStack(spacing: 10) {
-                switch lib.mode {
+                switch mode {
                 case .hollow: hollow
                 case .measure: measure
                 default: split

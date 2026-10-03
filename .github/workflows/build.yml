@@ -396,7 +396,7 @@ jobs:
           shot ui-00-cold 12
           $U trusted
           grab() { sleep 1; screencapture -x "$R/h.png"; }
-          said() { $U tree | grep -iE "Volume|Size |Rounded|Angled|Hollow|failed|can't|don't fit|not in|Nothing|Some picked" | head -10 || true; }
+          said() { $U tree | grep -iE "Volume|Size |Rounding|Bevel|Hollow|failed|can't|don't fit|not in|Nothing|Some picked" | head -10 || true; }
           echo "— a cube; R opens Angles; A picks every edge; Work with angles; Apply (rounded)"
           $U hold Cube 0.5 0.5 60; sleep 2
           $U key 15; sleep 2
@@ -406,14 +406,14 @@ jobs:
           $U press "Work with angles"; shot ui-02a-opening 4
           shot ui-02-editor 1
           $U tree | grep -E "Rounded corner|Angled corner|Radius|picks" | head -6 || true
-          $U press Apply; sleep 8
+          $U press Apply; sleep 15
           shot ui-03-rounded 2
           said
           $U tree | grep -E "Rounding|All edges" | head -4 || true
           echo "— hollowed: O, then Apply (closed, 2 mm walls)"
           $U key 31; sleep 2
           shot ui-04-hollow-mode 1
-          $U press Apply; sleep 8
+          $U press Apply; sleep 15
           shot ui-05-hollowed 2
           said
           echo "— a cylinder: R, A, Work with angles, Angled corner, Apply"
@@ -421,12 +421,10 @@ jobs:
           $U hold Cylinder 0.5 0.5 60; sleep 2
           $U key 15; sleep 2
           $U key 0; sleep 1
-          $U press "Work with angles"
-          for t in 1 2 3 4 5 6; do date +%T; shot "ui-05-cyl-$t" 0; sleep 1; done
-          sleep 4
-          $U press "Angled corner"; sleep 3
+          $U press "Work with angles"; sleep 10
+          $U press "Angled corner"; sleep 4
           shot ui-06-bevel-editor 1
-          $U press Apply; sleep 8
+          $U press Apply; sleep 15
           shot ui-07-bevelled 2
           said
           echo "— undo twice"
