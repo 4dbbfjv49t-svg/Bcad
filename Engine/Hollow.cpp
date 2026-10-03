@@ -576,6 +576,16 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     return ovalVoid(C, X, Y, Z, world[0], world[1], world[2], r.d, out);
   }
   bool turned = m.kind == Model::Turned;
+  // Stretched unevenly, a curved or slanting piece's offset is no longer the same form moved in: walls would come out
+  // thicker along the stretch (or thinner across it). Only pieces square to the stretch stay exact (a cylinder stretched
+  // along its axis); otherwise walled from its faces instead.
+  if (!Wn.similarity()) {
+    V3 c0 = Wn.column(0), c1 = Wn.column(1), c2 = Wn.column(2);
+    bool square = std::fabs(dot(c0, c1)) <= 1e-9 * sx * sy && std::fabs(dot(c0, c2)) <= 1e-9 * sx * sz && std::fabs(dot(c1, c2)) <= 1e-9 * sy * sz &&
+                  std::fabs(sx - sy) <= 1e-9 * std::max(sx, sy);
+    for (const auto &e : prof) square = square && !e.arc && (e.r0 == e.r1 || e.z0 == e.z1);
+    if (!square || !turned) return false;
+  }
   std::vector<std::vector<Elem>> regions(1);
   if (!outlineInset(prof, move, regions[0], turned)) {
     // An opening moved out so far that a curved piece beside it no longer reaches it (a dome round an open base): only
