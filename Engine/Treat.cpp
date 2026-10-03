@@ -408,8 +408,14 @@ bool ringTool(const Section2 &sec, V3 E, V3 U, V3 N, V3 centre, V3 axis, int aro
         profile.push_back(Elem::line(p.x, p.y, q.x, q.y));
         continue;
       }
-      if (rh(r.centre).x <= r.radius) return false;
-      profile.push_back(arcThrough(rh(r.centre), r.radius, p, q, rh(r.mid)));
+      // Only the arc itself must stay off the axis (its circle may cross it: a rounding wider than a small disc's middle).
+      Elem e = arcThrough(rh(r.centre), r.radius, p, q, rh(r.mid));
+      for (int k = 0; k <= 32; k++) {
+        double er, ez;
+        e.at(k / 32.0, er, ez);
+        if (er < -1e-9 * (1 + R)) return false;
+      }
+      profile.push_back(e);
     }
   }
   // Counter-clockwise round its region (the area of its outline, arcs by their chords and bulge).
@@ -1399,6 +1405,8 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   double size = 0;
   for (V3 q : s.p) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
   double tol = 1e-7 * (1 + size);
+  bool picked = false;
+  for (int k : t.kinds) picked = picked || k == BK_PICK_EDGE || k == BK_PICK_CORNER;
   std::vector<Crease> work;
   for (auto &c : creases) {
     if (t.kind == Treatment::Cove && c.angle >= 179) continue;
@@ -1406,9 +1414,15 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     // Beside a rounding made before: an edge near flat is where the rounding meets a face smoothly (its mesh bends there by
     // as much as a step round the rounding), and one beside a part of it no wider than a few chord errors is where it met
     // a face curving away from it (whose mesh lies that far off the face itself).
-    bool blendA = false, blendB = false;
-    for (size_t k = 0; k < c.pts.size(); k++) blendA = blendA || s.faces[c.fa[k]].blend, blendB = blendB || s.faces[c.fb[k]].blend;
+    bool blendA = false, blendB = false, seam = true;
+    for (size_t k = 0; k < c.pts.size(); k++) {
+      blendA = blendA || s.faces[c.fa[k]].blend, blendB = blendB || s.faces[c.fb[k]].blend;
+      seam = seam && s.faces[c.fa[k]].blend && s.faces[c.fb[k]].blend;
+    }
     if ((blendA || blendB) && std::fabs(c.angle - 180) < 35) continue;
+    // Two roundings either side all along (the seam where they cross at a corner): part of that corner, not an edge of the
+    // shape, unless picked as such.
+    if (seam && !picked) continue;
     if (blendA || blendB) {
       Crease m = c;
       Runs r = runsAt(s, m, pointAt(m, m.length / 2), {}, std::max(tol, d));
@@ -1593,6 +1607,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   }
 
   std::vector<Solid> take, add;
+  // A tool made one of pieces (a chain's): those pieces, by which list and where in it, to cut one by one should the whole
+  // fail.
+  std::map<std::pair<bool, size_t>, std::vector<Solid>> piecesOf;
   if (!lines.empty()) {
     std::vector<Solid> tools = lineTools(s, lines, balls, t.radius, d, tol);
     if (tools.empty()) return tooLarge();
@@ -1614,12 +1631,25 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       }
       while (taken.count(shade[i])) shade[i]++;
     }
+  // One merge or cut; should it leave a hole, again with crossing points a little farther apart made one (a tool touching
+  // a face along a line crosses it only roughly there).
+  auto step = [](const Solid &a, const Solid &b, int op) {
+    Solid r = combine(a, b, op);
+    for (double merge : {1e-9, 1e-7}) {
+      if (closed(r)) break;
+      r = combine(a, b, op, merge);
+    }
+    return r;
+  };
   // A run of edges meeting smoothly (a face's edges round a rounded corner): each edge its own piece. Straight ones
-  // between flat faces are prisms, running on through a corner that turns away from the material (where what they take is
-  // taken by the corner's piece too); arcs between faces turned round their axis (or flat across it) are the section
-  // carried round that axis through the solid's own steps, cut off at the axis; anything else is swept. Pieces meeting
-  // share the ring of points where they meet.
+  // between flat faces are prisms, running on through a corner between two of them that turns away from the material
+  // (where what they take is taken by the corner's piece too); arcs between faces turned round their axis (or flat across
+  // it) are the section carried round that axis through the solid's own steps, cut off at the axis; anything else is
+  // swept. Pieces meeting share the ring of points where they meet, a straight one and an arc ending there both; the
+  // pieces of each section then made one tool (cut one by one, two meeting there would leave a face between them).
   auto chain = [&](const Crease &c, const Treatment &tw, int which) {
+    std::map<std::pair<bool, size_t>, std::vector<Solid>> made;
+    auto put = [&](bool fill, size_t q, Solid tool) { made[{fill, q}].push_back(std::move(tool)); };
     std::vector<std::pair<size_t, size_t>> range;
     size_t at0 = 0;
     for (int e : c.edges) {
@@ -1715,7 +1745,8 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       int before = k > 0 ? (int)k - 1 : c.closed ? (int)np - 1 : -1, after = k + 1 < np ? (int)k + 1 : c.closed ? 0 : -1;
       if (in.kind == 0) {
         V3 T = unit(c.pts[b] - c.pts[a]);
-        for (const auto &sec : secs) {
+        for (size_t q = 0; q < secs.size(); q++) {
+          const Section2 &sec = secs[q];
           // How far each end runs on: through a corner turning away, a hair into anything else; at a free end onto the
           // face there (or a hair short), what's added stopping on it.
           double ext[2];
@@ -1746,7 +1777,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
           Solid tool = prismTool(sec, stations, in.U, in.N, T, d);
           for (int e = 0; e < 2; e++)
             if (endFace[e] >= 0) tool = cut(tool, c.pts[e == 0 ? a : b], -s.faces[endFace[e]].geom.pn, 0);
-          (sec.fill ? add : take).push_back(tool);
+          put(sec.fill, q, std::move(tool));
         }
         continue;
       }
@@ -1773,13 +1804,14 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
         // Cut off at the axis: in the section's frame at the middle step, the distance from the axis is R + u·Ur + v·Nr.
         V3 Uref = in.U, Nref = in.N, radialRef = unit((c.pts[in.mid] - in.centre) - in.axis * dot(c.pts[in.mid] - in.centre, in.axis));
         V3 g = p2(dot(Uref, radialRef), dot(Nref, radialRef));
-        for (const auto &sec : secs) {
+        for (size_t q = 0; q < secs.size(); q++) {
+          const Section2 &sec = secs[q];
           bool cutAway;
           Section2 part = clipped(asRuns(sec, d), g, -R, cutAway);
           if (part.runs.size() < 2) continue;
           Solid tool = turnTool(part, E, U, N, in.centre, in.axis, d);
           if (tool.tri.empty()) return false;
-          (sec.fill ? add : take).push_back(tool);
+          put(sec.fill, q, std::move(tool));
         }
         continue;
       }
@@ -1826,7 +1858,18 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
             E.push_back(Ex), U.push_back(U.back()), N.push_back(N.back()), outlines.push_back(outlines.back());
           }
         }
-        (per[0][q].fill ? add : take).push_back(sweptTool(E, U, N, outlines, false));
+        put(per[0][q].fill, q, sweptTool(E, U, N, outlines, false));
+      }
+    }
+    for (auto &[key, parts] : made) {
+      Solid one = parts[0];
+      for (size_t i = 1; i < parts.size() && closed(one); i++) one = step(one, parts[i], BK_UNION);
+      auto &into = key.first ? add : take;
+      if (parts.size() > 1 && closed(one) && !one.tri.empty()) {
+        piecesOf[{key.first, into.size()}] = std::move(parts);
+        into.push_back(std::move(one));
+      } else {
+        for (auto &part : parts) into.push_back(std::move(part));
       }
     }
     return true;
@@ -1835,7 +1878,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   // Every other crease's tools (inward roundings meeting at corners made `shadeBy` wider each, as shaded).
   std::vector<Solid> lineTake = take;
   auto tools = [&](double shadeBy) {
-    take = lineTake, add.clear();
+    take = lineTake, add.clear(), piecesOf.clear();
     int which = 0;
     for (size_t ci = 0; ci < work.size(); ci++) {
       const Crease &c = work[ci];
@@ -2110,16 +2153,6 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     }
   }
 
-  // One merge or cut; should it leave a hole, again with crossing points a little farther apart made one (a tool touching
-  // a face along a line crosses it only roughly there).
-  auto step = [](const Solid &a, const Solid &b, int op) {
-    Solid r = combine(a, b, op);
-    for (double merge : {1e-9, 1e-7}) {
-      if (closed(r)) break;
-      r = combine(a, b, op, merge);
-    }
-    return r;
-  };
   // The tools taken away one by one, then those added; failing that, each kind all together.
   auto made = [&](bool together) {
     Solid r = base;
@@ -2127,8 +2160,15 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       const std::vector<Solid> &tools = op == BK_SUBTRACT ? take : add;
       if (tools.empty()) continue;
       if (!together) {
-        for (const auto &tool : tools) {
-          r = step(r, tool, op);
+        for (size_t i = 0; i < tools.size(); i++) {
+          Solid next = step(r, tools[i], op);
+          auto parts = piecesOf.find({op == BK_UNION, i});
+          if (!closed(next) && parts != piecesOf.end()) {
+            next = r;
+            for (const auto &part : parts->second)
+              if (closed(next)) next = step(next, part, op);
+          }
+          r = std::move(next);
           if (!closed(r)) return r;
         }
         continue;

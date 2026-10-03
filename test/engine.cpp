@@ -885,6 +885,22 @@ int main() {
       BKShape *rb = keep(bk_fillet(keep(bk_primitive(BK_BOWL, bowl)), &kb, body, 1, 0.402626, &mr, &miss));
       Got before = look(rb);
       is("bevel: a rounded bowl, every edge (none left sharp)", bk_chamfer(rb, &kb, body, 1, 0.383957, 1.12174, 0, &miss), before.volume, 1e-6);
+      // A rim rounded wider than half its disc's radius: the rounding's circle crosses the axis, its arc doesn't (OpenCascade's
+      // 1296.4767; by Pappus, the corner's area turned round at its middle's distance from the axis).
+      double rod[2] = {8.32971, 24.226}, Rr = rod[0] / 2, rr = 2.18641, rodRim[6] = {-Rr, 0, rod[1] / 2, 0, -1, 0};
+      double spandrel = (1 - PI / 4) * rr * rr, inset = rr * (10 - 3 * PI) / (12 - 3 * PI);
+      is("round: a narrow cylinder's top rim, wide", bk_fillet(keep(bk_primitive(BK_CYLINDER, rod)), &ke, rodRim, 1, rr, &mr, &miss),
+         PI * Rr * Rr * rod[1] - spandrel * 2 * PI * (Rr - inset), 1e-3);
+      // A top rounded, then bevelled all round: where the top's roundings cross at a corner is part of that corner, not an
+      // edge to bevel (OpenCascade's 6303.9067, within 0.02%).
+      double b30[3] = {13.2815, 20.7227, 23.1038}, top30[6] = {0, 0, 1, 0, 0, b30[2] / 2};
+      BKShape *roundTop = keep(bk_fillet(keep(bk_primitive(BK_BOX, b30)), &kf, top30, 1, 1.08193, &mr, &miss));
+      is("bevel: a box with its top rounded, all round", bk_chamfer(roundTop, &kb, body, 1, 0.786019, 0.658416, 0, &miss), 6303.9067, 1.5);
+      // One edge rounded, then bevelled all round: the bevel runs on round the rounding's ends, each run one tool (cut piece
+      // by piece, its straight part and its arc left a face between them). OpenCascade's 6092.0459.
+      double b1509[3] = {11.3016, 19.6324, 27.8478}, side[6] = {-b1509[0] / 2, 0, b1509[2] / 2, 0, 1, 0};
+      BKShape *oneEdge = keep(bk_fillet(keep(bk_primitive(BK_BOX, b1509)), &ke, side, 1, 1.40145, &mr, &miss));
+      is("bevel: a box with one edge rounded, all round", bk_chamfer(oneEdge, &kb, body, 1, 1.06377, 0.715423, 0, &miss), 6092.0459, 0.5);
     }
     for (BKShape *s : made) bk_free(s);
     bk_free(box);
