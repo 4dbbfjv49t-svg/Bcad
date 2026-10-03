@@ -1096,9 +1096,9 @@ enum SelfTest {
         let seam = k.queue.sync { k.treatedAt(once.node, SIMD3(0, -8, 10), edge: true) }
         check("a click on a rounding's seam finds the rounding and its sharp edge", seam?.level == 0 && seam?.path.isEmpty == true
               && simd_length((seam?.edges.first?.a ?? .zero) - SIMD3(0, -10, 10)) < 0.5, "\(String(describing: seam?.edges))")
-        let bevelled = Node.bevel(of: box, picks: [roundEdge], legs: SIMD2(2, 2), corner: 0)
-        let border = k.queue.sync { k.treatedAt(bevelled, SIMD3(0, -10, 8), edge: true) }
-        check("a click on a bevel's border finds the bevel and its sharp edge", border?.layer == bevelled
+        let bevelledBox = Node.bevel(of: box, picks: [roundEdge], legs: SIMD2(2, 2), corner: 0)
+        let border = k.queue.sync { k.treatedAt(bevelledBox, SIMD3(0, -10, 8), edge: true) }
+        check("a click on a bevel's border finds the bevel and its sharp edge", border?.layer == bevelledBox
               && simd_length((border?.edges.first?.a ?? .zero) - SIMD3(0, -10, 10)) < 0.5, "\(String(describing: border?.edges))")
         let untouched = k.queue.sync { k.treatedAt(once.node, SIMD3(0, 10, 10), edge: true) }
         check("an edge no treatment made is worked on as it is", untouched == nil)
@@ -1108,17 +1108,17 @@ enum SelfTest {
 
         // "All edges" of a merge of two rounded boxes: the parts' own roundings are left out, the merge rounded all round.
         let roundedBox = Node.round(of: box, picks: [everyPick], radius: 2)
-        let pair = Solid(name: "Pair", color: Palette.colors[1], node: .group(op: Int32(BK_UNION), parts: [Part(node: roundedBox, place: Placement()),
-                         Part(node: roundedBox, place: Placement(move: SIMD3(15, 0, 0)))]), place: Placement(move: SIMD3(0, 0, 10)))
-        use([pair])
-        var pairEdges = AngleEdit(body: pair.id, picks: [everyPick], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(1, 0, 0)))
+        let roundedPair = Solid(name: "Pair", color: Palette.colors[1], node: .group(op: Int32(BK_UNION), parts: [Part(node: roundedBox, place: Placement()),
+                                Part(node: roundedBox, place: Placement(move: SIMD3(15, 0, 0)))]), place: Placement(move: SIMD3(0, 0, 10)))
+        use([roundedPair])
+        var pairEdges = AngleEdit(body: roundedPair.id, picks: [everyPick], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(1, 0, 0)))
         pairEdges.radius = 1
         lib.angleEdit = pairEdges
         lib.note = nil
         lib.applyAngles(whole: true)
         settle()
         let plainParts: Bool = {
-            guard case .round(.group(_, let parts), _, let r) = lib.body(pair.id)?.node else { return false }
+            guard case .round(.group(_, let parts), _, let r) = lib.body(roundedPair.id)?.node else { return false }
             return r == 1 && parts.count == 2 && parts.allSatisfy { $0.node == box }
         }()
         check("all edges of a merge: its parts' roundings are replaced too", plainParts && lib.note == nil, lib.note ?? "")
