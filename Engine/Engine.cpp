@@ -53,6 +53,28 @@ BKShape *bk_transform(const BKShape *s, const double *m) {
     lastError = "transform: placement flattens the shape";
     return nullptr;
   }
+  // A turn given to a few digits (its columns a hair off square, or off one length) made exactly the turn it stands
+  // for, so circles stay circles: moved no more than those digits are off.
+  if (!a.similarity()) {
+    V3 c[3] = {a.column(0), a.column(1), a.column(2)};
+    double s = std::cbrt(std::fabs(a.det()));
+    bool near = true;
+    for (int i = 0; i < 3; i++) {
+      near = near && std::fabs(norm(c[i]) - s) <= 1e-5 * s;
+      for (int j = i + 1; j < 3; j++) near = near && std::fabs(dot(c[i], c[j])) <= 1e-5 * s * s;
+    }
+    if (near) {
+      // The nearest turn (polar decomposition by averaging with the inverse transpose), times the scale.
+      Affine r = a;
+      for (int k = 0; k < 8; k++) {
+        Affine inv = r.inverse();
+        for (int i = 0; i < 3; i++)
+          for (int j = 0; j < 3; j++) r.m[4 * i + j] = (r.m[4 * i + j] / s + inv.m[4 * j + i] * s) / 2 * s;
+      }
+      for (int i = 0; i < 3; i++) r.m[4 * i + 3] = a.m[4 * i + 3];
+      if (r.similarity()) a = r;
+    }
+  }
   return new BKShape{{s->shape.node, s->shape.place.then(a)}};
 }
 

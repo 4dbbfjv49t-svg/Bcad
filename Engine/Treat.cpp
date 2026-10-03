@@ -2787,4 +2787,6 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
 
 bool foldThin(Solid &r, double width) { return fold(r, width, false); }
 
+bool shut(const Solid &s) { return closed(s); }
+
 }  // namespace bce

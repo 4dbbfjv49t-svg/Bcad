@@ -73,6 +73,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
 // the most outline with (a hair's remnant of a face where two cuts nearly met). Whether any was.
 bool foldThin(Solid &r, double width);
 
+// Whether a mesh is closed: every side of a triangle met by one running the other way (points by position).
+bool shut(const Solid &s);
+
 // Hollowing: walls of `thickness` (faces picked as openings left out, others with walls of their own), and the shape
 // without its roundings to hollow instead when the shape itself won't (only what lies inside the shape kept).
 struct Hollowing {

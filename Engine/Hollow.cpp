@@ -193,7 +193,7 @@ bool meetOf(const Elem &a, const Elem &b, V3 near, V3 &out) {
 
 // The outline moved in piece by piece (each by its own amount; pieces on the axis stay there); false when it folds over
 // itself or a piece runs out.
-bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move, std::vector<Elem> &out) {
+bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move, std::vector<Elem> &out, bool turned = true) {
   size_t n = prof.size();
   out.clear();
   if (n == 1 && prof[0].arc) {
@@ -214,7 +214,8 @@ bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move
     V3 near = p2(prof[k].r1 - (nr0 * oa + nr1 * ob) / 2, prof[k].z1 - (nz0 * oa + nz1 * ob) / 2);
     if (!meetOf(a, b, near, joint[k])) return false;
     if (std::fabs(joint[k].x) < 1e-9 * (1 + std::fabs(joint[k].y))) joint[k].x = 0;
-    if (joint[k].x < 0) return false;
+    // (A tube's section isn't turned: its r may run below zero.)
+    if (turned && joint[k].x < 0) return false;
   }
   for (size_t k = 0; k < n; k++) {
     V3 from = joint[(k + n - 1) % n], to = joint[k];
@@ -246,6 +247,222 @@ bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move
     }
   }
   return area > 0;
+}
+
+// The region an outline leaves moved in, however it does: where it's narrower than its walls it closes up (a glass's side
+// thinner than two walls stays solid), and what's left may come apart in several. Each piece moved in whole, joined to the
+// next where they meet (or by a turn round their corner), then only what lies inside that outline once over is kept.
+namespace offset {
+
+struct Seg {
+  bool arc = false;
+  V3 a, b;                           // ends
+  double cr = 0, cz = 0, rad = 0, a0 = 0, a1 = 0;  // an arc: centre, radius, angles from a to b
+  V3 at(double t) const {
+    if (!arc) return a + (b - a) * t;
+    if (t <= 0) return a;
+    if (t >= 1) return b;
+    double g = a0 + (a1 - a0) * t;
+    return p2(cr + rad * std::cos(g), cz + rad * std::sin(g));
+  }
+  // Left of the way it runs (inside, for an outline running counter-clockwise).
+  V3 left(double t) const {
+    if (!arc) return unit(p2(-(b.y - a.y), b.x - a.x));
+    V3 p = at(t), c = p2(cr, cz);
+    return unit(a1 > a0 ? c - p : p - c);
+  }
+};
+
+Seg segOf(const Elem &e) {
+  Seg s;
+  s.arc = e.arc, s.a = p2(e.r0, e.z0), s.b = p2(e.r1, e.z1);
+  if (e.arc) s.cr = e.cr, s.cz = e.cz, s.rad = e.rad, s.a0 = e.a0, s.a1 = e.a1;
+  return s;
+}
+
+Seg lineSeg(V3 a, V3 b) {
+  Seg s;
+  s.a = a, s.b = b;
+  return s;
+}
+
+// The angle a piece turns through seen from p (a closed outline's winding is their sum over 2π).
+double turn(const Seg &s, V3 p) {
+  V3 u = s.a - p, v = s.b - p;
+  double th = std::atan2(cross2(u, v), dot(u, v));
+  if (!s.arc) return th;
+  // Between the chord and the arc: the arc goes the other way round p.
+  V3 c = p2(s.cr, s.cz), mid = s.at(0.5);
+  if (norm(p - c) < s.rad && cross2(s.b - s.a, p - s.a) * cross2(s.b - s.a, mid - s.a) > 0) th += (s.a1 > s.a0 ? 2 : -2) * pi;
+  return th;
+}
+
+double winding(const std::vector<Seg> &loop, V3 p) {
+  double w = 0;
+  for (const auto &s : loop) w += turn(s, p);
+  return w / (2 * pi);
+}
+
+// Where two pieces cross, as each one's t (ends of one lying on the other included).
+void crossings(const Seg &p, const Seg &q, double eps, std::vector<double> &tp, std::vector<double> &tq) {
+  auto onSeg = [&](const Seg &s, V3 x, double &t) {
+    if (!s.arc) {
+      V3 d = s.b - s.a;
+      double l2 = dot(d, d);
+      if (l2 <= 0) return false;
+      t = dot(x - s.a, d) / l2;
+      return t >= -1e-9 && t <= 1 + 1e-9 && std::fabs(cross2(d, x - s.a)) <= eps * std::sqrt(l2);
+    }
+    if (std::fabs(norm(x - p2(s.cr, s.cz)) - s.rad) > eps) return false;
+    double g = std::atan2(x.y - s.cz, x.x - s.cr), lo = std::min(s.a0, s.a1), hi = std::max(s.a0, s.a1);
+    while (g < lo - 1e-9) g += 2 * pi;
+    while (g > hi + 1e-9) g -= 2 * pi;
+    if (g < lo - 1e-9 || g > hi + 1e-9) return false;
+    t = (g - s.a0) / (s.a1 - s.a0);
+    return true;
+  };
+  std::vector<V3> pts;
+  if (!p.arc && !q.arc) {
+    V3 d1 = p.b - p.a, d2 = q.b - q.a, w = q.a - p.a;
+    double den = cross2(d1, d2);
+    if (std::fabs(den) > 1e-12 * norm(d1) * norm(d2)) pts.push_back(p.a + d1 * (cross2(w, d2) / den));
+  } else if (p.arc != q.arc) {
+    const Seg &l = p.arc ? q : p, &c = p.arc ? p : q;
+    V3 o = l.a, dl = l.b - l.a, f = o - p2(c.cr, c.cz);
+    double A = dot(dl, dl), B = 2 * dot(f, dl), C = dot(f, f) - c.rad * c.rad, disc = B * B - 4 * A * C;
+    if (A > 0 && disc >= -1e-12 * A * (1 + std::fabs(C)))
+      for (double sg : {-1.0, 1.0}) pts.push_back(o + dl * ((-B + sg * std::sqrt(std::max(disc, 0.0))) / (2 * A)));
+  } else {
+    V3 c0 = p2(p.cr, p.cz), c1 = p2(q.cr, q.cz);
+    double dd = norm(c1 - c0);
+    if (dd > 1e-12) {
+      double a = (p.rad * p.rad - q.rad * q.rad + dd * dd) / (2 * dd), h2 = p.rad * p.rad - a * a;
+      if (h2 >= -1e-12 * p.rad * p.rad) {
+        V3 u = (c1 - c0) / dd, m = c0 + u * a, v = p2(-u.y, u.x);
+        for (double sg : {-1.0, 1.0}) pts.push_back(m + v * (sg * std::sqrt(std::max(h2, 0.0))));
+      }
+    }
+  }
+  // Running along each other (in line, or round one circle): where each one's ends lie on the other.
+  for (V3 x : {p.a, p.b, q.a, q.b}) pts.push_back(x);
+  for (V3 x : pts) {
+    double s, t;
+    if (onSeg(p, x, s) && onSeg(q, x, t)) tp.push_back(std::clamp(s, 0.0, 1.0)), tq.push_back(std::clamp(t, 0.0, 1.0));
+  }
+}
+
+Seg partOf(const Seg &s, double t0, double t1) {
+  Seg r = s;
+  r.a = s.at(t0), r.b = s.at(t1);
+  if (s.arc) r.a0 = s.a0 + (s.a1 - s.a0) * t0, r.a1 = s.a0 + (s.a1 - s.a0) * t1;
+  return r;
+}
+
+}  // namespace offset
+
+bool outlineRegions(const std::vector<Elem> &prof, const std::vector<double> &move, bool turned, std::vector<std::vector<Elem>> &out) {
+  using namespace offset;
+  size_t n = prof.size();
+  out.clear();
+  double size = 0;
+  for (const auto &e : prof) size = std::max({size, std::fabs(e.r0), std::fabs(e.z0), std::fabs(e.r1), std::fabs(e.z1)});
+  double eps = 1e-9 * (1 + size);
+  // Each piece moved in whole; an arc moved past its centre is gone (its neighbours meet where they meet).
+  std::vector<Elem> moved(n);
+  std::vector<char> kept(n, 1);
+  for (size_t k = 0; k < n; k++) {
+    moved[k] = turned && prof[k].onAxis() ? prof[k] : movedIn(prof[k], move[k]);
+    if (moved[k].arc) {
+      if (!(moved[k].rad > eps)) {
+        kept[k] = 0;
+        continue;
+      }
+      moved[k] = Elem::arcOf(moved[k].cr, moved[k].cz, moved[k].rad, moved[k].a0, moved[k].a1);
+    }
+  }
+  std::vector<size_t> order;
+  for (size_t k = 0; k < n; k++)
+    if (kept[k]) order.push_back(k);
+  if (order.size() < 2) return false;
+  // The outline moved: each piece whole, then on to the next. At a corner both pieces moved in round (turning left,
+  // inside), they overlap: by the corner itself, a loop the wrong way round that's dropped below. Otherwise where their
+  // lines or circles meet nearest the corner (a reflex corner's sharp turn, or a piece moved out to open), else
+  // straight on.
+  std::vector<Seg> loop;
+  for (size_t i = 0; i < order.size(); i++) {
+    size_t k = order[i], j = order[(i + 1) % order.size()];
+    Seg s = segOf(moved[k]), next = segOf(moved[j]);
+    loop.push_back(s);
+    if (norm(s.b - next.a) <= eps) continue;
+    V3 corner = p2(prof[k].r1, prof[k].z1), meet;
+    double tkr, tkz, tjr, tjz;
+    prof[k].normalAt(1, tkr, tkz), prof[j].normalAt(0, tjr, tjz);
+    // (Normals turn as the tangents do.)
+    bool left = tkr * tjz - tkz * tjr > 1e-12;
+    bool inward = move[k] > 0 && move[j] > 0 && !(turned && (prof[k].onAxis() || prof[j].onAxis()));
+    if (left && inward && j == (k + 1) % n) {
+      loop.push_back(lineSeg(s.b, corner));
+      loop.push_back(lineSeg(corner, next.a));
+    } else if (meetOf(moved[k], moved[j], corner, meet) && norm(meet - corner) < 4 * (std::fabs(move[k]) + std::fabs(move[j])) + eps) {
+      if (norm(s.b - meet) > eps) loop.push_back(lineSeg(s.b, meet));
+      if (norm(meet - next.a) > eps) loop.push_back(lineSeg(meet, next.a));
+    } else {
+      loop.push_back(lineSeg(s.b, next.a));
+    }
+  }
+  // Every piece cut where any other crosses it.
+  std::vector<std::vector<double>> cuts(loop.size());
+  for (size_t i = 0; i < loop.size(); i++) cuts[i] = {0, 1};
+  for (size_t i = 0; i < loop.size(); i++)
+    for (size_t j = i + 1; j < loop.size(); j++) crossings(loop[i], loop[j], 1e-7 * (1 + size), cuts[i], cuts[j]);
+  // A part is kept where inside lies once over on its left and nothing on its right.
+  std::vector<Seg> parts;
+  double off = 1e-6 * (1 + size);
+  for (size_t i = 0; i < loop.size(); i++) {
+    auto &c = cuts[i];
+    std::sort(c.begin(), c.end());
+    for (size_t k = 0; k + 1 < c.size(); k++) {
+      if (c[k + 1] - c[k] < 1e-9) continue;
+      Seg part = partOf(loop[i], c[k], c[k + 1]);
+      if (norm(part.b - part.a) <= 10 * eps && !part.arc) continue;
+      V3 mid = loop[i].at((c[k] + c[k + 1]) / 2), side = loop[i].left((c[k] + c[k + 1]) / 2);
+      double in = winding(loop, mid + side * off), outside = winding(loop, mid - side * off);
+      if (in > 0.5 && outside < 0.5) parts.push_back(part);
+    }
+  }
+  // Joined end to end into loops.
+  double snap = 1e-6 * (1 + size);
+  std::vector<char> used(parts.size(), 0);
+  for (size_t s0 = 0; s0 < parts.size(); s0++) {
+    if (used[s0]) continue;
+    std::vector<Seg> chain{parts[s0]};
+    used[s0] = 1;
+    while (norm(chain.back().b - chain.front().a) > snap) {
+      size_t best = parts.size();
+      for (size_t k = 0; k < parts.size(); k++)
+        if (!used[k] && norm(parts[k].a - chain.back().b) <= snap) {
+          best = k;
+          break;
+        }
+      if (best == parts.size()) return false;
+      used[best] = 1;
+      chain.push_back(parts[best]);
+    }
+    std::vector<Elem> region;
+    double area = 0;
+    for (auto &s : chain) {
+      Elem e = s.arc ? Elem::arcOf(s.cr, s.cz, s.rad, s.a0, s.a1) : Elem::line(s.a.x, s.a.y, s.b.x, s.b.y);
+      e.r0 = s.a.x, e.z0 = s.a.y, e.r1 = s.b.x, e.z1 = s.b.y;
+      if (turned) e.r0 = std::max(e.r0, 0.0), e.r1 = std::max(e.r1, 0.0);
+      region.push_back(e);
+      for (int k = 0; k < (s.arc ? 16 : 1); k++) {
+        V3 u = s.at(k / (s.arc ? 16.0 : 1.0)), v = s.at((k + 1) / (s.arc ? 16.0 : 1.0));
+        area += cross2(u, v) / 2;
+      }
+    }
+    if (area > 1e-9 * (1 + size * size)) out.push_back(region);
+  }
+  return !out.empty();
 }
 
 // MARK: - the tree
@@ -358,17 +575,26 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     V3 C = Wn.point(p2(0, 0) + V3{0, 0, (zlo + zhi) / 2}), X = Wn.vector(V3{R, 0, 0}), Y = Wn.vector(V3{0, R, 0}), Z = Wn.vector(V3{0, 0, (zhi - zlo) / 2});
     return ovalVoid(C, X, Y, Z, world[0], world[1], world[2], r.d, out);
   }
-  std::vector<Elem> moved;
-  if (!outlineInset(prof, move, moved)) {
+  bool turned = m.kind == Model::Turned;
+  std::vector<std::vector<Elem>> regions(1);
+  if (!outlineInset(prof, move, regions[0], turned)) {
     // An opening moved out so far that a curved piece beside it no longer reaches it (a dome round an open base): only
     // just out instead, as far as needed to break through.
+    std::vector<double> near = move;
     bool opening = false;
-    for (double &mv : move)
+    for (double &mv : near)
       if (mv < 0) mv = -0.02 * r.size, opening = true;
-    if (!opening || !outlineInset(prof, move, moved)) return false;
+    // Else narrower somewhere than its walls: what room there is (maybe in pieces), the rest solid.
+    if (!(opening && outlineInset(prof, near, regions[0], turned)) && !outlineRegions(prof, move, turned, regions)) return false;
   }
-  std::shared_ptr<Model> model = m.kind == Model::Turned ? turnedModel(moved) : sweptModel(m.a, m.b, m.phi, moved);
-  mesh(shapeOf(model, Wn), r.d, out);
+  out = Solid();
+  for (const auto &region : regions) {
+    std::shared_ptr<Model> model = turned ? turnedModel(region) : sweptModel(m.a, m.b, m.phi, region);
+    Solid one;
+    mesh(shapeOf(model, Wn), r.d, one);
+    if (out.tri.empty()) out = std::move(one);
+    else out = combine(out, one, BK_UNION);
+  }
   return out.meshVolume() > 1e-9 * r.size * r.size * r.size;
 }
 
@@ -549,8 +775,11 @@ struct Normals {
     if (side) *side = way[f];
     if (g.flat) return g.pn;
     if (g.kind == FaceGeom::Turned && g.exact) {
-      V3 w = profileNormal(f, p);
-      if (norm(w) > 0) return w * (double)way[f];
+      V3 w = profileNormal(f, p) * (double)way[f];
+      // Only where it agrees with the mesh (a face joined from pieces of other forms keeps one form, wrong over the rest,
+      // and may face either way there): elsewhere the mesh's own.
+      if (norm(m) > 0 && !(dot(unit(w), unit(m)) > 0.95)) return unit(m);
+      if (norm(w) > 0) return w;
     }
     return norm(m) > 0 ? unit(m) : face.normal;
   }
@@ -602,8 +831,16 @@ bool slabsOf(const Solid &S, const std::vector<double> &depth, double size, bool
   if (nt == 0) return false;
   Normals normals(S);
   std::vector<V3> cn(3 * nt);
-  for (size_t t = 0; t < nt; t++)
-    for (int k = 0; k < 3; k++) cn[3 * t + k] = normals.at(w.face[t], w.pts[w.tri[3 * t + k]], w.nrm[3 * t + k]);
+  for (size_t t = 0; t < nt; t++) {
+    // The point's normal as meshed, facing the way its triangle does (a tool's face taken in may keep its own facing).
+    V3 a = w.pts[w.tri[3 * t]], b = w.pts[w.tri[3 * t + 1]], c = w.pts[w.tri[3 * t + 2]], tn = cross(b - a, c - a);
+    for (int k = 0; k < 3; k++) {
+      V3 m = w.nrm[3 * t + k];
+      if (norm(m) == 0) m = tn;
+      else if (dot(m, tn) < 0) m = -m;
+      cn[3 * t + k] = normals.at(w.face[t], w.pts[w.tri[3 * t + k]], m);
+    }
+  }
   auto cornerOf = [&](size_t t, uint32_t pt) {
     for (int k = 0; k < 3; k++)
       if (w.tri[3 * t + k] == pt) return k;
@@ -954,12 +1191,31 @@ bool wallsFrom(const Solid &S, const std::vector<double> &depth, double size, So
 bool clearOfWalls(const Solid &S, const std::vector<double> &depth, double size, double d, Solid &hole) {
   std::vector<Solid> parts;
   Solid U;
-  if (!slabsOf(S, depth, size, false, 1e-4, d, parts) || !mergedAll(std::move(parts), U)) return false;
-  Solid cleared = combine(hole, U, BK_SUBTRACT);
-  double v = cleared.meshVolume();
-  if (cleared.tri.empty() || v > hole.meshVolume() * (1 + 1e-6) || v <= 0) return false;
-  hole = std::move(cleared);
-  return true;
+  if (!slabsOf(S, depth, size, false, 1e-4, d, parts)) return false;
+  std::vector<Solid> each = parts;
+  if (mergedAll(std::move(parts), U)) {
+    Solid cleared = combine(hole, U, BK_SUBTRACT);
+    double v = cleared.meshVolume();
+    if (!cleared.tri.empty() && v <= hole.meshVolume() * (1 + 1e-6) && v > 0) {
+      hole = std::move(cleared);
+      return true;
+    }
+  }
+  // The walls not merged into one (slabs side by side meeting face to face): taken out of the void one by one, each
+  // only as far as it keeps the void whole.
+  bool any = false;
+  for (const auto &slab : each) {
+    double was = hole.meshVolume(), most = slab.meshVolume(), slack = 1e-6 * (was + most);
+    for (double merge : {1e-11, 1e-9, 1e-7}) {
+      Solid cleared = combine(hole, slab, BK_SUBTRACT, merge);
+      double v = cleared.meshVolume();
+      if (cleared.tri.empty() || !(v > 0) || v > was + slack || v < was - most - slack || !shut(cleared)) continue;
+      hole = std::move(cleared);
+      any = true;
+      break;
+    }
+  }
+  return any;
 }
 
 }  // namespace
@@ -1025,8 +1281,9 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     Ctx ctx{rules};
     Solid hole, made;
     if (!voidOf(s, Affine(), 1, false, false, ctx, hole)) return false;
-    // Made of others, the void is kept clear of the walls (as is: when that can't be made, as it is).
-    bool cleared = compound(s) && clearOfWalls(whole, depth, rules.size, d, hole);
+    // Made of others, or opened (an opening moved out runs on past a face it meets inside a corner), the void is kept
+    // clear of the walls (as is: when that can't be made, as it is).
+    bool cleared = (compound(s) || !rules.open.empty()) && clearOfWalls(whole, depth, rules.size, d, hole);
     made = combine(whole, hole, BK_SUBTRACT);
     finish(made, d);
     // A hair's remnant of a face where the void was cleared just short of a wall: into the face beside it.

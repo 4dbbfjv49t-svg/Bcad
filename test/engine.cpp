@@ -887,6 +887,24 @@ int main() {
     is("hollow: a ball's face picked to open stays shut", hollow(keep(bk_primitive(BK_SPHERE, s20)), ballFace, 1, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);
     is("hollow: a round torus's face picked to open stays shut", hollow(keep(bk_primitive(BK_TORUS, ring)), ringFace, 1, nullptr, nullptr, 0, 1),
        2 * PI * PI * 11 * (16 - 9), 0.05, 2);
+    // A glass whose side is thinner than two walls: hollowed only in its base, its side left solid (as the walls ask).
+    {
+      double glass[4] = {28.2715, 21.3845, 2.67956, 4}, r = 28.2715 / 2, h = 21.3845, w = 2.67956, b = 4, t = 1.6;
+      double whole = PI * r * r * b + PI * (r * r - (r - w) * (r - w)) * (h - b);
+      is("hollow: a glass thinner at its side than two walls, hollowed in its base", hollow(keep(bk_primitive(BK_GLASS, glass)), nullptr, 0, nullptr, nullptr, 0, t),
+         whole - PI * (r - t) * (r - t) * (b - 2 * t), 1e-3);
+      double thin[4] = {28.2715, 21.3845, 2.67956, 2.5};
+      BKShape *none = hollow(keep(bk_primitive(BK_GLASS, thin)), nullptr, 0, nullptr, nullptr, 0, t);
+      check("hollow: a glass thinner everywhere than two walls is refused", !none, none ? "made" : bk_last_error());
+      if (none) bk_free(none);
+    }
+    // A turn given to six digits (its columns a hair off square) is taken as the turn it stands for: a cone stays a cone,
+    // its volume exact.
+    {
+      double cone[3] = {12.3279, 0, 10.0594};
+      double m[12] = {0.141008, -0.409537, 0.90133, -2.88387, -0.657371, 0.642019, 0.394556, -1.33004, -0.740256, -0.648144, -0.178688, 1.30816};
+      is("a cone turned by a turn given to six digits keeps its exact volume", bk_transform(keep(bk_primitive(BK_CONE, cone)), m), PI / 3 * 6.16395 * 6.16395 * 10.0594, 1e-3, 2);
+    }
     BKShape *thick = hollow(box, top, 1, nullptr, nullptr, 0, 12);
     check("hollow: walls too thick are refused", !thick, thick ? "made" : bk_last_error());
     BKShape *roundAll = keep(bk_fillet(box, &kb, body, 1, 2, &mr, &miss));
