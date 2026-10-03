@@ -1579,12 +1579,15 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
       return s;
     }
   }
-  if (t.kind != Treatment::Bevel && t.radius >= most * (1 - 1e-6)) {
+  // An inward rounding past that may still do (as OpenCascade's kernel takes it): cut, then checked (below).
+  bool coveChecked = t.kind == Treatment::Cove && t.radius >= most * (1 - 1e-6);
+  auto tooWide = [&]() {
     fit.fits = false;
     fit.most = std::max(0.0, std::floor(most * 0.999 * 100) / 100);
     fit.why = t.kind == Treatment::Round ? "rounding too large" : "cove too large";
     return s;
-  }
+  };
+  if (t.kind != Treatment::Bevel && t.radius >= most * (1 - 1e-6) && !coveChecked) return tooWide();
   auto tooLarge = [&]() {
     fit.fits = false;
     fit.why = t.kind == Treatment::Bevel ? "bevel: too large for these edges" : "too large for these edges";
@@ -2329,10 +2332,34 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     if (!closed(result) && take.size() + add.size() > 1) result = made(true);
     if ((done = !result.tri.empty() && closed(result))) break;
   }
-  if (!done) return tooLarge();
+  if (!done) return coveChecked ? tooWide() : tooLarge();
+  // Wider than the faces beside it hold: fine unless one of them is gone, or a face that has no corner on a coved edge
+  // is cut into (the shape's faces keep their numbers through the cuts).
+  if (coveChecked) {
+    std::vector<double> before(s.faces.size(), 0), after(s.faces.size(), 0);
+    auto areas = [](const Solid &m, std::vector<double> &out) {
+      for (size_t t = 0; t < m.triFace.size(); t++) {
+        if (m.triFace[t] >= out.size()) continue;
+        V3 a = m.p[m.tri[3 * t]], b = m.p[m.tri[3 * t + 1]], c = m.p[m.tri[3 * t + 2]];
+        out[m.triFace[t]] += norm(cross(b - a, c - a)) / 2;
+      }
+    };
+    areas(s, before), areas(result, after);
+    std::set<int> beside, near;
+    for (const auto &c : work) {
+      for (size_t k = 0; k < c.pts.size(); k++) beside.insert(c.fa[k]), beside.insert(c.fb[k]);
+      for (int e : c.edges)
+        for (V3 end : {s.edges[e].pts.front(), s.edges[e].pts.back()})
+          for (int f : facesAt(s, end)) near.insert(f);
+    }
+    for (size_t f = 0; f < s.faces.size(); f++) {
+      bool touched = std::fabs(after[f] - before[f]) > 1e-9 * (1 + before[f]);
+      if (beside.count((int)f) ? after[f] <= 1e-9 * (1 + before[f]) : touched && !near.count((int)f)) return tooWide();
+    }
+  }
   foldAux(result, d);
   finish(result, d);
-  if (pieces(result) != pieces(base)) return tooLarge();
+  if (pieces(result) != pieces(base)) return coveChecked ? tooWide() : tooLarge();
   return result;
 }
 

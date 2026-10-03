@@ -970,6 +970,11 @@ int main() {
       };
       is("hollow: two boxes' common part rounded all round", hollow(keep(bk_fillet(common250, &kb, body, 1, r250, &mr, &miss)), nullptr, 0, nullptr, nullptr, 0, t250),
          roundedBox(l250, r250, 0) - roundedBox(l250, r250 - t250, t250), 1e-3);
+      // Inward roundings wider than a face beside them is across: cut, and kept while every face beside them is left and
+      // none away from their edges is touched (as OpenCascade's kernel takes it: its 3264.7941).
+      double slab741[3] = {25.3699, 11.1879, 14.3455}, notch741[3] = {8.05339, 15.9867, 18.1881}, face741[6] = {0, 1, 0, 2.91354, 5.59395, -0.473284};
+      BKShape *notched = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, slab741)), keep(at(keep(bk_primitive(BK_BOX, notch741)), -8.43071, 7.58588, 4.66032))));
+      is("cove: wider than a face beside it is across", bk_cove(notched, &kf, face741, 1, 2.13207, &mr, &miss), 3264.7941, 0.05);
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
     }
