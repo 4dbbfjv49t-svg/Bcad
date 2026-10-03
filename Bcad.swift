@@ -2507,12 +2507,15 @@ final class Workbench: DesignHost {
         var turn = yaw - from.yaw
         while turn > .pi { turn -= 2 * .pi }
         while turn < -.pi { turn += 2 * .pi }
-        let steps = Neon.calm ? 8 : 30
+        // Timed by the clock, not by frames: a busy moment shortens the flight rather than holding it up.
+        let length = Neon.calm ? 0.13 : 0.5, start = Date()
         flight = Task { [weak self] in
-            for i in 1...steps {
+            var t: Float = 0
+            while t < 1 {
                 try? await Task.sleep(for: .milliseconds(16))
                 guard let self, !Task.isCancelled else { return }
-                let t = Float(i) / Float(steps), k = t * t * (3 - 2 * t)
+                t = Float(min(1, Date().timeIntervalSince(start) / length))
+                let k = t * t * (3 - 2 * t)
                 self.camera.target = from.target + (target - from.target) * k
                 self.camera.yaw = from.yaw + turn * k
                 self.camera.pitch = from.pitch + (pitch - from.pitch) * k
