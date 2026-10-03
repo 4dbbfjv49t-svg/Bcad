@@ -2693,7 +2693,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   }
 
   // The tools taken away one by one, then those added; failing that, each kind all together.
-  // `how`: those taken away together (1), those added together (2), else one by one.
+  // `how`: those taken away together (1), those added together (2), else one by one (last first with 4: where three
+  // inward roundings meet at a corner, two of them only touch, and which two that is depends on the order).
   auto made = [&](int how) {
     Solid r = base;
     for (int op : {BK_SUBTRACT, BK_UNION}) {
@@ -2701,7 +2702,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       if (tools.empty()) continue;
       bool together = how & (op == BK_SUBTRACT ? 1 : 2);
       if (!together) {
-        for (size_t i = 0; i < tools.size(); i++) {
+        for (size_t k = 0; k < tools.size(); k++) {
+          size_t i = how & 4 ? tools.size() - 1 - k : k;
           Solid next = step(r, tools[i], op);
           auto parts = piecesOf.find({op == BK_UNION, i});
           if (!closed(next) && parts != piecesOf.end()) {
@@ -2765,6 +2767,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           for (auto &f : tool.faces)
             if (!f.geom.flat && !f.aux) f.blend = true;
     result = made(0);
+    if (!closed(result) && take.size() + add.size() > 1) result = made(4);
     if (!closed(result) && take.size() + add.size() > 1) result = made(3);
     // Or one kind together, the other one by one.
     for (int how : {1, 2})
@@ -2780,6 +2783,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         for (auto &f : tool.faces)
           if (!f.geom.flat && !f.aux) f.blend = true;
     result = made(0);
+    if (!closed(result) && take.size() + add.size() > 1) result = made(4);
     if (!closed(result) && take.size() + add.size() > 1) result = made(3);
     for (int how : {1, 2})
       if (!closed(result) && !take.empty() && !add.empty()) result = made(how);

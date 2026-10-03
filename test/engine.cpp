@@ -837,6 +837,11 @@ int main() {
       BKShape *coved = keep(bk_cove(keep(bk_primitive(BK_PRISM, five)), &kb, body, 1, 0.5, &mr, &miss));
       double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
       check("cove: every edge of a prism, made or refused in moments", took < 5, fmt("%.1f s, ", took) + (coved ? "made" : bk_last_error()));
+      // Every edge of a three-sided prism and of a wedge: where three meet at a corner two cylinders only touch, which
+      // merging takes well only in some orders (OpenCascade's 261.0555 and 2656.6523 mm³).
+      double three[3] = {3, 11.6451, 6.32203}, wedge406[3] = {20.7767, 15.8337, 16.3498};
+      is("cove: every edge of a three-sided prism", bk_cove(keep(bk_primitive(BK_PRISM, three)), &kb, body, 1, 0.579835, &mr, &miss), 261.0555, 0.01, 14);
+      is("cove: every edge of a wedge", bk_cove(keep(bk_primitive(BK_WEDGE, wedge406)), &kb, body, 1, 0.525139, &mr, &miss), 2656.6523, 0.01, 14);
     }
     is("bevel: 2 × 4 mm", bk_chamfer(box, &ke, edge, 1, 2, 4, 0, &miss), 8000 - 80, 1e-6, 7);
     // Softened: each of the bevel's edges (135°) rounded, ρ²(cot(φ/2) − (π − φ)/2) per edge.
