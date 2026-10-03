@@ -174,17 +174,15 @@ int pieces(const Solid &s) {
     while (parent[x] != x) x = parent[x] = parent[parent[x]];
     return x;
   };
-  // Triangles sharing a side are one piece (sides sorted to find them).
-  std::vector<std::pair<uint64_t, uint32_t>> sides;
-  sides.reserve(3 * nt);
+  // Triangles sharing a point are one piece: shapes touching anywhere (along a face, an edge or at a single point) hold
+  // together as one.
+  std::vector<uint32_t> firstAt(w.pts.size(), UINT32_MAX);
   for (size_t t = 0; t < nt; t++)
     for (int k = 0; k < 3; k++) {
-      uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3];
-      sides.push_back({(uint64_t)std::min(a, b) << 32 | std::max(a, b), (uint32_t)t});
+      uint32_t &f = firstAt[w.tri[3 * t + k]];
+      if (f == UINT32_MAX) f = (uint32_t)t;
+      else parent[find((uint32_t)t)] = find(f);
     }
-  std::sort(sides.begin(), sides.end());
-  for (size_t k = 1; k < sides.size(); k++)
-    if (sides[k].first == sides[k - 1].first) parent[find(sides[k].second)] = find(sides[k - 1].second);
   std::vector<double> vol(nt, 0);
   double scale = 0;
   for (const auto &p : w.pts) scale = std::max({scale, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});

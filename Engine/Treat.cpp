@@ -1999,6 +1999,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
     for (const auto &L : lines) all = all && L.ball[0] >= 0 && L.ball[1] >= 0;
     Solid whole;
     if (all && roundedWhole(s, lines, balls, t.radius, d, whole)) {
+      // Its curved faces are roundings, as any rounding's are (meeting the faces beside them smoothly).
+      for (auto &f : whole.faces)
+        if (!f.geom.flat) f.blend = true;
       finish(whole, d);
       if (pieces(whole) == pieces(s)) return whole;
     }
@@ -2729,5 +2732,7 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
   if (pieces(result) != was) return coveChecked ? tooWide() : tooLarge();
   return result;
 }
+
+bool foldThin(Solid &r, double width) { return fold(r, width, false); }
 
 }  // namespace bce

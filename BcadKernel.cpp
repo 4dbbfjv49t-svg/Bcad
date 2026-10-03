@@ -85,6 +85,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <functional>
 #include <vector>
 
 struct BKShape {
@@ -727,7 +728,30 @@ BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) 
   });
 }
 
-int bk_piece_count(const BKShape *s) { return s ? solidCount(s->shape) : 0; }
+// Pieces as they hold together: solids touching anywhere (along a face, an edge or at a point) are one piece.
+int bk_piece_count(const BKShape *s) {
+  if (!s) return 0;
+  std::vector<TopoDS_Shape> solids;
+  for (TopExp_Explorer ex(s->shape, TopAbs_SOLID); ex.More(); ex.Next()) solids.push_back(ex.Current());
+  if (solids.size() < 2) return (int)solids.size();
+  std::vector<int> up(solids.size());
+  for (size_t i = 0; i < up.size(); i++) up[i] = (int)i;
+  std::function<int(int)> find = [&](int x) { return up[x] == x ? x : up[x] = find(up[x]); };
+  const double tol = 1e-5;  // mm: touching, within OpenCascade's own tolerance of its merges
+  try {
+    for (size_t i = 0; i < solids.size(); i++)
+      for (size_t j = i + 1; j < solids.size(); j++) {
+        if (find((int)i) == find((int)j)) continue;
+        BRepExtrema_DistShapeShape d(solids[i], solids[j]);
+        if (d.IsDone() && d.Value() <= tol) up[find((int)i)] = find((int)j);
+      }
+  } catch (...) {
+    return (int)solids.size();
+  }
+  int n = 0;
+  for (size_t i = 0; i < up.size(); i++) n += find((int)i) == (int)i;
+  return n;
+}
 
 int bk_bounds(const BKShape *s, const double *m, double *out) {
   if (!s || !out) return -1;
@@ -1228,6 +1252,29 @@ BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int co
 }
 
 // MARK: - section
+
+int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int count, double *out, int max) {
+  if (!s || count < 0 || (count > 0 && (!kinds || !picks)) || !finite(picks, count * 6)) return 0;
+  try {
+    TopTools_IndexedMapOfShape edges;
+    int miss = 0;
+    resolvePicks(s->shape, kinds, picks, count, edges, &miss);
+    int n = 0;
+    for (int k = 1; k <= edges.Extent(); k++) {
+      gp_Vec t;
+      gp_Pnt p = edgeMid(TopoDS::Edge(edges(k)), &t);
+      if (t.Magnitude() > 1e-12) t.Normalize();
+      if (out && n < max) {
+        double v[6] = {p.X(), p.Y(), p.Z(), t.X(), t.Y(), t.Z()};
+        memcpy(out + 6 * n, v, sizeof v);
+      }
+      n++;
+    }
+    return n;
+  } catch (...) {
+    return 0;
+  }
+}
 
 BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) {
   if (!s) return nullptr;

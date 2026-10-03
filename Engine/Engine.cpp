@@ -312,6 +312,27 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
   return new BKShape{{node, Affine()}};
 }
 
+int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int count, double *out, int max) {
+  if (!s || count < 0 || (count > 0 && (!kinds || !picks)) || !finite(picks, count * 6)) return 0;
+  Solid m;
+  mesh(s->shape, 0.05, m);
+  int missing = 0;
+  std::vector<Crease> creases = creasesOf(m, kinds, picks, count, &missing);
+  int n = 0;
+  for (auto &c : creases) {
+    if (c.pts.size() < 2) continue;
+    // At its middle by length (a point of its own there).
+    size_t i = pointAt(c, c.length / 2);
+    V3 p = c.pts[i], t = c.tangent(i);
+    if (out && n < max) {
+      double v[6] = {p.x, p.y, p.z, t.x, t.y, t.z};
+      memcpy(out + 6 * n, v, sizeof v);
+    }
+    n++;
+  }
+  return n;
+}
+
 BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) {
   if (!s) return nullptr;
   const double none[6] = {0, 0, 0, 0, 0, 0};

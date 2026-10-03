@@ -5,12 +5,15 @@
 // face moved in; roundings narrower by the walls, bevels moved in, inward roundings wider round the same edges.
 #include "Engine/Model.hpp"
 #include "Engine/Treat.hpp"
+#include "Engine/Weld.hpp"
 
 #include "BcadKernel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
+#include <unordered_map>
 
 namespace bce {
 
@@ -31,6 +34,13 @@ struct Rules {
 FaceGeom flipped(FaceGeom g) {
   if (g.flat) g.pn = -g.pn, g.pd = -g.pd;
   return g;
+}
+
+// Whether a shape is made of others (a merge, a treatment or a hollow anywhere in it, not only a primitive, cut or not).
+bool compound(const Shape &s) {
+  const Node &n = *s.node;
+  if (n.kind == Node::Split) return compound(n.a);
+  return n.kind != Node::Prim;
 }
 
 // Whether face f meets another face along some edge (else it's the whole surface of its piece).
@@ -490,6 +500,468 @@ bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inBool, C
   return false;
 }
 
+// MARK: - walls from the finished faces
+
+// The shape's own faces moved in by their walls, as OpenCascade offsets a shape's faces: the walls are what lies within
+// them, whatever the shape was made of (a merge has no inside faces left to wall, a rounding's face is a face like any).
+// Faces meeting smoothly are one patch, moved in together: a slab, the patch raised a hair out of the shape and moved in
+// by its wall, closed round its rim. Where a patch meets another inside a corner (or an opening at more than a right
+// angle), the slab runs on past the edge to where the two moved faces meet (a wing), so the void's corner is sharp, as
+// the moved faces meet. The shape is kept where a slab or a wing covers it.
+
+// A face's outward normal at p where its form is known (its plane; a turned face's exactly), else the mesh's m; with
+// whether the face runs the way its profile's outside does (+1) or the other (-1: a hole's face) — told once per face,
+// from its broadest triangle (a corner's own normal can come out turned round where meshes were cut near tangent).
+struct Normals {
+  const Solid &s;
+  std::vector<Affine> back;
+  std::vector<int> way;
+  explicit Normals(const Solid &solid) : s(solid), back(solid.faces.size()), way(solid.faces.size(), 1) {
+    std::vector<double> broadest(s.faces.size(), -1);
+    std::vector<size_t> pick(s.faces.size(), 0);
+    for (size_t t = 0; t < s.triFace.size(); t++) {
+      V3 a = s.p[s.tri[3 * t]], b = s.p[s.tri[3 * t + 1]], c = s.p[s.tri[3 * t + 2]];
+      double area = norm(cross(b - a, c - a));
+      uint32_t f = s.triFace[t];
+      if (area > broadest[f]) broadest[f] = area, pick[f] = t;
+    }
+    for (size_t f = 0; f < s.faces.size(); f++) {
+      const FaceGeom &g = s.faces[f].geom;
+      if (g.flat || g.kind != FaceGeom::Turned || !g.exact || broadest[f] <= 0) continue;
+      back[f] = g.place.inverse();
+      size_t t = pick[f];
+      V3 a = s.p[s.tri[3 * t]], b = s.p[s.tri[3 * t + 1]], c = s.p[s.tri[3 * t + 2]];
+      way[f] = dot(profileNormal((int)f, (a + b + c) / 3.0), cross(b - a, c - a)) < 0 ? -1 : 1;
+    }
+  }
+  // A turned face's profile's outward normal at p (placed).
+  V3 profileNormal(int f, V3 p) const {
+    const FaceGeom &g = s.faces[f].geom;
+    V3 q = back[f].point(p);
+    double r = std::hypot(q.x, q.y), nr, nz;
+    g.elem.normalAt(g.elem.nearest(r, q.z), nr, nz);
+    V3 local = r > 1e-12 ? V3{nr * q.x / r, nr * q.y / r, nz} : V3{0, 0, nz >= 0 ? 1.0 : -1.0};
+    return g.place.normal(local);
+  }
+  V3 at(int f, V3 p, V3 m, int *side = nullptr) const {
+    const Solid::Face &face = s.faces[f];
+    const FaceGeom &g = face.geom;
+    if (side) *side = way[f];
+    if (g.flat) return g.pn;
+    if (g.kind == FaceGeom::Turned && g.exact) {
+      V3 w = profileNormal(f, p);
+      if (norm(w) > 0) return w * (double)way[f];
+    }
+    return norm(m) > 0 ? unit(m) : face.normal;
+  }
+};
+
+// A face's form moved in by o along its own normal (side as Normals::at gives it); a curved face with no form stays so.
+FaceGeom movedForm(const FaceGeom &g, double o, int side) {
+  FaceGeom out = g;
+  if (g.flat) {
+    out.pd = g.pd - o;
+    return out;
+  }
+  double s = 1;
+  if (g.kind == FaceGeom::Turned && g.exact && g.place.similarity(&s) && s > 0) {
+    out.elem = movedIn(g.elem, side * o / s);
+    if (!g.elem.arc || out.elem.rad > 0) return out;
+  }
+  out.kind = FaceGeom::Curved, out.exact = false;
+  return out;
+}
+
+// A face's form facing the other way (a plane's; a turned face's form has no way of its own).
+FaceGeom facingIn(FaceGeom g) {
+  if (g.flat) g.pn = -g.pn, g.pd = -g.pd;
+  return g;
+}
+
+// The offset from a point where two sides meet that stands w1 out from the first (outward b1) and w2 from the second.
+V3 mitre(V3 b1, double w1, V3 b2, double w2) {
+  double c = dot(b1, b2), den = 1 - c * c, most = 4 * std::max(w1, w2);
+  if (den < 1e-6) return b1 * std::max(w1, w2);
+  V3 m = b1 * ((w1 - c * w2) / den) + b2 * ((w2 - c * w1) / den);
+  double l = norm(m);
+  return l > most ? m * (most / l) : m;
+}
+
+// Turned the other way round (its triangles, and their gaps with them).
+void reversed(Solid &s) {
+  for (size_t k = 0; k < s.tri.size(); k += 3) std::swap(s.tri[k + 1], s.tri[k + 2]);
+  for (size_t k = 0; k < s.gap.size(); k += 6) std::swap(s.gap[k + 1], s.gap[k + 2]), std::swap(s.gap[k + 3], s.gap[k + 5]);
+}
+
+// The slabs (and with `wings`, the wings) of S's faces, each face's `depth` thick (below zero: an opening, no wall), the
+// moved face that much (`thin`, a part of it) short of the wall. False when a patch folds over itself moving in (curved
+// tighter than its wall) or there's nothing to wall.
+bool slabsOf(const Solid &S, const std::vector<double> &depth, double size, bool wings, double thin, double d, std::vector<Solid> &parts) {
+  Welded w = weld(S);
+  size_t nt = w.count();
+  if (nt == 0) return false;
+  Normals normals(S);
+  std::vector<V3> cn(3 * nt);
+  for (size_t t = 0; t < nt; t++)
+    for (int k = 0; k < 3; k++) cn[3 * t + k] = normals.at(w.face[t], w.pts[w.tri[3 * t + k]], w.nrm[3 * t + k]);
+  auto cornerOf = [&](size_t t, uint32_t pt) {
+    for (int k = 0; k < 3; k++)
+      if (w.tri[3 * t + k] == pt) return k;
+    return 0;
+  };
+  // Each side of each triangle (3t + k: from corner k to the next) by its two points.
+  auto key = [](uint32_t a, uint32_t b) { return a < b ? (uint64_t)a << 32 | b : (uint64_t)b << 32 | a; };
+  std::unordered_map<uint64_t, std::vector<uint32_t>> sides;
+  sides.reserve(3 * nt);
+  for (size_t t = 0; t < nt; t++)
+    for (int k = 0; k < 3; k++) sides[key(w.tri[3 * t + k], w.tri[3 * t + (k + 1) % 3])].push_back((uint32_t)(3 * t + k));
+  auto across = [&](uint32_t side) -> int64_t {
+    uint32_t t = side / 3, k = side % 3;
+    const auto &v = sides.find(key(w.tri[3 * t + k], w.tri[3 * t + (k + 1) % 3]))->second;
+    if (v.size() != 2) return -1;
+    return v[0] == side ? v[1] : v[0];
+  };
+  // Patches: triangles of faces with the same wall meeting smoothly (normals within a degree at both ends of the side).
+  const double smooth = std::cos(pi / 180);
+  std::vector<uint32_t> up(nt);
+  for (size_t t = 0; t < nt; t++) up[t] = (uint32_t)t;
+  auto find = [&](uint32_t x) {
+    while (up[x] != x) x = up[x] = up[up[x]];
+    return x;
+  };
+  for (const auto &[k, v] : sides) {
+    if (v.size() != 2) continue;
+    uint32_t t1 = v[0] / 3, t2 = v[1] / 3;
+    int f1 = (int)w.face[t1], f2 = (int)w.face[t2];
+    if (depth[f1] < 0 || depth[f2] < 0 || depth[f1] != depth[f2]) continue;
+    uint32_t a = w.tri[v[0]], b = w.tri[3 * t1 + (v[0] % 3 + 1) % 3];
+    bool same = f1 == f2 || (dot(cn[3 * t1 + cornerOf(t1, a)], cn[3 * t2 + cornerOf(t2, a)]) > smooth &&
+                             dot(cn[3 * t1 + cornerOf(t1, b)], cn[3 * t2 + cornerOf(t2, b)]) > smooth);
+    if (same) {
+      uint32_t r1 = find(t1), r2 = find(t2);
+      if (r1 != r2) up[r1] = r2;
+    }
+  }
+  std::map<uint32_t, std::vector<uint32_t>> patches;
+  std::vector<int64_t> owner(nt, -1);
+  for (size_t t = 0; t < nt; t++)
+    if (depth[w.face[t]] >= 0) owner[t] = find((uint32_t)t), patches[(uint32_t)owner[t]].push_back((uint32_t)t);
+  if (patches.empty()) return false;
+  // Each face's way round its profile (for its form moved in).
+  std::vector<int> sideOf(S.faces.size(), 1);
+  std::vector<char> sideSeen(S.faces.size(), 0);
+  for (size_t t = 0; t < nt; t++) {
+    int f = (int)w.face[t];
+    if (sideSeen[f]) continue;
+    sideSeen[f] = 1;
+    normals.at(f, w.pts[w.tri[3 * t]], w.nrm[3 * t], &sideOf[f]);
+  }
+  const double eps = 1e-6 * (1 + size);
+  auto add = [&](Solid &part) {
+    if (part.tri.empty()) return true;
+    if (part.meshVolume() < 0) reversed(part);
+    part.centroids();
+    parts.push_back(std::move(part));
+    return true;
+  };
+  for (auto &[root, tris] : patches) {
+    double D = depth[w.face[tris[0]]], raise = 0.1 * D, rimOut = 0.1 * D;
+    // Short of the wall by `thin`, and a curved patch by its chords' sag too (the moved face meshed afresh elsewhere
+    // isn't met chord across chord).
+    bool curved = false;
+    for (uint32_t t : tris) curved = curved || !S.faces[w.face[t]].geom.flat;
+    double Db = thin > 0 ? D * (1 - thin) - (curved ? 2 * d : 0) : D;
+    if (!(Db > 0)) continue;
+    // Its points, each with the patch's normal there.
+    std::unordered_map<uint32_t, uint32_t> local;
+    std::vector<uint32_t> pts;
+    std::vector<V3> nv;
+    for (uint32_t t : tris)
+      for (int k = 0; k < 3; k++) {
+        auto [it, fresh] = local.emplace(w.tri[3 * t + k], (uint32_t)pts.size());
+        if (fresh) pts.push_back(w.tri[3 * t + k]), nv.push_back({});
+        nv[it->second] += cn[3 * t + k];
+      }
+    for (V3 &n : nv) n = unit(n);
+    // Where two faces meet near tangent their meshes cross a hair off where they touch, their normals there a few
+    // degrees apart: a normal between the two, beside each face's own a tiny side away, would pleat the moved surface.
+    // Round such points the normals are eased (a side's two ends brought to their mean, in turn) until the moved surface
+    // keeps every side the way it ran.
+    {
+      std::vector<char> near(pts.size(), 0);
+      for (uint32_t t : tris)
+        for (int k = 0; k < 3; k++) {
+          uint32_t i = local[w.tri[3 * t + k]];
+          if (dot(cn[3 * t + k], nv[i]) < std::cos(pi / 360)) near[i] = 1;
+        }
+      std::vector<std::pair<uint32_t, uint32_t>> links;
+      for (uint32_t t : tris)
+        for (int k = 0; k < 3; k++) {
+          uint32_t i = local[w.tri[3 * t + k]], j = local[w.tri[3 * t + (k + 1) % 3]];
+          if (i < j) links.push_back({i, j});
+        }
+      for (int round = 0; round < 60; round++) {
+        bool any = false;
+        for (auto [i, j] : links) {
+          if (!(near[i] || near[j]) || D * norm(nv[i] - nv[j]) <= 0.9 * norm(w.pts[pts[i]] - w.pts[pts[j]])) continue;
+          nv[i] = nv[j] = unit(nv[i] + nv[j]);
+          near[i] = near[j] = 1, any = true;
+        }
+        if (!any) break;
+      }
+    }
+    // Moved in, no side may turn back (a face curved tighter than its wall), nor a triangle of any breadth turn over. Not
+    // a side much shorter than the wall, nor a sliver: where two faces meet near tangent their meshes cross a hair off
+    // where they touch, their normals there a few degrees apart, which over a tiny side looks like a fold and isn't one.
+    for (uint32_t t : tris) {
+      V3 P[3], Q[3];
+      for (int k = 0; k < 3; k++) {
+        uint32_t i = local[w.tri[3 * t + k]];
+        P[k] = w.pts[pts[i]], Q[k] = P[k] - nv[i] * D;
+      }
+      double round = 0;
+      for (int k = 0; k < 3; k++) {
+        V3 dp = P[(k + 1) % 3] - P[k];
+        if (norm(dp) > 0.25 * D && dot(Q[(k + 1) % 3] - Q[k], dp) < -1e-6 * dot(dp, dp)) return false;
+        round += norm(dp);
+      }
+      V3 nP = cross(P[1] - P[0], P[2] - P[0]), nQ = cross(Q[1] - Q[0], Q[2] - Q[0]);
+      if (dot(nP, nQ) < -1e-6 * dot(nP, nP) && norm(nP) > 0.02 * round * round && round > 0.75 * D) return false;
+    }
+    // Its rim: each side of a triangle with no triangle of the patch across, and what lies across it.
+    struct Half {
+      uint32_t a, b;    // the patch's points (as `local`), running with the patch's triangle
+      int face;         // the patch's face along it
+      V3 out;           // across the side, away from the patch, in the surface
+      double rim = 0;   // how far the slab runs out past it (into the air, at an outside corner)
+      double wing = 0;  // how far a wing runs past it (to where the moved faces meet)
+      int next = -1;    // the face across (for a wing's run)
+    };
+    std::vector<Half> rim;
+    for (uint32_t t : tris)
+      for (int k = 0; k < 3; k++) {
+        uint32_t side = 3 * t + k;
+        int64_t o = across(side);
+        if (o >= 0 && owner[o / 3] == (int64_t)root) continue;
+        Half h;
+        uint32_t pa = w.tri[3 * t + k], pb = w.tri[3 * t + (k + 1) % 3];
+        h.a = local[pa], h.b = local[pb], h.face = (int)w.face[t];
+        V3 dir = unit(w.pts[pb] - w.pts[pa]), nA = unit(nv[h.a] + nv[h.b]);
+        h.out = unit(cross(dir, nA));
+        if (o < 0) {
+          h.rim = rimOut;
+        } else {
+          uint32_t t2 = (uint32_t)(o / 3);
+          int f2 = (int)w.face[t2];
+          V3 nB = unit(cn[3 * t2 + cornerOf(t2, pa)] + cn[3 * t2 + cornerOf(t2, pb)]);
+          bool opened = depth[f2] < 0;
+          h.next = f2;
+          if (dot(nA, nB) > smooth) {
+            // Smooth on into an opening: the wall ends square on the edge; into a thicker wall, a hair on into it.
+            h.rim = !opened && depth[f2] > D ? rimOut : 0;
+          } else {
+            // In the cut across the side: where A moved in (n_A · x = -D) meets B moved in (an opening: B itself), along
+            // `out`; past the side (inside a corner) a wing runs there, else the slab runs a little on into the air.
+            double cB = opened ? 0 : -depth[f2], den = dot(nB, h.out);
+            double u = std::fabs(den) > 1e-9 ? (cB + D * dot(nB, nA)) / den : 0;
+            if (u > eps) h.wing = std::min(u, 10 * std::max(D, opened ? D : depth[f2])) + eps;
+            else h.rim = rimOut;
+          }
+        }
+        rim.push_back(h);
+      }
+    // Round each point of the rim: the sides in and out of it.
+    std::unordered_map<uint32_t, std::vector<int>> into, outOf;
+    for (size_t i = 0; i < rim.size(); i++) into[rim[i].b].push_back((int)i), outOf[rim[i].a].push_back((int)i);
+    std::vector<V3> rimAt(pts.size());
+    for (const auto &[p, hs] : outOf) {
+      auto it = into.find(p);
+      if (hs.size() == 1 && it != into.end() && it->second.size() == 1) {
+        const Half &hi = rim[it->second[0]], &ho = rim[hs[0]];
+        rimAt[p] = mitre(hi.out, hi.rim, ho.out, ho.rim);
+      } else {
+        V3 sum;
+        for (int i : hs) sum += rim[i].out * rim[i].rim;
+        rimAt[p] = sum / (double)hs.size();
+      }
+    }
+    // The slab: the patch raised (face 0, outside the shape), moved in (faces as the patch's, moved), its rim's sides.
+    Solid slab;
+    slab.faces.resize(2);
+    slab.faces[0].aux = true;
+    slab.faces[1].geom.kind = FaceGeom::Curved;
+    std::map<int, int> movedFace;
+    for (uint32_t t : tris) {
+      int f = (int)w.face[t];
+      if (movedFace.count(f)) continue;
+      movedFace[f] = (int)slab.faces.size();
+      Solid::Face moved;
+      // Facing out of the slab: the face's way turned round (a plane's normal; a turned face's form has no way of its
+      // own).
+      moved.geom = facingIn(movedForm(S.faces[f].geom, D, sideOf[f]));
+      moved.blend = S.faces[f].blend;
+      slab.faces.push_back(moved);
+    }
+    std::vector<uint32_t> top(pts.size()), bottom(pts.size());
+    for (size_t i = 0; i < pts.size(); i++) {
+      V3 p = w.pts[pts[i]];
+      // Only the raised side runs on past the rim (the moved face stays the face's, exactly).
+      top[i] = slab.vertex(p + nv[i] * raise + rimAt[i], nv[i]);
+      bottom[i] = slab.vertex(p - nv[i] * Db, -nv[i]);
+    }
+    for (uint32_t t : tris) {
+      uint32_t i0 = local[w.tri[3 * t]], i1 = local[w.tri[3 * t + 1]], i2 = local[w.tri[3 * t + 2]];
+      slab.triangle(top[i0], top[i1], top[i2], 0);
+      slab.gap.insert(slab.gap.end(), 6, 0.0);
+      slab.triangle(bottom[i0], bottom[i2], bottom[i1], movedFace[(int)w.face[t]]);
+      // What the moved face's chords miss: the face's own (exact as its form gives it), facing the other way, each side's
+      // sag grown or shrunk as the bend there is (the turn along a side stays, its radius less the wall: from the normals,
+      // the sag dn·dp/8 becomes (dn·dn·D - dn·dp)/8).
+      const double *gt = w.gap.empty() ? nullptr : &w.gap[6 * t];
+      uint32_t c[3] = {i0, i2, i1};
+      const int corner[3] = {0, 2, 1}, mid[3] = {5, 4, 3};
+      double g[6];
+      for (int k = 0; k < 3; k++) {
+        uint32_t a = c[k], b = c[(k + 1) % 3];
+        V3 dp = w.pts[pts[b]] - w.pts[pts[a]], dn = nv[b] - nv[a];
+        double was = dot(dn, dp) / 8, now = (Db * dot(dn, dn) - dot(dn, dp)) / 8;
+        g[k] = gt ? -gt[corner[k]] : 0;
+        g[3 + k] = gt && std::fabs(was) > 1e-300 ? gt[mid[k]] * now / was : now;
+      }
+      slab.gap.insert(slab.gap.end(), g, g + 6);
+    }
+    for (const Half &h : rim) {
+      // A side square to a straight edge is flat (where the slab ends square on the rim: the wall's end at an opening
+      // met smoothly); others (round a curved edge, or run on into the air) one curved face.
+      V3 A = w.pts[pts[h.a]], B = w.pts[pts[h.b]];
+      int f = 1;
+      if (norm(rimAt[h.a]) == 0 && norm(rimAt[h.b]) == 0 && std::fabs(dot(cross(B - A, nv[h.a]), nv[h.b])) < 1e-12 * (1 + size * size)) {
+        Solid::Face side;
+        side.geom.kind = FaceGeom::Flat, side.geom.flat = true, side.geom.pn = h.out, side.geom.pd = dot(h.out, A);
+        f = (int)slab.faces.size();
+        slab.faces.push_back(side);
+      }
+      slab.triangle(top[h.b], top[h.a], bottom[h.a], f), slab.triangle(top[h.b], bottom[h.a], bottom[h.b], f);
+      slab.gap.insert(slab.gap.end(), 12, 0.0);
+    }
+    if (!add(slab)) return false;
+    if (!wings) continue;
+    // Wings: runs of rim sides with a wing, each to one face across, as tubes past the edge.
+    std::vector<int> nextOf(rim.size(), -1), prevOf(rim.size(), -1);
+    for (size_t i = 0; i < rim.size(); i++) {
+      auto it = outOf.find(rim[i].b);
+      if (it != outOf.end() && it->second.size() == 1 && into[rim[i].b].size() == 1) nextOf[i] = it->second[0], prevOf[it->second[0]] = (int)i;
+    }
+    std::vector<char> used(rim.size(), 0);
+    auto sameRun = [&](int i, int j) { return j >= 0 && rim[j].wing > 0 && rim[j].next == rim[i].next && rim[j].face == rim[i].face; };
+    for (size_t s0 = 0; s0 < rim.size(); s0++) {
+      if (used[s0] || rim[s0].wing <= 0) continue;
+      // Back to the run's start (or once round, if it closes).
+      int start = (int)s0;
+      while (sameRun(start, prevOf[start]) && prevOf[start] != (int)s0) start = prevOf[start];
+      std::vector<int> run;
+      for (int i = start; i >= 0 && !used[i] && (run.empty() || sameRun(run[0], i)); i = nextOf[i]) used[i] = 1, run.push_back(i);
+      bool closed = nextOf[run.back()] == run[0] && sameRun(run[0], run.back());
+      // Its stations: the run's points, each with how far past the edge the wing reaches (mitred with the side beyond
+      // at its ends: the next run's wing, or the slab's rim, a hair more so neighbours overlap).
+      std::vector<uint32_t> at;
+      std::vector<V3> reach, inward;
+      size_t m = run.size();
+      for (size_t j = 0; j <= m; j++) {
+        if (closed && j == m) break;
+        const Half *before = j > 0 ? &rim[run[j - 1]] : (closed ? &rim[run[m - 1]] : nullptr);
+        const Half *after = j < m ? &rim[run[j]] : nullptr;
+        uint32_t p = after ? after->a : before->b;
+        V3 r;
+        if (before && after) {
+          r = mitre(before->out, before->wing, after->out, after->wing);
+        } else {
+          const Half &own = before ? *before : *after;
+          int beyond = before ? nextOf[run[m - 1]] : prevOf[run[0]];
+          if (beyond >= 0) {
+            const Half &b = rim[beyond];
+            r = mitre(own.out, own.wing, b.out, (b.wing > 0 ? b.wing : b.rim) + eps);
+          } else {
+            r = own.out * own.wing;
+          }
+        }
+        at.push_back(p), reach.push_back(r);
+        inward.push_back(before && after ? unit(before->out + after->out) : (before ? before->out : after->out));
+      }
+      Solid tube;
+      tube.faces.resize(2);
+      tube.faces[1].geom.kind = FaceGeom::Curved;
+      const FaceGeom &g = S.faces[rim[run[0]].face].geom;
+      if (g.flat) tube.faces[0].geom = facingIn(movedForm(g, D, 1));
+      else tube.faces[0].geom.kind = FaceGeom::Curved;
+      // Each station's ring: inside the edge on the patch (raised, moved in), out past it (moved in, raised).
+      std::vector<std::array<uint32_t, 4>> ring;
+      for (size_t j = 0; j < at.size(); j++) {
+        V3 p = w.pts[pts[at[j]]], n = nv[at[j]], base = p - inward[j] * eps, tip = p + reach[j];
+        ring.push_back({tube.vertex(base + n * raise, n), tube.vertex(tip + n * raise, n), tube.vertex(tip - n * D, -n), tube.vertex(base - n * D, -n)});
+      }
+      auto quad = [&](uint32_t a, uint32_t b, uint32_t c, uint32_t d, int f) {
+        tube.triangle(a, b, c, f), tube.triangle(a, c, d, f);
+        tube.gap.insert(tube.gap.end(), 12, 0.0);
+      };
+      size_t ns = ring.size();
+      for (size_t j = 0; j + (closed ? 0 : 1) < ns; j++) {
+        const auto &r0 = ring[j], &r1 = ring[(j + 1) % ns];
+        for (int i = 0; i < 4; i++) quad(r0[i], r0[(i + 1) % 4], r1[(i + 1) % 4], r1[i], i == 2 ? 0 : 1);
+      }
+      if (!closed) {
+        quad(ring[0][3], ring[0][2], ring[0][1], ring[0][0], 1);
+        quad(ring[ns - 1][0], ring[ns - 1][1], ring[ns - 1][2], ring[ns - 1][3], 1);
+      }
+      if (!add(tube)) return false;
+    }
+  }
+  return !parts.empty();
+}
+
+// Solids merged into one, two by two (each round's pieces small and many, then fewer and larger). False when a merge goes
+// wrong (comes out short of a part of it, or past both together: faces met so near flat the merge can't tell them).
+bool mergedAll(std::vector<Solid> parts, Solid &out) {
+  if (parts.empty()) return false;
+  while (parts.size() > 1) {
+    std::vector<Solid> next;
+    for (size_t i = 0; i + 1 < parts.size(); i += 2) {
+      double a = parts[i].meshVolume(), b = parts[i + 1].meshVolume();
+      next.push_back(combine(parts[i], parts[i + 1], BK_UNION));
+      double v = next.back().meshVolume(), slack = 1e-6 * (a + b);
+      if (next.back().tri.empty() || v < std::max(a, b) - slack || v > a + b + slack) return false;
+    }
+    if (parts.size() % 2) next.push_back(std::move(parts.back()));
+    parts = std::move(next);
+  }
+  out = std::move(parts[0]);
+  return true;
+}
+
+// S's walls from its faces: what of S its slabs and wings cover.
+bool wallsFrom(const Solid &S, const std::vector<double> &depth, double size, Solid &out) {
+  std::vector<Solid> parts;
+  Solid U;
+  if (!slabsOf(S, depth, size, true, 0, 0, parts) || !mergedAll(std::move(parts), U)) return false;
+  out = combine(S, U, BK_INTERSECT);
+  double v = out.meshVolume();
+  return !out.tri.empty() && v <= std::min(S.meshVolume(), U.meshVolume()) * (1 + 1e-6);
+}
+
+// A void kept clear of S's faces by their walls: what of it lies within a wall of a face (a hair short of it, so the
+// void's own faces, where the walls end, aren't met face to face) taken off. The void from the tree keeps its corners
+// sharp and exact; this takes off where a part's face hidden in a merge, moved out, reached into another part's wall.
+bool clearOfWalls(const Solid &S, const std::vector<double> &depth, double size, double d, Solid &hole) {
+  std::vector<Solid> parts;
+  Solid U;
+  if (!slabsOf(S, depth, size, false, 1e-4, d, parts) || !mergedAll(std::move(parts), U)) return false;
+  Solid cleared = combine(hole, U, BK_SUBTRACT);
+  double v = cleared.meshVolume();
+  if (cleared.tri.empty() || v > hole.meshVolume() * (1 + 1e-6) || v <= 0) return false;
+  hole = std::move(cleared);
+  return true;
+}
+
 }  // namespace
 
 bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing) {
@@ -506,17 +978,23 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
   rules.out = 2 * thickest + 0.05 * rules.size;
   for (const auto &f : whole.faces) rules.shown.push_back(f.geom);
   int lost = 0;
+  // Each face's wall (below zero: opened).
+  std::vector<double> depth(whole.faces.size(), rules.t);
   for (size_t i = 0; i + 5 < h.open.size(); i += 6) {
     int f = faceAt(whole, &h.open[i]);
     if (f < 0) lost++;
     // A face meeting no other along any edge is the whole surface of its piece (a ball's, a ring's): opened, nothing of
     // the piece would be left, so it stays shut.
-    else if (bounded(whole, f)) rules.open.push_back(whole.faces[f].geom);
+    else if (bounded(whole, f)) rules.open.push_back(whole.faces[f].geom), depth[f] = -1;
   }
   for (size_t i = 0; i + 5 < h.walls.size() && i / 6 < h.wallThickness.size(); i += 6) {
     int f = faceAt(whole, &h.walls[i]);
     if (f < 0) lost++;
-    else rules.own.push_back({whole.faces[f].geom, std::max(h.wallThickness[i / 6], 0.01)});
+    else {
+      rules.own.push_back({whole.faces[f].geom, std::max(h.wallThickness[i / 6], 0.01)});
+      // An opening before a wall of its own, should a face be picked as both (as OpenCascade's kernel takes it).
+      if (depth[f] >= 0) depth[f] = std::max(h.wallThickness[i / 6], 0.01);
+    }
   }
   if (missing) *missing = lost;
   // The shape without its roundings hollowed instead: only what lies inside the shape kept.
@@ -530,16 +1008,38 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
     double v = out.meshVolume(), all = whole.meshVolume();
     return v > 0 && v < all * 0.999 && pieces(out) == pieces(whole);
   }
-  Ctx ctx{rules};
-  Solid hole;
-  if (!voidOf(s, Affine(), 1, false, false, ctx, hole)) return false;
-  out = combine(whole, hole, BK_SUBTRACT);
-  finish(out, d);
-  double v = out.meshVolume(), all = whole.meshVolume(), taken = all - v, inside = hole.meshVolume();
-  if (!(v > 0) || !(v < all * 0.999) || pieces(out) != pieces(whole)) return false;
-  // Shut, the void must lie wholly inside (walls too thick at a rounding would break through).
-  if (rules.open.empty() && taken < inside * (1 - 1e-6) - 1e-9 * rules.size * rules.size * rules.size) return false;
-  return true;
+  double all = whole.meshVolume();
+  int parts = pieces(whole);
+  // Walls from the finished faces.
+  auto fromFaces = [&]() {
+    Solid made;
+    if (!wallsFrom(whole, depth, rules.size, made)) return false;
+    finish(made, d);
+    double v = made.meshVolume();
+    if (!(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
+    out = std::move(made);
+    return true;
+  };
+  // A void from the shape's own tree.
+  auto fromTree = [&]() {
+    Ctx ctx{rules};
+    Solid hole, made;
+    if (!voidOf(s, Affine(), 1, false, false, ctx, hole)) return false;
+    // Made of others, the void is kept clear of the walls (as is: when that can't be made, as it is).
+    bool cleared = compound(s) && clearOfWalls(whole, depth, rules.size, d, hole);
+    made = combine(whole, hole, BK_SUBTRACT);
+    finish(made, d);
+    // A hair's remnant of a face where the void was cleared just short of a wall: into the face beside it.
+    if (cleared && foldThin(made, 0.05 * d)) finish(made, d);
+    double v = made.meshVolume(), taken = all - v, inside = hole.meshVolume();
+    if (!(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
+    // Shut, the void must lie wholly inside (walls too thick at a rounding would break through).
+    if (rules.open.empty() && taken < inside * (1 - 1e-6) - 1e-9 * rules.size * rules.size * rules.size) return false;
+    out = std::move(made);
+    return true;
+  };
+  // By its tree first (exactly, its void's corners sharp), then by its faces.
+  return fromTree() || fromFaces();
 }
 
 }  // namespace bce

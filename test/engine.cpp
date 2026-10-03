@@ -464,6 +464,15 @@ int main() {
     check("merge: touching cubes are one piece", g.shut && near(g.volume, 16000, 1e-9) && g.faces == 6 && g.pieces == 1, says(g));
     g = look(keep(bk_boolean(BK_UNION, box, keep(at(box, 30)))));
     check("merge: cubes apart are two pieces", g.shut && near(g.volume, 16000, 1e-9) && g.pieces == 2, says(g));
+    // Touching only along an edge, or at one corner: one piece all the same (held together there, as one shape).
+    {
+      double m[12] = {1, 0, 0, 20, 0, 1, 0, 20, 0, 0, 1, 0}, c[12] = {1, 0, 0, 20, 0, 1, 0, 20, 0, 0, 1, 20};
+      BKShape *e = keep(bk_transform(box, m)), *k = keep(bk_transform(box, c));
+      g = look(keep(bk_boolean(BK_UNION, box, e)));
+      check("merge: cubes touching along an edge are one piece", near(g.volume, 16000, 1e-9) && g.pieces == 1, says(g));
+      g = look(keep(bk_boolean(BK_UNION, box, k)));
+      check("merge: cubes touching at a corner are one piece", near(g.volume, 16000, 1e-9) && g.pieces == 1, says(g));
+    }
     g = look(keep(bk_boolean(BK_SUBTRACT, box, box2)));
     check("subtract: a corner taken out", g.shut && near(g.volume, 7000, 1e-9) && g.faces == 9 && g.pieces == 1 && boxIs(g, {-10, -10, -10}, {10, 10, 10}), says(g));
     g = look(keep(bk_boolean(BK_INTERSECT, box, box2)));
@@ -772,6 +781,13 @@ int main() {
     BKSection *sec = bk_section(box, ke, edge, 10);
     check("section: across a box's edge, 90° and one outline", sec && near(sec->angle, 90, 1e-9) && sec->loopCount == 1, sec ? fmt("%.4f° · %.0f loops", sec->angle, sec->loopCount) : bk_last_error());
     if (sec) bk_section_free(sec);
+    // The edges picks stand for, one edge pick each: a box's every edge, its top's four, one edge itself.
+    {
+      double got[12 * 6];
+      int all = bk_pick_edges(box, &kb, body, 1, got, 12), fourTop = bk_pick_edges(box, &kf, top, 1, nullptr, 0), one = bk_pick_edges(box, &ke, edge, 1, got, 1);
+      check("pick edges: a box's 12, its top's 4, one edge's 1 (at its middle)", all == 12 && fourTop == 4 && one == 1 && near(got[1], -10, 1e-9) && near(got[2], 10, 1e-9) && near(got[0], 0, 1e-9),
+            fmt("%.0f, %.0f, %.0f", all, fourTop, one));
+    }
 
     double one = 8000 - (4 - PI) * 20;
     is("round: one edge", bk_fillet(box, &ke, edge, 1, 2, &mr, &miss), one, 1e-6, 7);
@@ -844,6 +860,19 @@ int main() {
     is("hollow: a cylinder open at the top", hollow(cyl, top, 1, nullptr, nullptr, 0, 1.5), PI * (100 * 20 - 8.5 * 8.5 * 18.5), 1e-3, 5);
     double s20[1] = {20};
     is("hollow: a ball", hollow(keep(bk_primitive(BK_SPHERE, s20)), nullptr, 0, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);
+    // Merged shapes hollowed as one: two boxes side by side, no wall left between them; a cylinder standing on a box, open at
+    // its top (its bore runs down through the box's top wall into the box's void: 1408 + 29π); a box's face hidden in
+    // another (as c299: inside the other's top wall, its void mustn't reach into that wall; exact 4851.178).
+    {
+      double half[3] = {10, 20, 20}, plate[3] = {20, 20, 10}, post[2] = {10, 10}, postTop[6] = {0, 0, 1, 0, 0, 10};
+      BKShape *pair = keep(bk_boolean(BK_UNION, keep(at(keep(bk_primitive(BK_BOX, half)), -5, 0, 0)), keep(at(keep(bk_primitive(BK_BOX, half)), 5, 0, 0))));
+      is("hollow: two boxes side by side, one void", hollow(pair, nullptr, 0, nullptr, nullptr, 0, 2), 8000 - 4096, 1e-6, 12);
+      BKShape *standing = keep(bk_boolean(BK_UNION, keep(bk_primitive(BK_BOX, plate)), keep(at(keep(bk_primitive(BK_CYLINDER, post)), 0, 0, 5))));
+      is("hollow: a cylinder standing on a box, open at its top", hollow(standing, postTop, 1, nullptr, nullptr, 0, 1), 1408 + 29 * PI, 1e-3);
+      double a299[3] = {24.6375, 22.7407, 20.0771}, b299[3] = {6.53949, 13.7818, 20.0672};
+      BKShape *poked = keep(bk_boolean(BK_UNION, keep(bk_primitive(BK_BOX, a299)), keep(at(keep(bk_primitive(BK_BOX, b299)), -2.5173, -0.958031, -2.00733))));
+      is("hollow: a box's face hidden near another's top wall keeps that wall whole", hollow(poked, nullptr, 0, nullptr, nullptr, 0, 1.85386), 4851.178, 0.01, 22);
+    }
     // A ball's one face is its whole surface: opened, nothing would be left, so it stays shut (a round torus's alike).
     double ballFace[6] = {0, 0, 1, 0, 0, 10}, ring[3] = {0, 30, 8}, ringFace[6] = {0, 0, 1, 11, 0, 4};
     is("hollow: a ball's face picked to open stays shut", hollow(keep(bk_primitive(BK_SPHERE, s20)), ballFace, 1, nullptr, nullptr, 0, 2), 4 * PI / 3 * (1000 - 512), 1e-3, 2);

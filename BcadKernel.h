@@ -93,6 +93,9 @@ typedef struct {
 // Curves are sampled for a view of ±radius around the origin. Returns NULL when there is no edge between two faces.
 BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius);
 void bk_section_free(BKSection *section);
+// The edges picks stand for on a shape, as a rounding or bevel of them takes them: one edge pick each (6 numbers: a point
+// at its middle, its direction there), at most `max` written to out (NULL to count). Returns how many there are.
+int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int count, double *out, int max);
 // Hollows a solid inward, keeping its outside. open: faces removed as openings; walls: faces with their own thickness.
 // Faces are given as 6 numbers each (normal, centroid). Without openings the result is closed with an inner void.
 // sharp: the same solid with roundings left out (the last without any), tried in turn when the solid itself doesn't

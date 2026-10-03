@@ -69,6 +69,10 @@ struct TreatFit {
 // tools made for s's edges are taken from (or added to) that solid instead (a hollow's inside, cut where s's edges are).
 Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto = nullptr);
 
+// Faces no wider than `width` (twice their area over their outline's length) taken into the face beside them they share
+// the most outline with (a hair's remnant of a face where two cuts nearly met). Whether any was.
+bool foldThin(Solid &r, double width);
+
 // Hollowing: walls of `thickness` (faces picked as openings left out, others with walls of their own), and the shape
 // without its roundings to hollow instead when the shape itself won't (only what lies inside the shape kept).
 struct Hollowing {
