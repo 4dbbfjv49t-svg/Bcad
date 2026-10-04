@@ -422,3 +422,22 @@ t3_c1949_app|P 0 13.0408 20.3859 11.1107 0 ; P 3 12.5884 0 0 0 ; T 1 0 0 8.87154
 t3_c1969_app|P 0 14.6958 27.3125 19.7364 0 ; P 3 13.7098 0 0 0 ; T 1 0 0 -4.77231 0 1 0 9.5983 0 0 1 5.44055 ; B 0 ;|C 0.506381 0.470629 0 1 3 0 0 0 0 0 0|made 8429.365 1.685873
 t2_c1194_app|P 4 3 18.5935 21.5648 0 ; S 0.133228 -0.186606 -1.81782 0.945544 0.173097 0.77331 1 ;|C 1.07816 1.32072 0 1 3 0 0 0 0 0 0|made 997.7359 0.1995472
 t3_c1862_app|P 0 15.0454 11.3906 16.893 0 ; P 1 5.71532 16.5104 0 0 ; T 1 0 0 0.139946 0 1 0 2.62189 0 0 1 -3.81809 ; B 0 ;|C 1.35119 1.22973 0 1 3 0 0 0 0 0 0|refused
+# Mesh bodies (M detail: the shape so far as a mesh, as a sculpt holds it): merged, cut and split with plain shapes and
+# with each other; roundings, hollows and sections on a body with no edges.
+m_sphere|P 3 30 ; M 0.05 ;||made 13989.44 2.797888
+m_box_cyl|P 0 20 20 20 ; P 1 12 30 ; B 0 ; M 0.05 ;||made 9119.104 1.823821
+m_sphere_less_box|P 3 30 ; M 0.05 ; P 0 10 10 40 ; B 1 ;||made 11110.44 2.222088
+m_sphere_plus_box|P 3 30 ; M 0.05 ; P 0 10 10 40 ; T 1 0 0 12 0 1 0 0 0 0 1 0 ; B 0 ;||made 16583.06 3.316612
+m_torus_split|P 5 0 40 10 ; M 0.05 ; S 0 0 0 0.3 0.4 0.866 0 ;||made 3643.368 0.7286735
+m_rod_in_block|P 0 30 30 20 ; N 0 4 30 0.2 ; M 0.05 ; B 1 ;||made 17230.94 3.446188
+m_two_meshes|P 3 20 ; M 0.05 ; P 3 20 ; T 1 0 0 10 0 1 0 0 0 0 1 0 ; M 0.05 ; B 0 ;||made 6970.496 1.394099
+m_round|P 0 20 20 20 ; M 0.05 ;|F 2 1 3 0 0 0 0 0 0|made 8000 1.6
+m_hollow|P 3 30 ; M 0.05 ;|H 2 0 0|made 4787.684 0.9575368
+m_section|P 0 20 20 20 ; M 0.05 ;|X 0 -10 0 0 0 1 0|refused
+# Remeshed for sculpting (R detail): even triangles at the detail, overlapping parts one solid, then merged, cut, hollowed.
+r_sphere|P 3 30 ; R 0.5 ;||made 14099.44 2.819889
+r_box_cyl|P 0 20 20 20 ; P 1 12 30 ; B 0 ; R 0.5 ;||made 9119.48 1.823896
+r_two_meshes|P 3 20 ; M 0.05 ; P 3 20 ; T 1 0 0 10 0 1 0 0 0 0 1 0 ; M 0.05 ; B 0 ; R 0.4 ;||made 6965.656 1.393131
+r_sphere_less_box|P 3 30 ; R 0.5 ; P 0 10 10 40 ; B 1 ;||made 11215.67 2.243133
+r_bolt|N 1 4 30 0.2 ; R 0.3 ;||made 1933.572 0.3867143
+r_torus_hollow|P 5 0 40 10 ; R 0.5 ;|H 2 0 0|made 4720.102 0.9440204

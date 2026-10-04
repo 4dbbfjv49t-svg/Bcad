@@ -7,6 +7,7 @@
 #include "Engine/Fasteners.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Print.hpp"
+#include "Engine/Sculpt.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
@@ -42,6 +43,17 @@ BKShape *bk_primitive(int kind, const double *p) {
     return nullptr;
   }
   return new BKShape{s};
+}
+
+BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) {
+  if (!positions || !indices || vertexCount < 0 || triangleCount < 0) return lastError = "mesh: no points or triangles", nullptr;
+  std::vector<V3> pts((size_t)vertexCount);
+  for (size_t i = 0; i < pts.size(); i++) pts[i] = {positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]};
+  std::vector<uint32_t> tris(indices, indices + 3 * (size_t)triangleCount);
+  std::string why;
+  auto m = meshModel(pts, tris, why);
+  if (!m) return lastError = "mesh: " + why, nullptr;
+  return new BKShape{shapeOf(m)};
 }
 
 BKShape *bk_transform(const BKShape *s, const double *m) {
@@ -103,6 +115,33 @@ template <typename T> static T *mallocCopy(const std::vector<T> &v) {
   T *out = (T *)malloc(sizeof(T) * std::max<size_t>(1, v.size()));
   if (!v.empty()) memcpy(out, v.data(), sizeof(T) * v.size());
   return out;
+}
+
+BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail) {
+  if (!s) return nullptr;
+  if (!m || !finite(m, 12) || !std::isfinite(detail)) return lastError = "remesh: sizes must be numbers", nullptr;
+  Affine a = Affine::from(m);
+  if (std::fabs(a.det()) <= 1e-12) return lastError = "remesh: placement flattens the shape", nullptr;
+  // The shape's mesh well within the detail (a curve's chords lie inside it, and would come out a little small).
+  Solid in;
+  mesh({s->shape.node, s->shape.place.then(a)}, std::min(0.05, std::max(0.002, detail / 50)), in);
+  std::vector<V3> pts;
+  std::vector<uint32_t> tris;
+  std::string why;
+  if (!remesh(in.p, in.tri, detail, pts, tris, why)) return lastError = "remesh: " + why, nullptr;
+  BKSculptMesh *out = new BKSculptMesh();
+  out->vertexCount = (int)pts.size(), out->triangleCount = (int)tris.size() / 3;
+  std::vector<float> pos(3 * pts.size());
+  for (size_t i = 0; i < pts.size(); i++) pos[3 * i] = (float)pts[i].x, pos[3 * i + 1] = (float)pts[i].y, pos[3 * i + 2] = (float)pts[i].z;
+  out->positions = mallocCopy(pos);
+  out->indices = mallocCopy(tris);
+  return out;
+}
+
+void bk_sculpt_mesh_free(BKSculptMesh *m) {
+  if (!m) return;
+  free(m->positions), free(m->indices);
+  delete m;
 }
 
 BKMesh *bk_mesh(const BKShape *s, double deflection) {

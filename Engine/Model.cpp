@@ -1,6 +1,7 @@
 // Bcad's geometry engine: the primitives, exactly (bounding boxes and volumes from formulas), and their meshes.
 #include "Engine/Model.hpp"
 
+#include "Engine/Print.hpp"
 #include "Engine/Radial.hpp"
 
 #include "BcadKernel.h"
@@ -468,6 +469,7 @@ int Model::columns(double deflection) const {
 
 void Model::build(Solid &out, double deflection) const {
   double d = std::isfinite(deflection) ? std::max(deflection, 1e-4) : 0.05;
+  if (kind == Mesh) out = *mesh;
   if (kind == Poly) buildPoly(*this, out);
   if (kind == Turned) buildTurned(*this, out, d);
   if (kind == Radial) {
@@ -501,8 +503,8 @@ double Model::support(V3 d, V3 *at) const {
   double best = -INFINITY;
   V3 where;
   if (kind == Radial) return radialSupport(*radial, d, at, nullptr);
-  if (kind == Poly) {
-    for (const auto &v : verts)
+  if (kind == Poly || kind == Mesh) {
+    for (const auto &v : kind == Mesh ? mesh->p : verts)
       if (dot(v, d) > best) best = dot(v, d), where = v;
   } else if (kind == Turned) {
     double D = trig::hypot(d.x, d.y), dz = d.z, c = D > 0 ? d.x / D : 1, sn = D > 0 ? d.y / D : 0, br = 0, bz = 0;
@@ -681,6 +683,67 @@ std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<
   if (v < 0)
     for (auto &loop : m->loops) std::reverse(loop.begin(), loop.end());
   m->volume = std::fabs(v) / 6;
+  return m;
+}
+
+std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why) {
+  size_t nv = pts.size(), nt = tris.size() / 3;
+  if (nv < 4 || nt < 4 || tris.size() % 3) return why = "a mesh needs 4 points and 4 triangles at least", nullptr;
+  for (V3 q : pts)
+    if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) return why = "points must be numbers", nullptr;
+  for (size_t t = 0; t < nt; t++) {
+    uint32_t a = tris[3 * t], b = tris[3 * t + 1], c = tris[3 * t + 2];
+    if (a >= nv || b >= nv || c >= nv) return why = "a triangle's corner isn't one of the points", nullptr;
+    if (a == b || b == c || c == a) return why = "a triangle has a corner twice", nullptr;
+  }
+  // Each side (from a corner to the next) once, and met by one running back along it: closed, facing one way throughout.
+  std::vector<std::pair<uint64_t, uint32_t>> sides(3 * nt);
+  for (size_t t = 0; t < nt; t++)
+    for (int k = 0; k < 3; k++) sides[3 * t + k] = {(uint64_t)tris[3 * t + k] << 32 | tris[3 * t + (k + 1) % 3], (uint32_t)t};
+  std::sort(sides.begin(), sides.end());
+  Find piece(nt);
+  for (size_t i = 0; i < sides.size(); i++) {
+    if (i + 1 < sides.size() && sides[i].first == sides[i + 1].first) return why = "two triangles run the same way along a side", nullptr;
+    uint64_t back = sides[i].first << 32 | sides[i].first >> 32;
+    auto it = std::lower_bound(sides.begin(), sides.end(), std::make_pair(back, (uint32_t)0));
+    if (it == sides.end() || it->first != back) return why = "open", nullptr;
+    piece.join(sides[i].second, it->second);
+  }
+  Solid s;
+  // (Points no triangle uses left out, the rest in their order: they'd count in its box.)
+  std::vector<uint32_t> at(nv, 0);
+  for (uint32_t i : tris) at[i] = 1;
+  for (size_t i = 0; i < nv; i++)
+    if (at[i]) at[i] = (uint32_t)s.p.size(), s.p.push_back(pts[i]);
+  s.tri = tris;
+  for (uint32_t &i : s.tri) i = at[i];
+  nv = s.p.size();
+  s.n.assign(nv, V3{0, 0, 0});
+  s.triFace.resize(nt);
+  // A face per connected piece, numbered by its first triangle; each point's normal its triangles' by their area.
+  std::vector<int> faceOf(nt, -1);
+  for (uint32_t t = 0; t < nt; t++) {
+    uint32_t r = piece(t);
+    V3 a = s.p[s.tri[3 * t]], b = s.p[s.tri[3 * t + 1]], c = s.p[s.tri[3 * t + 2]], w = cross(b - a, c - a);
+    if (faceOf[r] < 0) {
+      faceOf[r] = (int)s.faces.size();
+      s.faces.push_back({});
+    }
+    s.triFace[t] = (uint32_t)faceOf[r];
+    Solid::Face &f = s.faces[faceOf[r]];
+    // (The face's normal: its first triangle's that has an area, as a curved face has no one normal.)
+    if (norm(f.normal) == 0 && norm(w) > 0) f.normal = unit(w);
+    for (int k = 0; k < 3; k++) s.n[s.tri[3 * t + k]] += w;
+  }
+  for (V3 &q : s.n) q = norm(q) > 0 ? unit(q) : V3{0, 0, 1};
+  for (auto &f : s.faces)
+    if (norm(f.normal) == 0) f.normal = {0, 0, 1};
+  s.centroids();
+  double v = s.meshVolume();
+  if (!(v > 0)) return why = "inside out", nullptr;
+  auto m = std::make_shared<Model>();
+  m->kind = Model::Mesh, m->volume = v;
+  m->mesh = std::make_shared<const Solid>(std::move(s));
   return m;
 }
 

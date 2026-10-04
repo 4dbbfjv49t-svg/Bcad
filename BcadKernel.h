@@ -57,6 +57,22 @@ BKShape *bk_fastener(const BKFastener *f, double clearance);
 // The bounding size (x y z) of what bk_fastener makes.
 void bk_fastener_extent(const BKFastener *f, double clearance, double *out);
 
+// A body that is a closed mesh as given (a sculpted body): its points (x y z each) and triangles (3 point numbers each,
+// counter-clockwise seen from outside), its surface exactly, at any detail. NULL when it isn't a closed solid
+// (bk_last_error says why: "mesh: open", "mesh: inside out" …).
+BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount);
+// A body made ready for sculpting: what the shape (placed by m, row-major 3x4) encloses, made again as one closed mesh of
+// even triangles about `detail` mm apart, its points shared (where pieces overlap or a mesh folds through itself, the
+// solid they make). NULL when it can't be (bk_last_error says why: "remesh: too fine: about N triangles", "remesh:
+// nothing inside" …).
+typedef struct {
+  int vertexCount, triangleCount;
+  float *positions;   // 3 per vertex
+  uint32_t *indices;  // 3 per triangle, counter-clockwise seen from outside
+} BKSculptMesh;
+BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail);
+void bk_sculpt_mesh_free(BKSculptMesh *m);
+
 // m = row-major 3x4 affine matrix (rotation·scale | translation).
 BKShape *bk_transform(const BKShape *s, const double *m);
 BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b);

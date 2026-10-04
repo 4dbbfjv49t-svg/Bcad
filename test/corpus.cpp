@@ -3,7 +3,9 @@
 // inward roundings, bevels, hollows, a cut across an edge):
 //   id|program|operations|expected
 //   program:    P kind sizes… ;   N kind thread length clearance ;   T m00 m01 m02 tx m10 … tz ;   B op ;
-//               S px py pz nx ny nz side ;   (N: a bolt or nut, its other sizes standard; length 0 the usual one)
+//               S px py pz nx ny nz side ;   M detail ;   (N: a bolt or nut, its other sizes standard; length 0 the usual one;
+//               M: the shape so far as a mesh body, its mesh at that detail as a sculpt holds it; R detail ; it remeshed for
+//               sculpting at that detail)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -151,6 +153,37 @@ BKShape *build(const std::string &prog, std::string &why) {
       bk_free(st.back());
       st.back() = s;
       if (!s) return fail(std::string("split: ") + bk_last_error());
+    } else if (t == "M") {
+      // The shape as a mesh body (as a sculpt holds it): its mesh at detail d, points joined where they're one.
+      if (!need(1)) return fail("mesh without its detail");
+      if (st.empty()) return fail("mesh of nothing");
+      BKMesh *m = bk_mesh(st.back(), v[0]);
+      std::map<std::tuple<float, float, float>, uint32_t> id;
+      std::vector<float> pos;
+      std::vector<uint32_t> idx;
+      for (int i = 0; m && i < 3 * m->triangleCount; i++) {
+        const float *q = m->positions + 3 * m->indices[i];
+        auto at = id.emplace(std::make_tuple(q[0] + 0.0f, q[1] + 0.0f, q[2] + 0.0f), (uint32_t)id.size());
+        if (at.second) pos.insert(pos.end(), {q[0], q[1], q[2]});
+        idx.push_back(at.first->second);
+      }
+      bk_mesh_free(m);
+      BKShape *s = bk_mesh_shape(pos.data(), (int)pos.size() / 3, idx.data(), (int)idx.size() / 3);
+      bk_free(st.back());
+      st.back() = s;
+      if (!s) return fail(bk_last_error());
+    } else if (t == "R") {
+      // The shape so far made ready for sculpting at detail d: remeshed, as a mesh body.
+      if (!need(1)) return fail("remesh without its detail");
+      if (st.empty()) return fail("remesh of nothing");
+      const double same[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+      BKSculptMesh *r = bk_remesh(st.back(), same, v[0]);
+      BKShape *s = r ? bk_mesh_shape(r->positions, r->vertexCount, r->indices, r->triangleCount) : nullptr;
+      std::string why = s ? "" : bk_last_error();
+      bk_sculpt_mesh_free(r);
+      bk_free(st.back());
+      st.back() = s;
+      if (!s) return fail(why);
     }
   }
   if (st.size() != 1) return fail("program left " + std::to_string(st.size()) + " shapes");

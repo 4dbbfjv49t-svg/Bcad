@@ -1877,6 +1877,242 @@ int main() {
     for (BKShape *x : {k1, k2, k3, edge, corner, box, hollowed, m3, far, apart, nothing}) bk_free(x);
   }
 
+  // MARK: mesh bodies
+  // A body that is a mesh as given (a sculpted one): its surface exactly, the same at any detail; merged, cut and split
+  // like any other; printed and written to STEP; in pieces when it is; overlapping pieces resolved to what they enclose;
+  // anything not a closed solid refused, and why.
+  {
+    printf("— mesh bodies\n");
+    // A shape's mesh with its points joined where they're one (as a sculpt holds it).
+    struct Welded {
+      std::vector<float> pos;
+      std::vector<uint32_t> idx;
+    };
+    auto welded = [](const BKShape *x, double d) {
+      Welded w;
+      BKMesh *m = bk_mesh(x, d);
+      std::map<std::tuple<float, float, float>, uint32_t> at;
+      for (int t = 0; t < 3 * m->triangleCount; t++) {
+        const float *p = m->positions + 3 * m->indices[t];
+        auto key = std::make_tuple(p[0], p[1], p[2]);
+        auto it = at.find(key);
+        if (it == at.end()) {
+          it = at.emplace(key, (uint32_t)(w.pos.size() / 3)).first;
+          w.pos.insert(w.pos.end(), {p[0], p[1], p[2]});
+        }
+        w.idx.push_back(it->second);
+      }
+      bk_mesh_free(m);
+      return w;
+    };
+    auto body = [](const Welded &w) { return bk_mesh_shape(w.pos.data(), (int)w.pos.size() / 3, w.idx.data(), (int)w.idx.size() / 3); };
+    auto vol = [](const BKShape *x) {
+      BKMesh *m = x ? bk_mesh(x, 0.05) : nullptr;
+      double v = m ? m->volume : -1;
+      bk_mesh_free(m);
+      return v;
+    };
+    auto sealed = [](const BKShape *x, bool touching = false) {
+      BKMesh *m = x ? bk_mesh(x, 0.05) : nullptr;
+      double v;
+      std::string why;
+      bool ok = m && closed(m, v, why, touching) && v > 0;
+      bk_mesh_free(m);
+      return ok;
+    };
+    double cube[3] = {10, 10, 10}, ball[1] = {20};
+    BKShape *cubeP = bk_primitive(BK_BOX, cube), *ballP = bk_primitive(BK_SPHERE, ball);
+    Welded wc = welded(cubeP, 0.05), ws = welded(ballP, 0.05);
+    BKShape *cubeM = body(wc), *ballM = body(ws);
+    // The sphere as a mesh: its volume and box its mesh's exactly, and its mesh the same however fine it's asked for.
+    double own = 0, lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+    for (size_t t = 0; t < ws.idx.size(); t += 3) {
+      const float *a = &ws.pos[3 * ws.idx[t]], *b = &ws.pos[3 * ws.idx[t + 1]], *c = &ws.pos[3 * ws.idx[t + 2]];
+      own += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) + (double)a[1] * ((double)b[2] * c[0] - (double)b[0] * c[2]) +
+              (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+    }
+    for (size_t i = 0; i < ws.pos.size(); i++) lo[i % 3] = std::min(lo[i % 3], (double)ws.pos[i]), hi[i % 3] = std::max(hi[i % 3], (double)ws.pos[i]);
+    double box[6] = {0};
+    int exact = ballM ? bk_bounds(ballM, I, box) : -1;
+    BKMesh *fine = ballM ? bk_mesh(ballM, 0.001) : nullptr, *coarse = ballM ? bk_mesh(ballM, 1) : nullptr;
+    bool same = fine && coarse && fine->triangleCount == coarse->triangleCount && fine->triangleCount == (int)ws.idx.size() / 3 && fine->faceCount == 1 &&
+                fine->edgeCount == 0;
+    bk_mesh_free(fine), bk_mesh_free(coarse);
+    check("mesh bodies: a sphere's mesh as a body, its volume and box the mesh's exactly, the same at any detail",
+          ballM && near(vol(ballM), own, 1e-9 * own) && exact == 1 && near(box[0], lo[0], 0) && near(box[5], hi[2], 0) && same && sealed(ballM) &&
+              bk_piece_count(ballM) == 1,
+          ballM ? fmt("volume %.9f, the mesh's %.9f", vol(ballM), own) : bk_last_error());
+    // A cube as a mesh, merged with, less and cut by plain shapes: exact volumes, closed.
+    double right[12] = {1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKShape *moved = bk_transform(cubeP, right);
+    BKShape *both = bk_boolean(BK_UNION, cubeM, moved), *less = bk_boolean(BK_SUBTRACT, cubeM, moved), *common = bk_boolean(BK_INTERSECT, moved, cubeM);
+    double p0[3] = {0, 0, 0}, nx[3] = {1, 0, 0};
+    BKShape *half = bk_split(cubeM, p0, nx, 0);
+    check("mesh bodies: a cube as a mesh merged with, less, meeting and cut by plain shapes",
+          near(vol(both), 1500, 1e-9) && near(vol(less), 500, 1e-9) && near(vol(common), 500, 1e-9) && near(vol(half), 500, 1e-9) && sealed(both) &&
+              sealed(less) && sealed(common) && sealed(half),
+          fmt("%.9f %.9f %.9f", vol(both), vol(less), vol(common)) + fmt(" %.9f", vol(half)));
+    // A sphere as a mesh merged with a box poking out of it (its volume between the sphere's and the sum), and less a cube
+    // wholly inside it (a void of exactly the cube).
+    BKShape *lump = bk_boolean(BK_UNION, ballM, moved), *bite = bk_boolean(BK_SUBTRACT, ballM, cubeP);
+    check("mesh bodies: a sphere as a mesh merged with a box, and with a cube taken from inside it",
+          sealed(lump) && sealed(bite) && vol(lump) > own && vol(lump) < own + 1000 && near(vol(bite), own - 1000, 1e-9 * own) && bk_piece_count(bite) == 1,
+          fmt("%.4f %.4f", vol(lump), vol(bite)));
+    // Printed and written to STEP as it is.
+    BKPrintMesh *pm = ballM ? bk_print_mesh(ballM) : nullptr;
+    const BKShape *list[1] = {ballM};
+    std::string stepPath = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/bcad-mesh-body.step";
+    int written = ballM ? bk_export_step(list, nullptr, 1, stepPath.c_str()) : 0;
+    check("mesh bodies: printed and written to STEP", pm && pm->valid && near(pm->volume, own, 1e-6 * own) && written == 1,
+          pm && !pm->valid ? bk_last_error() : "");
+    bk_print_mesh_free(pm);
+    // Two cubes apart in one mesh: two pieces. Overlapping: one solid, of their union's volume, once resolved.
+    auto pair = [&](double dx) {
+      Welded w = wc;
+      size_t n = w.pos.size() / 3;
+      for (size_t i = 0; i < n; i++) w.pos.insert(w.pos.end(), {w.pos[3 * i] + (float)dx, w.pos[3 * i + 1], w.pos[3 * i + 2]});
+      for (size_t t = 0, nt = w.idx.size(); t < nt; t++) w.idx.push_back(w.idx[t] + (uint32_t)n);
+      return w;
+    };
+    BKShape *apart = body(pair(20));
+    std::string why;
+    std::vector<bce::V3> pts;
+    Welded ov = pair(5);
+    for (size_t i = 0; i < ov.pos.size(); i += 3) pts.push_back({ov.pos[i], ov.pos[i + 1], ov.pos[i + 2]});
+    auto overlapping = bce::meshModel(pts, ov.idx, why);
+    bce::Solid whole = overlapping ? bce::resolved(*overlapping->mesh) : bce::Solid();
+    check("mesh bodies: pieces apart count as two; overlapping ones resolve to their union",
+          apart && bk_piece_count(apart) == 2 && near(vol(apart), 2000, 1e-9) && overlapping && near(overlapping->volume, 2000, 1e-9) &&
+              near(whole.meshVolume(), 1500, 1e-9) && bce::pieces(whole) == 1,
+          fmt("%.0f pieces, resolved %.9f", apart ? bk_piece_count(apart) : -1, whole.meshVolume()));
+    // Anything not a closed solid refused, and said why.
+    auto refused = [&](Welded w, const char *want) {
+      BKShape *x = body(w);
+      bool ok = !x && std::string(bk_last_error()) == want;
+      if (!ok) printf("    %s: got %s\n", want, x ? "a body" : bk_last_error());
+      bk_free(x);
+      return ok;
+    };
+    Welded open = wc, flipped = wc, nan = wc, outside = wc, twice = wc, doubled = wc;
+    open.idx.resize(open.idx.size() - 3);
+    for (size_t t = 0; t < flipped.idx.size(); t += 3) std::swap(flipped.idx[t + 1], flipped.idx[t + 2]);
+    nan.pos[4] = NAN;
+    outside.idx[7] = (uint32_t)(outside.pos.size() / 3);
+    twice.idx[1] = twice.idx[0];
+    doubled.idx.insert(doubled.idx.end(), wc.idx.begin(), wc.idx.begin() + 3);
+    check("mesh bodies: open, inside out, not numbers, a corner that isn't there, a corner twice, a side twice: refused",
+          refused(open, "mesh: open") && refused(flipped, "mesh: inside out") && refused(nan, "mesh: points must be numbers") &&
+              refused(outside, "mesh: a triangle's corner isn't one of the points") && refused(twice, "mesh: a triangle has a corner twice") &&
+              refused(doubled, "mesh: two triangles run the same way along a side"));
+    // A point no triangle uses (here the first): left out, the box the triangles' own.
+    Welded stray = wc;
+    stray.pos.insert(stray.pos.begin(), {100.f, 100.f, 100.f});
+    for (uint32_t &i : stray.idx) i++;
+    BKShape *strayM = body(stray);
+    double sb[6] = {0};
+    if (strayM) bk_bounds(strayM, I, sb);
+    check("mesh bodies: a point no triangle uses is left out", strayM && near(sb[3], 5, 0) && near(vol(strayM), 1000, 1e-9) && sealed(strayM),
+          fmt("box to %.3f", sb[3]));
+    bk_free(strayM);
+    // Turned and stretched, its box still exact.
+    double turn[12] = {0, -2, 0, 7, 1, 0, 0, 0, 0, 0, 1.5, -3};
+    BKShape *placed = ballM ? bk_transform(ballM, turn) : nullptr;
+    double pb[6];
+    int pe = placed ? bk_bounds(placed, I, pb) : -1;
+    check("mesh bodies: turned and stretched, its box exact", pe == 1 && near(pb[0], 7 - 2 * hi[1], 1e-9) && near(pb[3], 7 - 2 * lo[1], 1e-9) &&
+                                                               near(pb[2], -3 + 1.5 * lo[2], 1e-9),
+          fmt("%.0f: %.6f %.6f", pe, pb[0], pb[3]));
+    // How a big mesh body merges (measured, to know: sculpts run to 100k triangles and more).
+    {
+      BKShape *dense = bk_primitive(BK_SPHERE, ball);
+      Welded wd = welded(dense, 0.0006);
+      auto t0 = std::chrono::steady_clock::now();
+      BKShape *big = body(wd);
+      double made = ms(t0);
+      t0 = std::chrono::steady_clock::now();
+      BKShape *joined = big ? bk_boolean(BK_UNION, big, moved) : nullptr;
+      double v = vol(joined);
+      double merged = ms(t0);
+      printf("    a %zu-triangle mesh body: made in %.0f ms, merged with a box in %.0f ms (volume %.3f)\n", wd.idx.size() / 3, made, merged, v);
+      for (BKShape *x : {dense, big, joined}) bk_free(x);
+    }
+    for (BKShape *x : {cubeP, ballP, cubeM, ballM, moved, both, less, common, half, lump, bite, apart, placed}) bk_free(x);
+
+    // MARK: remeshing
+    // A body made again for sculpting at a detail: one closed mesh of even triangles (a sphere's surface one piece with no
+    // hole, a torus's one with one), its volume the shape's to within the detail; overlapping pieces one solid, a void
+    // kept, a mirrored placement the right way out; too fine said so; quick enough to use.
+    printf("— remeshing\n");
+    auto remeshed = [&](const BKShape *x, const double *m, double detail, int &euler, double &v, std::string &why) -> BKShape * {
+      BKSculptMesh *r = x ? bk_remesh(x, m, detail) : nullptr;
+      if (!r) {
+        why = bk_last_error();
+        return nullptr;
+      }
+      BKShape *y = bk_mesh_shape(r->positions, r->vertexCount, r->indices, r->triangleCount);
+      euler = r->vertexCount - 3 * r->triangleCount / 2 + r->triangleCount;
+      bool areas = true;
+      for (int t = 0; t < r->triangleCount; t++) {
+        const float *a = r->positions + 3 * r->indices[3 * t], *b = r->positions + 3 * r->indices[3 * t + 1], *c = r->positions + 3 * r->indices[3 * t + 2];
+        double ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+        double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+        areas = areas && nx * nx + ny * ny + nz * nz > 0;
+      }
+      if (!areas) why = "a triangle with no area";
+      if (!y) why = bk_last_error();
+      v = y && areas ? vol(y) : -1;
+      bk_sculpt_mesh_free(r);
+      return areas ? y : (bk_free(y), nullptr);
+    };
+    double d30[1] = {30}, tor[3] = {0, 40, 10};
+    BKShape *sphere = bk_primitive(BK_SPHERE, d30), *torus = bk_primitive(BK_TORUS, tor);
+    int es = 0, et = 0;
+    double vs = 0, vt = 0;
+    std::string ws1, wt;
+    BKShape *rs = remeshed(sphere, I, 0.5, es, vs, ws1), *rt = remeshed(torus, I, 0.5, et, vt, wt);
+    double exactS = PI * 30 * 30 * 30 / 6, exactT = 2 * PI * PI * 15 * 25;
+    check("remeshing: a sphere and a torus at 0.5 mm, closed, one piece each, no hole and one hole, their volumes to 0.5%",
+          rs && rt && es == 2 && et == 0 && bk_piece_count(rs) == 1 && bk_piece_count(rt) == 1 && near(vs, exactS, 0.005 * exactS) && near(vt, exactT, 0.005 * exactT),
+          (rs ? fmt("sphere %.2f (exact %.2f)", vs, exactS) : ws1) + (rt ? fmt(", torus %.2f (exact %.2f)", vt, exactT) : ", " + wt) +
+              fmt(", Euler %.0f and %.0f", es, et));
+    // Two cubes overlapping in one mesh (as a sculpt pulled through itself): one solid of their union; a cube with a
+    // smaller one turned inside out within it (a void): kept.
+    int eo = 0, ev = 0;
+    double vo = 0, vv = 0;
+    std::string wo, wv;
+    BKShape *both2 = body(pair(5));
+    BKShape *ro = both2 ? remeshed(both2, I, 0.25, eo, vo, wo) : nullptr;
+    Welded hollowCube = wc;
+    {
+      size_t n = wc.pos.size() / 3;
+      for (size_t i = 0; i < n; i++) hollowCube.pos.insert(hollowCube.pos.end(), {wc.pos[3 * i] / 2, wc.pos[3 * i + 1] / 2, wc.pos[3 * i + 2] / 2});
+      for (size_t t = 0; t < wc.idx.size(); t += 3) hollowCube.idx.insert(hollowCube.idx.end(), {wc.idx[t] + (uint32_t)n, wc.idx[t + 2] + (uint32_t)n, wc.idx[t + 1] + (uint32_t)n});
+    }
+    BKShape *withVoid = body(hollowCube), *rv = withVoid ? remeshed(withVoid, I, 0.25, ev, vv, wv) : nullptr;
+    check("remeshing: overlapping pieces one solid, a void kept",
+          ro && bk_piece_count(ro) == 1 && eo == 2 && near(vo, 1500, 15) && rv && ev == 4 && near(vv, 1000 - 125, 10) && withVoid && near(vol(withVoid), 875, 1e-9),
+          (ro ? fmt("union %.3f", vo) : wo) + (rv ? fmt(", with its void %.3f, Euler %.0f", vv, ev) : ", " + wv));
+    // Mirrored, still facing out; too fine, refused and said why.
+    double mirror[12] = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    int em = 0;
+    double vm = 0;
+    std::string wm;
+    BKShape *rm = remeshed(torus, mirror, 0.5, em, vm, wm);
+    BKSculptMesh *tooFine = bk_remesh(sphere, I, 0.005);
+    std::string fineWhy = tooFine ? "" : bk_last_error();
+    check("remeshing: mirrored, the right way out; too fine, refused",
+          rm && near(vm, vt, 0.002 * vt) && !tooFine && fineWhy.rfind("remesh: too fine", 0) == 0, (rm ? fmt("%.2f", vm) : wm) + " · " + fineWhy);
+    bk_sculpt_mesh_free(tooFine);
+    // Quick enough: about 200,000 triangles in well under two seconds.
+    auto t1 = std::chrono::steady_clock::now();
+    BKSculptMesh *big = bk_remesh(sphere, I, 0.25);
+    double took = ms(t1);
+    check("remeshing: a 30 mm sphere at 0.25 mm quickly", big && big->triangleCount > 150000 && (!timed || took < 1500),
+          fmt("%.0f triangles in %.0f ms", big ? big->triangleCount : 0, took));
+    bk_sculpt_mesh_free(big);
+    for (BKShape *x : {sphere, torus, rs, rt, both2, ro, withVoid, rv, rm}) bk_free(x);
+  }
+
   // MARK: coverage
   // What the rest leaves out: distances (and the points they're between) on more shapes, sections across a corner, a face,
   // a whole body and a concave edge, edge picks of other shapes, boxes of treated shapes, picks that match nothing, the

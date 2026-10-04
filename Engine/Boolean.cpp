@@ -1294,6 +1294,12 @@ Solid combine(const Solid &sa, const Solid &sb, int op, double merge, bool keepG
   return merged({&sa, &sb}, rule, keepGrid);
 }
 
+Solid resolved(const Solid &s) {
+  Rule rule;
+  rule.takeEnd = 1;
+  return merged({&s}, rule, false);
+}
+
 Solid combine(const Solid &base, const std::vector<Solid> &take, const std::vector<Solid> &add) {
   if (take.empty() && add.empty()) return base;
   std::vector<const Solid *> in{&base};

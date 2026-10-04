@@ -148,10 +148,11 @@ inline void gapOfPiece(const double *g, V3 a, V3 b, V3 c, const V3 q[3], double 
 
 struct RadialSpec;
 
-// A shape the way Bcad makes it: flat-sided, turned round the z axis, a tube swept along an oval in the xy plane, or
-// round the z axis with its radius changing with the angle too (a bolt or a nut: Radial.hpp).
+// A shape the way Bcad makes it: flat-sided, turned round the z axis, a tube swept along an oval in the xy plane, round
+// the z axis with its radius changing with the angle too (a bolt or a nut: Radial.hpp), or a mesh as it is (a sculpted
+// body: its triangles are its surface exactly).
 struct Model {
-  enum Kind { Poly, Turned, Swept, Radial } kind = Poly;
+  enum Kind { Poly, Turned, Swept, Radial, Mesh } kind = Poly;
   // Flat-sided: corners, and faces as corner loops counter-clockwise seen from outside.
   std::vector<V3> verts;
   std::vector<std::vector<int>> loops;
@@ -167,6 +168,8 @@ struct Model {
   std::vector<Elem> section;
   // Radial: the radii it's made of.
   std::shared_ptr<const RadialSpec> radial;
+  // Mesh: the body itself, the same at any detail (welded points, a curved face per connected piece, no edges).
+  std::shared_ptr<const Solid> mesh;
   double volume = 0;
 
   // The largest d · x over the shape, and (if asked) a point where it's reached.
@@ -223,6 +226,9 @@ double profileMoment(const Elem &e);
 // out.
 std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<Elem> section);
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
+// A body that is a closed mesh as given (points, and triangles counter-clockwise seen from outside); null with `why` when
+// it isn't one: open, a side run the same way twice, turned inside out, a corner out of range, a point not a number.
+std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why);
 // A shape of a model, or of two shapes merged (op as BK_UNION …).
 Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place = Affine());
 Shape merged(int op, const Shape &a, const Shape &b);
@@ -255,6 +261,10 @@ int pieceCount(const Shape &s);
 
 // Whether a point is inside a closed mesh (by its winding number).
 bool inside(const Solid &s, V3 q);
+
+// A mesh that folds through itself, or whose pieces overlap, as the solid it encloses: its outer skin, every point inside
+// any of it kept (by the booleans' rule: winding number above 0).
+Solid resolved(const Solid &s);
 
 // Merges and splits of meshes (Boolean.cpp, Split.cpp), and what's made of their results afterwards (Csg.cpp): faces on
 // one surface joined, edges, corners and circles found again.
