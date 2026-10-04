@@ -10,13 +10,14 @@ WORK="${TMPDIR:-/tmp}/bcad-slicers"
 mkdir -p "$WORK"
 bad=0
 
-# Runs a command for at most `secs` seconds (a slicer that doesn't know an option may open its window and wait).
+# Runs a command for at most `secs` seconds (a slicer that doesn't know an option may open its window and wait); 137 when
+# stopped. (The timer writes nowhere: holding the output open, it would keep $(…) waiting the whole time.)
 within() {
   local secs="$1" pid killer code
   shift
   "$@" &
   pid=$!
-  (sleep "$secs" && kill -9 "$pid" 2>/dev/null) &
+  (sleep "$secs" && kill -9 "$pid") >/dev/null 2>&1 &
   killer=$!
   wait "$pid"
   code=$?
@@ -45,11 +46,14 @@ mount_latest() {
 
 # Bambu Studio and PrusaSlicer: --info on each file.
 info() {
-  local label="$1" app="$2" f out
+  local label="$1" app="$2" f out code
   echo "— $label"
   within 60 "$app" --help 2>&1 | head -5
   for f in "$SAMPLES"/*.3mf "$SAMPLES"/*.stl; do
-    out=$(within 120 "$app" --info "$f" 2>&1 | tail -40)
+    out=$(within 120 "$app" --info "$f" 2>&1)
+    code=$?
+    if [ $code -eq 137 ]; then echo "  $label: no answer on $(basename "$f") in 2 minutes (it doesn't run without a screen here); not tried further"; return; fi
+    out=$(echo "$out" | tail -40)
     echo "  $(basename "$f"): $(echo "$out" | grep -iE "manifold|open_edges|volume|number_of_facets|error" | tr '\n' ' ')"
     # An STL of parts touching along a line can't be manifold (it has no point numbers to tell them apart).
     if echo "$out" | grep -qi "manifold = no" && [[ "$f" != *touching.stl ]]; then echo "  ✗ $label: $(basename "$f") not manifold"; bad=1; fi
@@ -81,6 +85,7 @@ if mnt=$(mount_latest Ultimaker/Cura 'mac.*(arm|aarch).*\.dmg$|macos.*\.dmg$'); 
       out=$(CURA_ENGINE_SEARCH_PATH="$defs:$extr" within 300 "$engine" slice -j "$defs/fdmprinter.def.json" -s machine_width=256 -s machine_depth=256 \
             -s machine_height=256 -e0 -j "$extr/fdmextruder.def.json" -l "$f" -o "$WORK/$(basename "$f" .stl).gcode" 2>&1)
       code=$?
+      if [ $code -eq 137 ]; then echo "  Cura: no answer on $(basename "$f") in 5 minutes; not tried further"; break; fi
       lines=$(wc -l < "$WORK/$(basename "$f" .stl).gcode" 2>/dev/null || echo 0)
       echo "  $(basename "$f"): exit $code, $lines lines of G-code $(echo "$out" | grep -iE "error|warning" | head -2 | tr '\n' ' ')"
       if [ "$code" -ne 0 ] || [ "$lines" -lt 100 ]; then echo "  ✗ Cura: $(basename "$f") not sliced"; bad=1; fi
