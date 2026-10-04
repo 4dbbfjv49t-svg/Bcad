@@ -21,6 +21,7 @@ within() {
   killer=$!
   wait "$pid"
   code=$?
+  pkill -P "$killer" 2>/dev/null
   kill "$killer" 2>/dev/null
   return $code
 }
@@ -66,14 +67,15 @@ if mnt=$(mount_latest bambulab/BambuStudio 'mac.*\.dmg$'); then
 else
   echo "Bambu Studio: not tried"
 fi
-if mnt=$(mount_latest prusa3d/PrusaSlicer 'mac.*\.dmg$'); then
+if mnt=$(mount_latest prusa3d/PrusaSlicer '\.dmg$'); then
   app=$(find "$mnt" -maxdepth 4 -path '*Contents/MacOS/*' -type f -perm -u+x | grep -i prusa | head -1)
   if [ -n "$app" ]; then info "PrusaSlicer" "$app"; else echo "PrusaSlicer: no program in the image"; fi
 else
   echo "PrusaSlicer: not tried"
 fi
 
-# Cura: its engine slices each STL with its plain printer definition.
+# Cura: its engine slices each STL with its plain printer definition, every setting given as Cura's window would give it
+# (cura_settings.py), to the printer, its extruder and the part alike.
 if mnt=$(mount_latest Ultimaker/Cura 'mac.*(arm|aarch).*\.dmg$|macos.*\.dmg$'); then
   echo "— UltiMaker Cura (its engine)"
   engine=$(find "$mnt" -maxdepth 5 -name CuraEngine -type f | head -1)
@@ -81,13 +83,18 @@ if mnt=$(mount_latest Ultimaker/Cura 'mac.*(arm|aarch).*\.dmg$|macos.*\.dmg$'); 
   if [ -n "$engine" ] && [ -n "$defs" ]; then
     defs=$(dirname "$defs")
     extr=$(dirname "$(find "$mnt" -maxdepth 8 -name fdmextruder.def.json | head -1)")
+    sets=()
+    while IFS= read -r -d '' kv; do sets+=(-s "$kv"); done < <(python3 "$(dirname "$0")/cura_settings.py" "$defs/fdmprinter.def.json" \
+      "$extr/fdmextruder.def.json" machine_width=256 machine_depth=256 machine_height=256)
+    [ ${#sets[@]} -gt 0 ] || { echo "  ✗ Cura: its settings couldn't be worked out"; exit 1; }
+    echo "  $(( ${#sets[@]} / 2 )) settings worked out"
     for f in "$SAMPLES"/*.stl; do
-      out=$(CURA_ENGINE_SEARCH_PATH="$defs:$extr" within 300 "$engine" slice -j "$defs/fdmprinter.def.json" -s machine_width=256 -s machine_depth=256 \
-            -s machine_height=256 -e0 -j "$extr/fdmextruder.def.json" -l "$f" -o "$WORK/$(basename "$f" .stl).gcode" 2>&1)
+      out=$(CURA_ENGINE_SEARCH_PATH="$defs:$extr" within 300 "$engine" slice -j "$defs/fdmprinter.def.json" "${sets[@]}" \
+            -e0 -j "$extr/fdmextruder.def.json" "${sets[@]}" -l "$f" "${sets[@]}" -o "$WORK/$(basename "$f" .stl).gcode" 2>&1)
       code=$?
       if [ $code -eq 137 ]; then echo "  Cura: no answer on $(basename "$f") in 5 minutes; not tried further"; break; fi
       lines=$(wc -l < "$WORK/$(basename "$f" .stl).gcode" 2>/dev/null || echo 0)
-      echo "  $(basename "$f"): exit $code, $lines lines of G-code $(echo "$out" | grep -iE "error|warning" | head -2 | tr '\n' ' ')"
+      echo "  $(basename "$f"): exit $code, $lines lines of G-code $(echo "$out" | grep -iE "\[error\]|overlapping|non-manifold" | head -3 | tr '\n' ' ')"
       if [ "$code" -ne 0 ] || [ "$lines" -lt 100 ]; then echo "  ✗ Cura: $(basename "$f") not sliced"; bad=1; fi
     done
   else
