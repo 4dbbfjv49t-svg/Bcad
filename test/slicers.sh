@@ -10,6 +10,20 @@ WORK="${TMPDIR:-/tmp}/bcad-slicers"
 mkdir -p "$WORK"
 bad=0
 
+# Runs a command for at most `secs` seconds (a slicer that doesn't know an option may open its window and wait).
+within() {
+  local secs="$1" pid killer code
+  shift
+  "$@" &
+  pid=$!
+  (sleep "$secs" && kill -9 "$pid" 2>/dev/null) &
+  killer=$!
+  wait "$pid"
+  code=$?
+  kill "$killer" 2>/dev/null
+  return $code
+}
+
 # Mounts the newest macOS release image of a repository; prints the mount point.
 mount_latest() {
   local repo="$1" pattern="$2" name dmg mnt
@@ -33,9 +47,9 @@ mount_latest() {
 info() {
   local label="$1" app="$2" f out
   echo "— $label"
-  "$app" --help 2>&1 | head -5
+  within 60 "$app" --help 2>&1 | head -5
   for f in "$SAMPLES"/*.3mf "$SAMPLES"/*.stl; do
-    out=$("$app" --info "$f" 2>&1 | tail -40)
+    out=$(within 120 "$app" --info "$f" 2>&1 | tail -40)
     echo "  $(basename "$f"): $(echo "$out" | grep -iE "manifold|open_edges|volume|number_of_facets|error" | tr '\n' ' ')"
     # An STL of parts touching along a line can't be manifold (it has no point numbers to tell them apart).
     if echo "$out" | grep -qi "manifold = no" && [[ "$f" != *touching.stl ]]; then echo "  ✗ $label: $(basename "$f") not manifold"; bad=1; fi
@@ -64,7 +78,7 @@ if mnt=$(mount_latest Ultimaker/Cura 'mac.*(arm|aarch).*\.dmg$|macos.*\.dmg$'); 
     defs=$(dirname "$defs")
     extr=$(dirname "$(find "$mnt" -maxdepth 8 -name fdmextruder.def.json | head -1)")
     for f in "$SAMPLES"/*.stl; do
-      out=$(CURA_ENGINE_SEARCH_PATH="$defs:$extr" "$engine" slice -j "$defs/fdmprinter.def.json" -s machine_width=256 -s machine_depth=256 \
+      out=$(CURA_ENGINE_SEARCH_PATH="$defs:$extr" within 300 "$engine" slice -j "$defs/fdmprinter.def.json" -s machine_width=256 -s machine_depth=256 \
             -s machine_height=256 -e0 -j "$extr/fdmextruder.def.json" -l "$f" -o "$WORK/$(basename "$f" .stl).gcode" 2>&1)
       code=$?
       lines=$(wc -l < "$WORK/$(basename "$f" .stl).gcode" 2>/dev/null || echo 0)
