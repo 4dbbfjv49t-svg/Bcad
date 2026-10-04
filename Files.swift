@@ -4,7 +4,7 @@ import CoreGraphics
 import ImageIO
 import simd
 
-enum FileError: Error { case corrupt, notBcad }
+enum FileError: Error { case corrupt, notBcad, newer, tooLarge }
 
 // MARK: - ZIP (deflate via Apple's Compression framework)
 
@@ -37,7 +37,7 @@ enum Zip {
     // A damaged entry (nothing packed, or more unpacked than deflate can make of it) is refused, not unpacked.
     private static func inflate(_ d: Data, size: Int) -> Data? {
         if size == 0 { return Data() }
-        guard !d.isEmpty, size <= 256 << 20, size <= d.count * 1032 else { return nil }
+        guard !d.isEmpty, size <= 1 << 30, size <= d.count * 1032 else { return nil }
         var out = Data(count: size)
         let n = out.withUnsafeMutableBytes { o in
             d.withUnsafeBytes { i -> Int in
@@ -48,7 +48,8 @@ enum Zip {
         return n == size ? out : nil
     }
 
-    static func write(_ entries: [(String, Data)]) -> Data {
+    // (No ZIP64: past 4 GiB it's refused.)
+    static func write(_ entries: [(String, Data)]) throws -> Data {
         var out = Data(), central = Data()
         func u16(_ v: Int, _ d: inout Data) { d.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)]) }
         func u32(_ v: UInt32, _ d: inout Data) { d.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8(v >> 24)]) }
@@ -58,6 +59,7 @@ enum Zip {
             let method = packed == nil ? 0 : 8
             let crc = crc32(data)
             let n = Data(name.utf8)
+            guard out.count + 30 + n.count + body.count < 1 << 32, data.count < 1 << 32 else { throw FileError.tooLarge }
             let offset = UInt32(out.count)
             var head = Data()
             u32(0x0403_4B50, &head); u16(20, &head); u16(0x0800, &head); u16(method, &head); u16(0, &head); u16(0x21, &head)
@@ -68,6 +70,7 @@ enum Zip {
             u16(0, &central); u16(0, &central); u16(0, &central); u16(0, &central); u32(0, &central); u32(offset, &central)
             central.append(n)
         }
+        guard out.count + central.count < 1 << 32 else { throw FileError.tooLarge }
         let start = UInt32(out.count)
         out.append(central)
         var end = Data()
@@ -77,7 +80,9 @@ enum Zip {
         return out
     }
 
-    static func read(_ d: Data) throws -> [String: Data] {
+    // The entries named (every one when none are), each unpacked and checked against its CRC. One larger unpacked than its
+    // `limit` is left out; one damaged, larger than 1 GiB, or overlapping another is refused.
+    static func read(_ d: Data, only names: Set<String>? = nil, limit: [String: Int] = [:]) throws -> [String: Data] {
         let b = [UInt8](d)
         func u16(_ i: Int) -> Int { i + 1 < b.count ? Int(b[i]) | Int(b[i + 1]) << 8 : 0 }
         func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
@@ -87,18 +92,27 @@ enum Zip {
         guard e >= 0, u32(e) == 0x0605_4B50 else { throw FileError.corrupt }
         var p = u32(e + 16)
         var out: [String: Data] = [:]
+        var spans: [Range<Int>] = []
         for _ in 0..<u16(e + 10) {
             guard u32(p) == 0x0201_4B50, p + 46 + u16(p + 28) <= b.count else { throw FileError.corrupt }
-            let method = u16(p + 10), csize = u32(p + 20), usize = u32(p + 24)
+            let method = u16(p + 10), crc = u32(p + 16), csize = u32(p + 20), usize = u32(p + 24)
             let nl = u16(p + 28), xl = u16(p + 30), cl = u16(p + 32), local = u32(p + 42)
             let name = String(decoding: b[(p + 46)..<(p + 46 + nl)], as: UTF8.self)
             p += 46 + nl + xl + cl
             guard u32(local) == 0x0403_4B50, usize <= 1 << 30 else { throw FileError.corrupt }
             let start = local + 30 + u16(local + 26) + u16(local + 28)
             guard start + csize <= b.count else { throw FileError.corrupt }
+            spans.append(local..<(start + csize))
+            guard names?.contains(name) ?? true, usize <= limit[name] ?? Int.max else { continue }
             let raw = Data(b[start..<(start + csize)])
-            if method == 0 { out[name] = raw } else if method == 8, let data = inflate(raw, size: usize) { out[name] = data } else { throw FileError.corrupt }
+            let data: Data
+            if method == 0, csize == usize { data = raw } else if method == 8, let unpacked = inflate(raw, size: usize) { data = unpacked } else { throw FileError.corrupt }
+            guard crc32(data) == UInt32(crc) else { throw FileError.corrupt }
+            out[name] = data
         }
+        // (Entries sharing their bytes would let a small file unpack to a great deal.)
+        spans.sort { $0.lowerBound < $1.lowerBound }
+        for (a, b) in zip(spans, spans.dropFirst()) where a.upperBound > b.lowerBound { throw FileError.corrupt }
         return out
     }
 }
@@ -206,20 +220,23 @@ enum ThreeMF {
         let json = try enc.encode(doc)
         var entries = [("[Content_Types].xml", Data(types.utf8)), ("_rels/.rels", Data(rels.utf8)), (modelPath, Data(xml.utf8)), (docPath, json)]
         if let thumbnail { entries.append((thumbnailPath, thumbnail)) }
-        let zip = Zip.write(entries)
+        let zip = try Zip.write(entries)
         try zip.write(to: url, options: .atomic)
     }
 
-    // The document, and the bodies' shapes as saved (world coordinates), by body id.
+    // The document, and the bodies' shapes as saved (world coordinates), by body id. Those are only shown until the
+    // engine has made the shapes again: past 512 MiB, or damaged, they're left out.
     static func read(_ url: URL) throws -> (doc: Document, meshes: [UUID: SavedMesh]) {
-        let files = try Zip.read(try Data(contentsOf: url))
+        let files = try Zip.read(try Data(contentsOf: url, options: .mappedIfSafe), only: [docPath, modelPath], limit: [docPath: 256 << 20, modelPath: 512 << 20])
         guard let json = files[docPath] else { throw FileError.notBcad }
+        struct Head: Decodable { var version: Int? }
+        if let v = (try? JSONDecoder().decode(Head.self, from: json))?.version, v > Document.version { throw FileError.newer }
         guard let doc = try? JSONDecoder().decode(Document.self, from: json), doc.valid else { throw FileError.corrupt }
         let reader = ModelReader()
         if let model = files[modelPath] {
             let parser = XMLParser(data: model)
             parser.delegate = reader
-            parser.parse()
+            if !parser.parse() { reader.meshes = [:] }
         }
         return (doc, reader.meshes)
     }
@@ -277,7 +294,10 @@ extension SIMD3 where Scalar == Double {
 }
 
 extension Document {
-    var valid: Bool { bodies.allSatisfy { $0.node.valid && $0.place.valid && ($0.link.map { $0.shell.valid && $0.place.valid } ?? true) } }
+    // As many shapes as anyone would make, none larger than 10 m, nested no deeper than 64 merges.
+    var valid: Bool {
+        bodies.count <= 10_000 && bodies.allSatisfy { $0.node.valid && $0.place.valid && ($0.link.map { $0.shell.valid && $0.place.valid } ?? true) }
+    }
 }
 
 extension Placement {
@@ -292,7 +312,10 @@ extension Pick {
 }
 
 extension Node {
-    var valid: Bool {
+    var valid: Bool { valid(depth: 0) }
+
+    func valid(depth: Int) -> Bool {
+        guard depth <= 64 else { return false }
         switch self {
         case .primitive(let p):
             let sides = switch p.kind {
@@ -300,19 +323,19 @@ extension Node {
             case .torus, .ovalTorus: [0, 3, 6].contains(p.sides)
             default: true
             }
-            return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy(\.isFinite) && sides
+            return p.size.count == Primitive.make(p.kind).size.count && p.size.allSatisfy { $0.isFinite && abs($0) <= 10_000 } && sides
         case .fastener(let f):
-            return (0..<Int(bk_thread_count())).contains(f.size) && [f.length, f.width, f.height, f.angle, f.seat, f.drive, f.recess, f.depth].allSatisfy(\.isFinite)
+            return (0..<Int(bk_thread_count())).contains(f.size) && [f.length, f.width, f.height, f.angle, f.seat, f.drive, f.recess, f.depth].allSatisfy { $0.isFinite && abs($0) <= 10_000 }
         case .group(let op, let parts):
-            return (0...2).contains(op) && !parts.isEmpty && parts.allSatisfy { $0.node.valid && $0.place.valid }
+            return (0...2).contains(op) && !parts.isEmpty && parts.allSatisfy { $0.node.valid(depth: depth + 1) && $0.place.valid }
         case .split(let n, let plane, _):
-            return n.valid && plane.point.finite && plane.normal.finite
+            return n.valid(depth: depth + 1) && plane.point.finite && plane.normal.finite
         case .round(let n, let picks, let radius), .cove(let n, let picks, let radius):
-            return n.valid && radius.isFinite && picks.allSatisfy(\.valid)
+            return n.valid(depth: depth + 1) && radius.isFinite && picks.allSatisfy(\.valid)
         case .bevel(let n, let picks, let legs, let corner):
-            return n.valid && legs.x.isFinite && legs.y.isFinite && corner.isFinite && picks.allSatisfy(\.valid)
+            return n.valid(depth: depth + 1) && legs.x.isFinite && legs.y.isFinite && corner.isFinite && picks.allSatisfy(\.valid)
         case .hollow(let n, let open, let walls, let thickness):
-            return n.valid && thickness.isFinite && open.allSatisfy(\.valid) && walls.allSatisfy { $0.face.valid && $0.thickness.isFinite }
+            return n.valid(depth: depth + 1) && thickness.isFinite && open.allSatisfy(\.valid) && walls.allSatisfy { $0.face.valid && $0.thickness.isFinite }
         }
     }
 }

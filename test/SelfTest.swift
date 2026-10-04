@@ -388,11 +388,30 @@ enum SelfTest {
         try? ThreeMF.write(oddURL, meshes: [], doc: odd, bed: bed)
         check("3mf with wrong sizes refused", (try? ThreeMF.read(oddURL)) == nil)
         // A packed entry with nothing in it is refused rather than unpacked, and a shape scaled to nothing isn't read in.
-        var unpacked = [UInt8](Zip.write([("a", Data(repeating: 65, count: 1000))]))
+        var unpacked = [UInt8]((try? Zip.write([("a", Data(repeating: 65, count: 1000))])) ?? Data())
         let tail = unpacked.count - 22, central = Int(unpacked[tail + 16]) | Int(unpacked[tail + 17]) << 8 | Int(unpacked[tail + 18]) << 16 | Int(unpacked[tail + 19]) << 24
         for i in 20..<24 { unpacked[central + i] = 0 }
         check("a packed entry with nothing in it is refused", unpacked[central + 10] == 8 && (try? Zip.read(Data(unpacked))) == nil)
         check("a shape scaled to nothing is refused", !Placement(scale: SIMD3(0, 1, 1)).valid && !Placement(scale: SIMD3(1, 1e7, 1)).valid && Placement(scale: SIMD3(-1, 1, 1)).valid)
+        // A checksum that doesn't match and entries sharing their bytes are refused; a file from a newer Bcad is said to be
+        // that; sizes past 10 m aren't read in; shapes as saved past their limit are left out, the document still read.
+        func readError(_ url: URL) -> FileError? {
+            do { _ = try ThreeMF.read(url); return nil } catch { return error as? FileError }
+        }
+        var flipped = [UInt8]((try? Zip.write([("a", Data([1, 2, 3]))])) ?? Data())
+        flipped[31] ^= 0xFF
+        check("an entry not matching its checksum is refused", flipped[8] == 0 && (try? Zip.read(Data(flipped))) == nil)
+        var shared = [UInt8]((try? Zip.write([("a", Data([1, 2, 3])), ("b", Data([4, 5, 6]))])) ?? Data())
+        let sharedEnd = shared.count - 22
+        let sharedCentral = Int(shared[sharedEnd + 16]) | Int(shared[sharedEnd + 17]) << 8 | Int(shared[sharedEnd + 18]) << 16 | Int(shared[sharedEnd + 19]) << 24
+        for i in 0..<4 { shared[sharedCentral + 47 + 42 + i] = 0 }
+        check("entries sharing their bytes are refused", (try? Zip.read(Data(shared))) == nil)
+        let newerURL = dir.appendingPathComponent("newer.3mf")
+        try? Zip.write([(ThreeMF.docPath, Data(#"{"version": 99, "bodies": [], "sheets": []}"#.utf8))]).write(to: newerURL)
+        check("a file from a newer Bcad is said to be one", readError(newerURL) == .newer)
+        check("sizes past 10 m aren't read in", !Node.primitive(Primitive(kind: .box, size: [20_000, 20, 20])).valid && Node.primitive(Primitive(kind: .box, size: [10_000, 20, 20])).valid)
+        let previewless = (try? Zip.read(Data(contentsOf: u3), only: [ThreeMF.docPath, ThreeMF.modelPath], limit: [ThreeMF.modelPath: 10])) ?? [:]
+        check("shapes as saved past their limit are left out, the document read", previewless[ThreeMF.docPath] != nil && previewless[ThreeMF.modelPath] == nil)
 
         // Opening and editing (last: the workbench builds on the kernel's thread from here on).
         let lib = Workbench.shared
@@ -440,6 +459,26 @@ enum SelfTest {
         let before = dir.appendingPathComponent("before.3mf")
         let savedBefore = saveAs(before) { lib.open(u3) }
         check("a save ending after another file opened leaves that file be", savedBefore && lib.fileURL == u3 && !lib.dirty && FileManager.default.fileExists(atPath: before.path))
+        // Unsaved work set aside comes back after a crash: the same document, still unsaved, its file still its own; once
+        // saved, nothing is set aside.
+        let recovery = dir.appendingPathComponent("unsaved.json"), recoveryCopy = dir.appendingPathComponent("unsaved-copy.json")
+        lib.recoveryURL = recovery
+        if let id = lib.doc.bodies.first?.id { lib.setPlace(id) { $0.move.x += 7 } }
+        let unsavedDoc = lib.doc
+        lib.keepUnsaved()
+        Workbench.recoveryQueue.sync {}
+        try? FileManager.default.removeItem(at: recoveryCopy)
+        try? FileManager.default.copyItem(at: recovery, to: recoveryCopy)
+        lib.open(u3)
+        Workbench.recoveryQueue.sync {}
+        let droppedOnOpen = !FileManager.default.fileExists(atPath: recovery.path)
+        try? FileManager.default.copyItem(at: recoveryCopy, to: recovery)
+        let restored = lib.restoreUnsaved()
+        check("unsaved work comes back after a crash", droppedOnOpen && restored && lib.doc == unsavedDoc && lib.dirty && lib.fileURL == u3)
+        let keptSaved = saveAs(dir.appendingPathComponent("recovered.3mf"))
+        Workbench.recoveryQueue.sync {}
+        check("saved, nothing is set aside", keptSaved && !lib.dirty && !FileManager.default.fileExists(atPath: recovery.path))
+        lib.open(u3)
         lib.fileURL = copy
 
         // Renaming: a saved file is renamed where it is and a name already taken is refused; an unsaved document keeps the
@@ -1221,7 +1260,7 @@ enum SelfTest {
         let samplesDir = dir.appendingPathComponent("print-samples")
         try? FileManager.default.removeItem(at: samplesDir)
         try? FileManager.default.createDirectory(at: samplesDir, withIntermediateDirectories: true)
-        func cube(_ s: Double) -> Node { .primitive(Primitive(kind: .box, size: [s, s, s])) }
+        func block(_ s: Double) -> Node { .primitive(Primitive(kind: .box, size: [s, s, s])) }
         // Standing on the bed at (x, y).
         func standing(_ name: String, _ color: SIMD3<UInt8>, _ node: Node, _ x: Double, _ y: Double) -> Solid {
             let height = node.extent(clearance: k.clearance)?.z ?? 20
@@ -1229,18 +1268,18 @@ enum SelfTest {
         }
         let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))
         let samples: [(name: String, bodies: [Solid], stlWatertight: Bool)] = [
-            ("colours", [standing("Red box", SIMD3(230, 40, 40), cube(20), -40, 0),
+            ("colours", [standing("Red box", SIMD3(230, 40, 40), block(20), -40, 0),
                          standing("Blue cylinder", SIMD3(40, 80, 230), .primitive(.make(.cylinder)), 0, 0),
                          standing("Green ball", SIMD3(40, 200, 80), .primitive(.make(.sphere)), 40, 0)], true),
             ("touching", [Solid(name: "Two cubes on an edge", color: Palette.colors[0], node: .group(op: Int32(BK_UNION), parts: [
-                Part(node: cube(10), place: Placement()), Part(node: cube(10), place: Placement(move: SIMD3(10, 10, 0)))
+                Part(node: block(10), place: Placement()), Part(node: block(10), place: Placement(move: SIMD3(10, 10, 0)))
             ]), place: Placement(move: SIMD3(0, 0, 5)))], false),
-            ("hollow", [standing("Hollow box", Palette.colors[1], .hollow(of: cube(20), open: [], walls: [], thickness: 2), 0, 0)], true),
+            ("hollow", [standing("Hollow box", Palette.colors[1], .hollow(of: block(20), open: [], walls: [], thickness: 2), 0, 0)], true),
             ("bolt-and-nut", [standing("M8 bolt", Palette.colors[2], bolt, -15, 0), standing("M8 nut", Palette.colors[3], nut, 15, 0)], true),
-            ("rounded", [standing("Rounded box", Palette.colors[4], .round(of: cube(20), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3), 0, 0)], true),
-            ("tiny", [standing("1 mm cube", Palette.colors[5], cube(1), -2, 0), standing("1 mm pin", Palette.colors[6], .primitive(Primitive(kind: .cylinder, size: [1, 1])), 2, 0)], true),
+            ("rounded", [standing("Rounded box", Palette.colors[4], .round(of: block(20), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3), 0, 0)], true),
+            ("tiny", [standing("1 mm cube", Palette.colors[5], block(1), -2, 0), standing("1 mm pin", Palette.colors[6], .primitive(Primitive(kind: .cylinder, size: [1, 1])), 2, 0)], true),
             ("big", [standing("250 mm ring", Palette.colors[7], .primitive(Primitive(kind: .ring, size: [250, 240, 5])), 0, 0)], true),
-            ("odd-name", [standing("Tom & \"Jerry\" <1> 'x' 🙂", mixed, cube(10), 0, 0)], true),
+            ("odd-name", [standing("Tom & \"Jerry\" <1> 'x' 🙂", mixed, block(10), 0, 0)], true),
         ]
         var expected: [[String: Any]] = []
         for sample in samples {

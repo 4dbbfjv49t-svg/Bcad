@@ -611,7 +611,19 @@ struct MergeLink: Codable, Hashable, Sendable {
 }
 
 struct Document: Codable, Equatable, Sendable {
+    // The version of the document its files hold: one a newer Bcad wrote is said to be that, not damaged.
+    static let version = 1
+    var version = Document.version
     var bodies: [Solid] = []
+}
+
+extension Document {
+    // (Files from before versions are version 1.)
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        bodies = try c.decode([Solid].self, forKey: .bodies)
+    }
 }
 
 extension Document {
@@ -1411,9 +1423,17 @@ struct Store: Codable {
     var shapes: [String: String]?
 }
 
+// Unsaved work set aside: the document, and the file it came from or the name it was given.
+struct Recovery: Codable, Sendable {
+    var doc: Document
+    var file: String?
+    var name: String?
+}
+
 enum Paths {
     static let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Bcad", isDirectory: true)
     static let state = dir.appendingPathComponent("state.json")
+    static let recovery = dir.appendingPathComponent("unsaved.json")
 }
 
 enum Mode: Equatable {
@@ -1768,6 +1788,11 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var flight: Task<Void, Never>?
     @ObservationIgnored private var measureRun = 0
     @ObservationIgnored private var insetGlide: Task<Void, Never>?
+    // Unsaved work set aside (where, and as it was last set aside).
+    @ObservationIgnored var recoveryURL = Paths.recovery
+    @ObservationIgnored private var keptAside: Document?
+    @ObservationIgnored private var keeping: Task<Void, Never>?
+    nonisolated static let recoveryQueue = DispatchQueue(label: "Bcad.unsaved")
 
     var accent: Color { Skin.shared.accent }
     var accent2: Color { Skin.shared.accent2 }
@@ -1802,6 +1827,65 @@ final class Workbench: DesignHost {
         let s = Store(style: style, language: L10n.shared.id, brightness: brightness, settings: settings, look: Skin.shared.values, shapes: shapes)
         try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: Paths.state, options: .atomic) }
+    }
+
+    // MARK: unsaved work
+
+    // Unsaved work set aside every half minute while there is some, so a crash loses little: the next launch offers it.
+    func startKeepingUnsaved() {
+        keeping?.cancel()
+        keeping = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                self?.keepUnsaved()
+            }
+        }
+    }
+
+    func keepUnsaved() {
+        guard dirty else { dropUnsaved(); return }
+        guard doc != keptAside else { return }
+        keptAside = doc
+        let r = Recovery(doc: doc, file: fileURL?.path, name: docName), url = recoveryURL
+        Self.recoveryQueue.async {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(r) { try? data.write(to: url, options: .atomic) }
+        }
+    }
+
+    func dropUnsaved() {
+        keptAside = nil
+        let url = recoveryURL
+        Self.recoveryQueue.async { try? FileManager.default.removeItem(at: url) }
+    }
+
+    // Work a crash left unsaved, back as it was (still unsaved, its file still its own); false when there is none.
+    @discardableResult func restoreUnsaved() -> Bool {
+        let url = recoveryURL
+        guard let data = Self.recoveryQueue.sync(execute: { try? Data(contentsOf: url) }),
+              let r = try? JSONDecoder().decode(Recovery.self, from: data), r.doc.valid, !r.doc.bodies.isEmpty else { return false }
+        let file = r.file.map { URL(fileURLWithPath: $0) }
+        resetEditing()
+        doc = r.doc
+        saved = file.flatMap { try? ThreeMF.read($0).doc } ?? Document()
+        fileURL = file.flatMap { saved.bodies.isEmpty ? nil : $0 }
+        docName = r.name
+        meshes = [:]
+        built = [:]
+        requestFit = true
+        rebuildScene()
+        return true
+    }
+
+    // At launch: work left unsaved last time is offered back.
+    func offerUnsaved() {
+        guard FileManager.default.fileExists(atPath: recoveryURL.path) else { return }
+        let a = NSAlert()
+        a.messageText = L("Bcad didn't close properly")
+        a.informativeText = L("Restore the changes that weren't saved?")
+        a.addButton(withTitle: L("Restore"))
+        a.addButton(withTitle: L("Discard"))
+        if a.runModal() != .alertFirstButtonReturn || !restoreUnsaved() { dropUnsaved() }
     }
 
     private func scheduleSave() {
@@ -3318,6 +3402,7 @@ final class Workbench: DesignHost {
             self.saved = self.doc
             self.fileURL = nil
             self.docName = nil
+            self.dropUnsaved()
             self.rebuildScene()
         }
     }
@@ -3361,6 +3446,7 @@ final class Workbench: DesignHost {
             saved = d
             fileURL = url
             docName = nil
+            dropUnsaved()
             // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
             meshes = [:]
             for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
@@ -3369,6 +3455,8 @@ final class Workbench: DesignHost {
             rebuildScene()
         } catch FileError.notBcad {
             flash(L("This 3MF wasn't made by Bcad and can't be edited"))
+        } catch FileError.newer {
+            flash(L("This file was made by a newer version of Bcad"))
         } catch {
             flash(L("This file is damaged and can't be opened"))
         }
@@ -3406,25 +3494,27 @@ final class Workbench: DesignHost {
                 }
             }
             let picture = Thumbnail.png(meshes.map { ($0.1, $0.0.color) })
-            let ok = (try? ThreeMF.write(url, meshes: meshes, doc: doc, bed: bed, thumbnail: picture)) != nil
-            let found = problems
+            var tooLarge = false, ok = true
+            do { try ThreeMF.write(url, meshes: meshes, doc: doc, bed: bed, thumbnail: picture) } catch { ok = false; tooLarge = error as? FileError == .tooLarge }
+            let found = problems, written = ok, large = tooLarge
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
                     // Another document opened or begun meanwhile stays as it is: the file saved was the one before it.
-                    if ok {
+                    if written {
                         if self.generation == generation {
                             self.fileURL = url
                             self.docName = nil
                             self.saved = doc
+                            if !self.dirty { self.dropUnsaved() }
                         }
                         let name = url.lastPathComponent
                         self.flash(found.isEmpty ? L("Saved {name}", ["name": name])
                                    : L("Saved {name}. Check before printing: {problem}", ["name": name, "problem": found.map { $0.1.text($0.0) }.joined(separator: "; ")]))
                     } else {
-                        self.flash(L("Couldn't save the file"))
+                        self.flash(large ? L("This model is too large to save") : L("Couldn't save the file"))
                     }
-                    done(ok)
+                    done(written)
                 }
             }
         }
@@ -3476,6 +3566,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             MenuText.install()
             Workbench.shared.rebuildScene()
+            Workbench.shared.offerUnsaved()
+            Workbench.shared.startKeepingUnsaved()
         }
     }
 
@@ -3493,7 +3585,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // A shape may still be being built on the worker as the app quits; everything worth keeping is saved by now, so the app
     // leaves at once rather than tearing down around it.
-    func applicationWillTerminate(_ n: Notification) { _exit(0) }
+    // (Quitting means the work was saved or let go: nothing to offer back.)
+    func applicationWillTerminate(_ n: Notification) {
+        let url = MainActor.assumeIsolated { Workbench.shared.recoveryURL }
+        Workbench.recoveryQueue.sync { _ = try? FileManager.default.removeItem(at: url) }
+        _exit(0)
+    }
 
     func application(_ app: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {
