@@ -1354,10 +1354,12 @@ enum SelfTest {
             }
             func extent(_ s: Sculpt?) -> SIMD3<Double> {
                 guard let p = s?.data.positions, !p.isEmpty else { return .zero }
-                var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
+                var lo = SIMD3<Double>(repeating: .infinity)
+                var hi = -lo
                 for i in stride(from: 0, to: p.count, by: 3) {
                     let q = SIMD3(Double(p[i]), Double(p[i + 1]), Double(p[i + 2]))
-                    lo = simd_min(lo, q), hi = simd_max(hi, q)
+                    lo = simd_min(lo, q)
+                    hi = simd_max(hi, q)
                 }
                 return hi - lo
             }
