@@ -1163,6 +1163,7 @@ enum SelfTest {
         let unmergedObjects = saveAs(unmergedSaved) ? ((try? Zip.read(Data(contentsOf: unmergedSaved)))?[ThreeMF.modelPath]).flatMap { PrintedModel.read($0) }?.objects : nil
         check("a merge switched off prints merged", unmergedObjects?.count == 1 && unmergedObjects?.first?.name == all3?.name && unmergedObjects?.first?.sound == true,
               "\(unmergedObjects?.count ?? -1) objects")
+        lib.note = nil
         if let first = switchedOff.first {
             lib.setPlace(first.id) { $0.move.z += 5 }
             lib.remerge(first.id)
@@ -1327,7 +1328,8 @@ final class PrintedModel: NSObject, XMLParserDelegate {
         switch name {
         case "base": colors.append(a["displaycolor"] ?? "")
         case "object": objects.append(Object(name: a["name"] ?? "", color: a["pindex"].flatMap { Int($0) } ?? -1))
-        case "vertex": objects[objects.count - 1].points.append(SIMD3(Double(a["x"] ?? "") ?? .nan, Double(a["y"] ?? "") ?? .nan, Double(a["z"] ?? "") ?? .nan))
+        // (Read as float, as slicers read them.)
+        case "vertex": objects[objects.count - 1].points.append(SIMD3(["x", "y", "z"].map { Double(Float(a[$0] ?? "") ?? .nan) }))
         case "triangle": objects[objects.count - 1].triangles.append(SIMD3(Int(a["v1"] ?? "") ?? -1, Int(a["v2"] ?? "") ?? -1, Int(a["v3"] ?? "") ?? -1))
         case "item": moves.append(a["transform"] ?? "")
         default: break
