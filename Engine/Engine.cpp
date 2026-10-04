@@ -1,7 +1,9 @@
-// Bcad's own geometry engine behind the same C API as BcadKernel.cpp (BcadKernel.h): shapes, placements, meshes, boxes,
-// measuring, merging and splitting so far. What it can't do yet answers with nothing and says so in bk_last_error.
+// Bcad's own geometry engine behind the same C API as BcadKernel.cpp (BcadKernel.h): shapes, bolts and nuts, placements,
+// meshes, boxes, measuring, merging, splitting, rounding and hollowing. What it can't do yet (STEP export) answers with
+// nothing and says so in bk_last_error.
 #include "BcadKernel.h"
 
+#include "Engine/Bolts.hpp"
 #include "Engine/Distance.hpp"
 #include "Engine/Fasteners.hpp"
 #include "Engine/Model.hpp"
@@ -207,18 +209,16 @@ double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, co
   return d;
 }
 
-// MARK: - not yet
-
-static BKShape *later(const char *what) {
-  lastError = std::string(what) + ": " + notYet;
-  return nullptr;
-}
+// MARK: - bolts and nuts
 
 BKShape *bk_fastener(const BKFastener *f, double clearance) {
-  (void)clearance;
-  if (f)
-    if (const char *why = fastenerMisfit(*f)) return lastError = std::string("bolt: ") + why, nullptr;
-  return later("bolt");
+  std::string what = f && isNut(f->kind) ? "nut: " : "bolt: ";
+  if (!f || !std::isfinite(clearance)) return lastError = what + "sizes must be numbers", nullptr;
+  if (const char *why = fastenerMisfit(*f)) return lastError = what + why, nullptr;
+  Shape out;
+  std::string why;
+  if (!fastener(*f, clearance, out, why)) return lastError = what + why, nullptr;
+  return new BKShape{out};
 }
 
 // MARK: - merging and splitting

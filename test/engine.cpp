@@ -3,6 +3,7 @@
 // orientation, and how fast it all is.
 // c++ -std=c++17 -O2 -I. test/engine.cpp Engine/*.cpp -o engine-test && ./engine-test
 #include "BcadKernel.h"
+#include "Engine/Fasteners.hpp"
 #include "Engine/Math.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Treat.hpp"
@@ -1145,6 +1146,178 @@ int main() {
     }
     for (BKShape *s : made) bk_free(s);
     bk_free(box);
+  }
+
+  // MARK: bolts and nuts
+  {
+    printf("— bolts and nuts\n");
+    static const char *names[] = {"rod", "hex", "hex cone", "socket", "socket cone", "12-point", "12-point cone", "Torx", "Torx cone",
+                                  "PH hex", "PH hex cone", "PH countersunk", "sleeve", "square nut", "hex nut", "cone nut"};
+    // One built and looked at: one closed piece, its box exactly the size known beforehand (centred), its mesh short of
+    // its exact volume by no more than its chords miss; the same mesh to the last bit when built again.
+    std::string wrong;
+    int built = 0, bad = 0;
+    auto one = [&](const BKFastener &f, double c) {
+      built++;
+      char what[96];
+      snprintf(what, sizeof what, "%s %s c%.2g L%.3g", names[f.kind], bk_thread_name(f.size), c, f.length);
+      auto fault = [&](const std::string &why) {
+        if (bad++ < 4) wrong += std::string(what) + ": " + why + "; ";
+      };
+      // (Every fourth one built twice, to see it come out the same.)
+      BKShape *s = bk_fastener(&f, c), *again = built % 4 == 1 ? bk_fastener(&f, c) : bk_copy(s);
+      if (!s || !again) {
+        fault(bk_last_error());
+        bk_free(s), bk_free(again);
+        return;
+      }
+      double ext[3];
+      bk_fastener_extent(&f, c, ext);
+      BKMesh *m = bk_mesh(s, 0.05), *m2 = bk_mesh(again, 0.05);
+      double off = 0;
+      for (int i = 0; i < 3; i++) off = std::max({off, std::fabs(m->bbox[3 + i] - m->bbox[i] - ext[i]), std::fabs(m->bbox[3 + i] + m->bbox[i])});
+      double sv;
+      std::string why;
+      bool shut = closed(m, sv, why);
+      if (!shut || m->valid != 1) fault("not closed " + why);
+      else if (bk_piece_count(s) != 1) fault("not one piece");
+      else if (off > 1e-9) fault(fmt("box off by %.3g", off));
+      else if (!(sv < m->volume * 1.0001 + 1e-9 ? sv > m->volume * 0.96 : sv < m->volume * 1.04)) fault(fmt("mesh %.4f against %.4f", sv, m->volume));
+      else if (m->vertexCount != m2->vertexCount || memcmp(m->positions, m2->positions, sizeof(float) * 3 * m->vertexCount) != 0) fault("not the same twice");
+      bk_mesh_free(m), bk_mesh_free(m2), bk_free(s), bk_free(again);
+    };
+    auto t0 = std::chrono::steady_clock::now();
+    for (int kind = BK_ROD; kind <= BK_CONE_NUT; kind++)
+      for (int size = 0; size < bk_thread_count(); size++)
+        for (double c : {0.0, 0.2, 0.5}) {
+          // Every thread at the usual clearance; the smallest and largest with none and with a lot.
+          if (c != 0.2 && size != 0 && size != bk_thread_count() - 1) continue;
+          BKFastener f{};
+          f.kind = kind, f.size = size;
+          bk_fastener_defaults(&f, 1);
+          one(f, c);
+        }
+    check("every bolt and nut at every thread: one closed piece of the size known beforehand, the same twice", bad == 0,
+          fmt("%.0f built in %.1f s ", built, ms(t0) / 1000) + wrong);
+    // Sizes at random within what each allows (fitted as the app fits them after each change).
+    std::mt19937 rng(20261004);
+    built = bad = 0, wrong.clear();
+    for (int kind = BK_ROD; kind <= BK_CONE_NUT; kind++)
+      for (int n = 0; n < 8; n++) {
+        BKFastener f{};
+        f.kind = kind, f.size = (int)(rng() % bk_thread_count());
+        bk_fastener_defaults(&f, 1);
+        int fields = bk_fastener_fields(kind);
+        for (int field = BK_LENGTH; field <= BK_DEPTH; field++) {
+          if (!(fields & (1 << field))) continue;
+          double r[2];
+          bk_fastener_range(&f, field, 0, r);
+          if (!(r[0] <= r[1])) continue;
+          double u = (rng() % 1000) / 999.0, v = r[0] + u * (std::min(r[1], field == BK_LENGTH ? r[0] + 60 : r[1]) - r[0]);
+          double *at[] = {&f.length, &f.width, &f.height, &f.angle, &f.seat, &f.drive, &f.recess, &f.depth};
+          if (field == BK_DRIVE) bk_fastener_drive(&f, torxDrive(kind) ? bk_torx_number((int)(rng() % bk_torx_count())) : phillipsDrive(kind) ? 1 + rng() % 4 : v);
+          else *at[field] = v, bk_fastener_fit(&f);
+        }
+        one(f, (rng() % 6) * 0.1);
+      }
+    check("bolts and nuts of sizes picked at random within their ranges", bad == 0, fmt("%.0f built ", built) + wrong);
+
+    // Its exact volume, which a mesh comes ever nearer to as it's made finer; and what the mesh misses made up face by face.
+    BKFastener m8{};
+    m8.kind = BK_HEX, m8.size = 4;
+    bk_fastener_defaults(&m8, 1);
+    BKShape *bolt = bk_fastener(&m8, 0.2);
+    {
+      BKMesh *coarse = bk_mesh(bolt, 0.05), *fine = bk_mesh(bolt, 0.002);
+      double vc, vf;
+      std::string why;
+      closed(coarse, vc, why), closed(fine, vf, why);
+      double exact = coarse->volume;
+      check("a bolt's mesh comes ever nearer its exact volume as it's made finer",
+            exact > vf && vf > vc && (exact - vf) < 0.06 * (exact - vc), fmt("%.4f, %.4f → %.4f mm³", vc, vf, exact));
+      bk_mesh_free(coarse), bk_mesh_free(fine);
+    }
+    // Merges and cuts with them: a threaded hole, a bolt through a plate, a nut on a bolt, a bolt cut aslant (which keeps
+    // all of it).
+    {
+      double box[3] = {30, 30, 20}, plate[3] = {40, 40, 6};
+      BKFastener rod{};
+      rod.kind = BK_ROD, rod.size = 4;
+      bk_fastener_defaults(&rod, 0);
+      rod.length = 30;
+      BKShape *b = bk_primitive(BK_BOX, box), *r = bk_fastener(&rod, 0.2), *hole = bk_boolean(BK_SUBTRACT, b, r);
+      BKMesh *hm = bk_mesh(hole, 0.05);
+      check("a threaded hole: a box less a rod through it", hm->valid == 1 && bk_piece_count(hole) == 1 && hm->volume < 18000 - 600 && hm->volume > 18000 - 1000,
+            fmt("%.3f mm³", hm->volume));
+      double away[12] = {1, 0, 0, 0.3, 0, 1, 0, -0.2, 0, 0, 1, 0.7};
+      BKShape *r2 = bk_transform(r, away), *hole2 = bk_boolean(BK_SUBTRACT, b, r2);
+      BKMesh *hm2 = bk_mesh(hole2, 0.05);
+      check("the same hole moved within the box takes the same out", hm2->valid == 1 && near(hm2->volume, hm->volume, 1e-6 * hm->volume),
+            fmt("%.6f, %.6f mm³", hm2->volume, hm->volume));
+      BKFastener m12{}, nut{};
+      m12.kind = BK_HEX, m12.size = 6;
+      bk_fastener_defaults(&m12, 0);
+      m12.length = 30;
+      nut.kind = BK_HEX_NUT, nut.size = 4;
+      bk_fastener_defaults(&nut, 1);
+      double down[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -3}, lower[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -5};
+      BKShape *p = bk_primitive(BK_BOX, plate), *m12s = bk_fastener(&m12, 0.2), *m12d = bk_transform(m12s, down), *through = bk_boolean(BK_SUBTRACT, p, m12d);
+      BKShape *n = bk_fastener(&nut, 0.2), *nl = bk_transform(n, lower), *onBolt = bk_boolean(BK_UNION, bolt, nl);
+      BKMesh *tm = bk_mesh(through, 0.05), *om = bk_mesh(onBolt, 0.05);
+      check("a bolt through a plate, and a nut on a bolt", tm->valid == 1 && bk_piece_count(through) == 1 && om->valid == 1 && bk_piece_count(onBolt) == 1,
+            fmt("%.3f, %.3f mm³", tm->volume, om->volume));
+      double at[3] = {1, 2, 3}, aslant[3] = {0.3, -0.2, 1};
+      BKShape *up = bk_split(bolt, at, aslant, 0), *dn = bk_split(bolt, at, aslant, 1);
+      BKMesh *um = bk_mesh(up, 0.05), *dm = bk_mesh(dn, 0.05), *wm = bk_mesh(bolt, 0.05);
+      check("a bolt cut aslant keeps all of it", um->valid == 1 && dm->valid == 1 && near(um->volume + dm->volume, wm->volume, 1e-5 * wm->volume),
+            fmt("%.4f + %.4f = %.4f", um->volume, dm->volume, wm->volume));
+      for (BKMesh *x : {hm, hm2, tm, om, um, dm, wm}) bk_mesh_free(x);
+      for (BKShape *x : {b, r, hole, r2, hole2, p, m12s, m12d, through, n, nl, onBolt, up, dn}) bk_free(x);
+    }
+    // Rounded or bevelled like any other shape, and its sizes refused when they don't fit (said as a nut's or a bolt's).
+    {
+      int kf = BK_PICK_FACE, miss;
+      BKMesh *m = bk_mesh(bolt, 0.05);
+      double top[6] = {0, 0, 1, 0, 0, m->bbox[5]}, mr;
+      BKShape *rounded = bk_fillet(bolt, &kf, top, 1, 0.5, &mr, &miss), *bevelled = bk_chamfer(bolt, &kf, top, 1, 0.3, 0.3, 0, &miss);
+      BKMesh *rm = rounded ? bk_mesh(rounded, 0.05) : nullptr, *bm = bevelled ? bk_mesh(bevelled, 0.05) : nullptr;
+      check("a bolt's head rounded and bevelled", rm && bm && rm->valid == 1 && bm->valid == 1 && rm->volume < m->volume && bm->volume < rm->volume);
+      if (rm) bk_mesh_free(rm);
+      if (bm) bk_mesh_free(bm);
+      bk_mesh_free(m), bk_free(rounded), bk_free(bevelled);
+      BKFastener misfit{}, nutMisfit{};
+      misfit.kind = BK_SOCKET, misfit.size = 4;
+      bk_fastener_defaults(&misfit, 1);
+      misfit.depth = 20;
+      nutMisfit.kind = BK_HEX_NUT, nutMisfit.size = 4;
+      bk_fastener_defaults(&nutMisfit, 1);
+      nutMisfit.width = 2;
+      BKShape *no = bk_fastener(&misfit, 0.2);
+      std::string boltSays = bk_last_error();
+      BKShape *noNut = bk_fastener(&nutMisfit, 0.2);
+      std::string nutSays = bk_last_error();
+      BKShape *noNumber = bk_fastener(&m8, NAN);
+      check("sizes that don't fit are refused, said as a bolt's or a nut's", !no && !noNut && !noNumber && boltSays.rfind("bolt: ", 0) == 0 && nutSays.rfind("nut: ", 0) == 0,
+            boltSays + " · " + nutSays);
+    }
+    // Quick enough to change a size and see it at once.
+    {
+      auto t1 = std::chrono::steady_clock::now();
+      BKShape *s = bk_fastener(&m8, 0.2);
+      double small = ms(t1);
+      BKFastener big{};
+      big.kind = BK_TORX_CONE, big.size = bk_thread_count() - 1;
+      bk_fastener_defaults(&big, 1);
+      big.length = 100;
+      bk_fastener_fit(&big);
+      t1 = std::chrono::steady_clock::now();
+      BKShape *b = bk_fastener(&big, 0.2);
+      double large = ms(t1);
+      check("an M8 bolt made (and meshed twice) quickly, an M24 × 100 one in well under a second", s && b && small < 150 && large < 800,
+            fmt("%.0f ms, %.0f ms", small, large));
+      bk_free(s), bk_free(b);
+    }
+    bk_free(bolt);
   }
 
   // MARK: speed

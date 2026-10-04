@@ -143,9 +143,12 @@ inline void gapOfPiece(const double *g, V3 a, V3 b, V3 c, const V3 q[3], double 
   }
 }
 
-// A shape the way Bcad makes it: flat-sided, turned round the z axis, or a tube swept along an oval in the xy plane.
+struct RadialSpec;
+
+// A shape the way Bcad makes it: flat-sided, turned round the z axis, a tube swept along an oval in the xy plane, or
+// round the z axis with its radius changing with the angle too (a bolt or a nut: Radial.hpp).
 struct Model {
-  enum Kind { Poly, Turned, Swept } kind = Poly;
+  enum Kind { Poly, Turned, Swept, Radial } kind = Poly;
   // Flat-sided: corners, and faces as corner loops counter-clockwise seen from outside.
   std::vector<V3> verts;
   std::vector<std::vector<int>> loops;
@@ -159,10 +162,14 @@ struct Model {
   // (r along the oval's outward normal, z up), counter-clockwise.
   double a = 0, b = 0, phi = 0;
   std::vector<Elem> section;
+  // Radial: the radii it's made of.
+  std::shared_ptr<const RadialSpec> radial;
   double volume = 0;
 
   // The largest d · x over the shape, and (if asked) a point where it's reached.
   double support(V3 d, V3 *at = nullptr) const;
+  // Whether that's exact along d (always, but a radial shape's off its axis and the plane across it: a bound there).
+  bool exactAlong(V3 d) const;
   // The mesh, every chord within `deflection` of the exact shape.
   void build(Solid &out, double deflection) const;
   // Turned: the steps its mesh takes round the axis at that deflection.

@@ -122,7 +122,7 @@ enum SelfTest {
         let up = mesh(.split(of: box, plane: plane, side: 0))?.volume ?? 0, down = mesh(.split(of: box, plane: plane, side: 1))?.volume ?? 0
         check("split halves", abs(up + down - 8000) < 1 && abs(up - 2800) < 1, String(format: "%.2f + %.2f", up, down))
         let tilted = Plane(point: SIMD3(1, 2, 3), normal: normalize(SIMD3(0.3, -0.2, 1)))
-        let splitWholes: [(String, Node)] = [("cylinder", .primitive(.make(.cylinder)))] + (own ? [] : [("M8 bolt", .fastener(Fastener(kind: .hex, size: 4)))])
+        let splitWholes: [(String, Node)] = [("cylinder", .primitive(.make(.cylinder))), ("M8 bolt", .fastener(Fastener(kind: .hex, size: 4)))]
         for (name, whole) in splitWholes {
             let all = mesh(whole)?.volume ?? 0
             let a = mesh(.split(of: whole, plane: tilted, side: 0))?.volume ?? 0, b = mesh(.split(of: whole, plane: tilted, side: 1))?.volume ?? 0
@@ -159,7 +159,7 @@ enum SelfTest {
             }
         }
         check("every head's and nut's standard sizes fit", outside.isEmpty, outside.joined(separator: ", "))
-        if own { skipped("bolts and nuts") } else {
+        do {
             for size in [0, Int(bk_thread_count()) - 1] {
                 for kind in Fastener.Kind.allCases {
                     let fs = Fastener(kind: kind, size: size)
@@ -181,6 +181,12 @@ enum SelfTest {
                   && mesh(.fastener(narrower))?.valid == true, String(format: "T%.0f", narrower.drive))
             let phHead = Fastener(kind: .phCone, size: 4).setting(.drive, 2)
             check("a Phillips size brings its recess", phHead.drive == 2 && phHead.recess == 5 && mesh(.fastener(phHead))?.valid == true)
+            // Each kind's volume at three threads, to hold one engine's against the other's.
+            for size in [0, 4, Int(bk_thread_count()) - 1] {
+                for kind in Fastener.Kind.allCases {
+                    print("· volume", kind, size, String(format: "%.4f", mesh(.fastener(Fastener(kind: kind, size: size)))?.volume ?? 0))
+                }
+            }
         }
         _ = k.takeProblems()
         var misfit = Fastener(kind: .torx, size: 4)
@@ -266,7 +272,7 @@ enum SelfTest {
         check("a face knows its edges", topEdges == 4, "\(topEdges ?? 0) edges")
         let cut = k.section(box, edge)
         check("cut through an edge", cut.map { abs($0.angle - 90) < 0.01 && $0.loops.count == 1 } == true, cut.map { String(format: "%.1f° · %d loops", $0.angle, $0.loops.count) } ?? "none")
-        if own { skipped("threaded holes") } else {
+        do {
             let block = Part(node: .primitive(Primitive(kind: .box, size: [30, 30, 20])), place: Placement())
             let bolt = Part(node: .fastener(Fastener(kind: .rod, size: 4)), place: Placement())
             let t0 = Date()
@@ -276,22 +282,20 @@ enum SelfTest {
 
         var doc = Document()
         let mixed = SIMD3<UInt8>(12, 34, 56)
-        // Treated shapes (hollowed, inward-rounded, bevelled) on either engine; bolts on OpenCascade's, a holed block and a
-        // half sphere on Bcad's own.
+        // Treated shapes (hollowed, inward-rounded, bevelled), a holed block, a half sphere and bolts, on either engine.
         let treated = [Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
                        Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
                                                                   picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
                        Solid(name: "Bevelled", color: Palette.colors[4], node: .bevel(of: box, picks: [edge], legs: SIMD2(2, 3), corner: 0.4), place: Placement(move: SIMD3(0, -40, 10))),
                        Solid(name: "Hex ring", color: Palette.colors[5], node: .primitive(Primitive(kind: .ovalTorus, sides: 6, size: [40, 30, 60, 8])), place: Placement(move: SIMD3(60, 40, 3.46)))]
         let roundedCube = Solid(name: "Cube", color: mixed, node: .round(of: box, picks: [edge], radius: 2))
-        doc.bodies = own ? [roundedCube,
-                            Solid(name: "Holed", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [
-                                base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())
-                            ]), place: Placement(move: SIMD3(40, 0, 10))),
-                            Solid(name: "Half", color: Palette.colors[6], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-80, 0, 10)))] + treated
-            : [roundedCube,
-               Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(40, 0, 15))),
-               Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10)))] + treated
+        doc.bodies = [roundedCube,
+                      Solid(name: "Holed", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [
+                          base, Part(node: .primitive(Primitive(kind: .cylinder, size: [8, 30])), place: Placement())
+                      ]), place: Placement(move: SIMD3(40, 0, 10))),
+                      Solid(name: "Half", color: Palette.colors[6], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-80, 0, 10))),
+                      Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(80, 0, 15))),
+                      Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10)))] + treated
         let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
         let u3 = dir.appendingPathComponent("test.3mf")
         try? ThreeMF.write(u3, meshes: meshes, doc: doc)
@@ -607,12 +611,10 @@ enum SelfTest {
         let second = bounds(turnedCone.id), secondHolds = lib.body(turnedCone.id).map { holds(second, $0) } == true
         check("a turned shape's box is the shape's own, holds every point of it and follows a new turn", firstHolds && secondHolds && !near(first.0, second.0),
               spans(first) + " · " + spans(second))
-        if own { skipped("⌘B: bolts") } else {
-            lib.selection = []
-            lib.addThread()
-            settle()
-            check("⌘B adds a bolt and opens Thread", lib.primary.map { if case .fastener = $0.node { true } else { false } } == true && lib.screen == .thread)
-        }
+        lib.selection = []
+        lib.addThread()
+        settle()
+        check("⌘B adds a bolt and opens Thread", lib.primary.map { if case .fastener = $0.node { true } else { false } } == true && lib.screen == .thread)
 
         // A treatment that doesn't fit never enters the document (it's said once); one that fits goes in.
         let plain = Solid(name: "Plain", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
@@ -1155,15 +1157,15 @@ enum SelfTest {
         }()
         check("all edges of a merge: its parts' roundings are replaced too", plainParts && lib.note == nil, lib.note ?? "")
 
-        // A shape the engine can't build (a bolt, on Bcad's own engine) is saved as it's shown, not left out of the file.
-        let bolt = Solid(name: "Bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(0, 0, 10)))
-        var boltDoc = Document()
-        boltDoc.bodies = [bolt]
-        let boltURL = dir.appendingPathComponent("bolt.3mf"), boltAgain = dir.appendingPathComponent("bolt-again.3mf")
-        try? ThreeMF.write(boltURL, meshes: meshes.first.map { [(bolt, $0.1)] } ?? [], doc: boltDoc)
-        lib.open(boltURL)
+        // A shape the engine can't build (here a box less itself) is saved as it was shown, not left out of the file.
+        let nothing = Solid(name: "Nothing", color: Palette.colors[1], node: .group(op: Int32(BK_SUBTRACT), parts: [base, base]), place: Placement(move: SIMD3(0, 0, 10)))
+        var nothingDoc = Document()
+        nothingDoc.bodies = [nothing]
+        let nothingURL = dir.appendingPathComponent("nothing.3mf"), nothingAgain = dir.appendingPathComponent("nothing-again.3mf")
+        try? ThreeMF.write(nothingURL, meshes: meshes.first.map { [(nothing, $0.1)] } ?? [], doc: nothingDoc)
+        lib.open(nothingURL)
         settle()
-        check("a shape the engine can't build is saved as it's shown", saveAs(boltAgain) && (try? ThreeMF.read(boltAgain))?.meshes[bolt.id] != nil)
+        check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
 
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}

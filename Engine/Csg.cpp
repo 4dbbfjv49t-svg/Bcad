@@ -816,7 +816,7 @@ Reach reach(const Node &node, V3 d, bool prove) {
   if (node.kind == Node::Prim) {
     V3 at;
     double v = node.model->support(d, &at);
-    return {v, at, true};
+    return {v, at, node.model->exactAlong(d)};
   }
   // Whether a point is inside a part as shown: its kept mesh, the point taken back into the part's own frame (no copy).
   auto within = [&](const Shape &s, V3 q) {

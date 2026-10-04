@@ -1,6 +1,8 @@
 // Bcad's geometry engine: the primitives, exactly (bounding boxes and volumes from formulas), and their meshes.
 #include "Engine/Model.hpp"
 
+#include "Engine/Radial.hpp"
+
 #include "BcadKernel.h"
 
 #include <algorithm>
@@ -468,6 +470,11 @@ void Model::build(Solid &out, double deflection) const {
   double d = std::isfinite(deflection) ? std::max(deflection, 1e-4) : 0.05;
   if (kind == Poly) buildPoly(*this, out);
   if (kind == Turned) buildTurned(*this, out, d);
+  if (kind == Radial) {
+    // Checked when it was made at the details asked most; should another fail, nothing rather than a broken mesh.
+    std::string why;
+    if (!radialMesh(*radial, d, out, why)) out = Solid();
+  }
   if (kind == Swept) {
     buildSwept(*this, out, d);
     // What the mesh misses, shared out by area (a tube's every face curves alike).
@@ -484,9 +491,16 @@ void Model::build(Solid &out, double deflection) const {
 
 // MARK: - exact sizes
 
+bool Model::exactAlong(V3 d) const {
+  if (kind != Radial) return true;
+  double h = trig::hypot(d.x, d.y), len = norm(d);
+  return std::fabs(d.z) <= 1e-12 * len || h <= 1e-12 * len;
+}
+
 double Model::support(V3 d, V3 *at) const {
   double best = -INFINITY;
   V3 where;
+  if (kind == Radial) return radialSupport(*radial, d, at, nullptr);
   if (kind == Poly) {
     for (const auto &v : verts)
       if (dot(v, d) > best) best = dot(v, d), where = v;

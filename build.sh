@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Builds /Applications/Bcad.app (or the given .app). ./build.sh --selftest builds and runs the kernel/file self-test instead.
-# --engine own: on Bcad's own geometry engine (Engine/, nothing from OpenCascade) instead of OpenCascade; so far it makes,
-# measures, merges and splits shapes, and says what it can't do yet (the self-test skips those checks and says so).
+# --engine own: on Bcad's own geometry engine (Engine/, nothing from OpenCascade) instead of OpenCascade; it does all but
+# STEP export, and says so (the self-test skips that check and says so).
 set -euo pipefail
 
 # Interface languages, in the order of the in-app menu (English first).
