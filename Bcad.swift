@@ -515,6 +515,17 @@ indirect enum Node: Codable, Hashable, Sendable {
     case bevel(of: Node, picks: [Pick], legs: SIMD2<Double>, corner: Double)
     // Inward rounding: a concave quarter-round cut along the edges.
     case cove(of: Node, picks: [Pick], radius: Double)
+    // A sculpted body: its mesh as shaped by hand.
+    case sculpt(Sculpt)
+
+    // Whether a sculpted body is in it (a file holding one is one an earlier Bcad can't open).
+    var sculpted: Bool {
+        switch self {
+        case .sculpt: true
+        case .group(_, let parts): parts.contains { $0.node.sculpted }
+        default: inner?.sculpted ?? false
+        }
+    }
 
     var inner: Node? {
         switch self {
@@ -602,6 +613,115 @@ indirect enum Node: Codable, Hashable, Sendable {
     }
 }
 
+// A sculpted body's mesh: its points (as files hold them, 3 numbers each) and triangles (3 point numbers each,
+// counter-clockwise seen from outside). Never changed once made (every change makes a new one), so documents and undo
+// steps share it however large it is; known by a fingerprint of all of it, so comparing and hashing it cost nothing.
+final class SculptData: @unchecked Sendable {
+    let positions: [Float]
+    let indices: [UInt32]
+    let fingerprint: UInt64
+
+    init(positions: [Float], indices: [UInt32]) {
+        self.positions = positions
+        self.indices = indices
+        // FNV-1a over both, eight bytes at a time.
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ raw: UnsafeRawBufferPointer) {
+            var i = 0
+            while i + 8 <= raw.count {
+                h = (h ^ raw.loadUnaligned(fromByteOffset: i, as: UInt64.self)) &* 0x0000_0100_0000_01b3
+                i += 8
+            }
+            while i < raw.count {
+                h = (h ^ UInt64(raw[i])) &* 0x0000_0100_0000_01b3
+                i += 1
+            }
+            h = (h ^ UInt64(raw.count)) &* 0x0000_0100_0000_01b3
+        }
+        positions.withUnsafeBytes(mix)
+        indices.withUnsafeBytes(mix)
+        fingerprint = h
+    }
+
+    var pointCount: Int { positions.count / 3 }
+    var triangleCount: Int { indices.count / 3 }
+}
+
+struct Sculpt: Codable, Hashable, Sendable {
+    let data: SculptData
+    // The detail it was last made again at (mm): what Remesh offers next.
+    var detail: Double
+
+    static func == (a: Sculpt, b: Sculpt) -> Bool {
+        a.detail == b.detail && (a.data === b.data || (a.data.fingerprint == b.data.fingerprint && a.data.positions.count == b.data.positions.count &&
+                                                       a.data.indices.count == b.data.indices.count))
+    }
+
+    func hash(into h: inout Hasher) {
+        h.combine(data.fingerprint)
+        h.combine(detail)
+    }
+
+    init(data: SculptData, detail: Double) {
+        self.data = data
+        self.detail = detail
+    }
+
+    // Saved as its counts and its points and triangles packed (zlib, or as they are when that's no smaller), in base64.
+    private enum Keys: String, CodingKey { case detail, points, triangles, packed, plain }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        detail = try c.decode(Double.self, forKey: .detail)
+        let np = try c.decode(Int.self, forKey: .points), nt = try c.decode(Int.self, forKey: .triangles)
+        // (Within what a body takes: the remesh stops at a million and a half triangles.)
+        guard (0...20_000_000).contains(np), (0...40_000_000).contains(nt) else { throw FileError.corrupt }
+        let size = 12 * np + 12 * nt
+        let raw: Data
+        if let p = try c.decodeIfPresent(String.self, forKey: .packed) {
+            guard let z = Data(base64Encoded: p), let r = Zip.inflate(z, size: size) else { throw FileError.corrupt }
+            raw = r
+        } else {
+            guard let r = Data(base64Encoded: try c.decode(String.self, forKey: .plain)), r.count == size else { throw FileError.corrupt }
+            raw = r
+        }
+        var pos = [Float](repeating: 0, count: 3 * np), idx = [UInt32](repeating: 0, count: 3 * nt)
+        raw.withUnsafeBytes { r in
+            pos.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(rebasing: r[0..<12 * np])) }
+            idx.withUnsafeMutableBytes { $0.copyMemory(from: UnsafeRawBufferPointer(rebasing: r[12 * np..<size])) }
+        }
+        data = SculptData(positions: pos, indices: idx)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(detail, forKey: .detail)
+        try c.encode(data.pointCount, forKey: .points)
+        try c.encode(data.triangleCount, forKey: .triangles)
+        var raw = Data(capacity: 4 * (data.positions.count + data.indices.count))
+        data.positions.withUnsafeBytes { raw.append(contentsOf: $0) }
+        data.indices.withUnsafeBytes { raw.append(contentsOf: $0) }
+        if let z = Zip.deflate(raw) {
+            try c.encode(z.base64EncodedString(), forKey: .packed)
+        } else {
+            try c.encode(raw.base64EncodedString(), forKey: .plain)
+        }
+    }
+}
+
+extension Sculpt {
+    // Its stretch (a body's scale) taken into its points; a mirror turns its triangles round, so it still faces out.
+    func stretched(_ k: SIMD3<Double>) -> Sculpt {
+        guard k != SIMD3(1, 1, 1) else { return self }
+        var pos = data.positions, idx = data.indices
+        for i in 0..<pos.count { pos[i] = Float(Double(pos[i]) * k[i % 3]) }
+        if k.x * k.y * k.z < 0 {
+            for t in stride(from: 0, to: idx.count, by: 3) { idx.swapAt(t + 1, t + 2) }
+        }
+        return Sculpt(data: SculptData(positions: pos, indices: idx), detail: detail)
+    }
+}
+
 struct Solid: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
@@ -626,10 +746,16 @@ struct MergeLink: Codable, Hashable, Sendable {
 }
 
 struct Document: Codable, Equatable, Sendable {
-    // The version of the document its files hold: one a newer Bcad wrote is said to be that, not damaged.
-    static let version = 1
+    // The newest version of the document Bcad reads: one a newer Bcad wrote is said to be that, not damaged. 2: sculpted
+    // bodies.
+    static let version = 2
     var version = Document.version
     var bodies: [Solid] = []
+
+    // The same bodies: the same document, whichever version its file was.
+    static func == (a: Document, b: Document) -> Bool { a.bodies == b.bodies }
+
+    enum CodingKeys: String, CodingKey { case version, bodies }
 }
 
 extension Document {
@@ -638,6 +764,13 @@ extension Document {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
         bodies = try c.decode([Solid].self, forKey: .bodies)
+    }
+
+    // Version 2 only when it holds a sculpted body: any other file stays one an earlier Bcad opens.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(bodies.contains { $0.node.sculpted || ($0.link?.shell.sculpted ?? false) } ? 2 : 1, forKey: .version)
+        try c.encode(bodies, forKey: .bodies)
     }
 }
 
@@ -980,6 +1113,11 @@ final class Kernel: @unchecked Sendable {
             // Larger by as much as the plastic will shrink.
             defer { bk_free(p) }
             return made([s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0].withUnsafeBufferPointer { bk_transform(p, $0.baseAddress) })
+        case .sculpt(let s):
+            let d = s.data
+            return made(d.positions.withUnsafeBufferPointer { p in
+                d.indices.withUnsafeBufferPointer { i in bk_mesh_shape(p.baseAddress, Int32(d.pointCount), i.baseAddress, Int32(d.triangleCount)) }
+            })
         case .group(let op, let parts):
             // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
@@ -1298,6 +1436,21 @@ final class Kernel: @unchecked Sendable {
         return mesh
     }
 
+    // A body made ready to sculpt at a detail (mm): what it encloses as one even mesh, its stretch taken into it; nil (the
+    // reason among the problems) when it can't be.
+    func remesh(_ node: Node, scale: SIMD3<Double>, detail: Double) -> SculptData? {
+        guard let s = shape(node) else { return nil }
+        let m = [scale.x, 0, 0, 0, 0, scale.y, 0, 0, 0, 0, scale.z, 0]
+        guard let r = s.with({ sp in m.withUnsafeBufferPointer { bk_remesh(sp, $0.baseAddress, detail) } }) else {
+            problems.append(String(cString: bk_last_error()))
+            return nil
+        }
+        defer { bk_sculpt_mesh_free(r) }
+        let pos = Array(UnsafeBufferPointer(start: r.pointee.positions, count: 3 * Int(r.pointee.vertexCount)))
+        let idx = Array(UnsafeBufferPointer(start: r.pointee.indices, count: 3 * Int(r.pointee.triangleCount)))
+        return SculptData(positions: pos, indices: idx)
+    }
+
     // The box a shape fills placed as given (turned or stretched any way); `exact` false where it's only as close as its
     // mesh.
     func bounds(_ node: Node, _ place: Placement) -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? {
@@ -1371,7 +1524,7 @@ final class Kernel: @unchecked Sendable {
 
 enum Action: String, CaseIterable, Codable {
     // Angles was once a separate rounding tool's key: settings saved then know it by that name.
-    case move, rotate, scale, angles = "round", split, hollow, measure, drop, frame, hide, showAll
+    case move, rotate, scale, angles = "round", split, hollow, measure, sculpt, drop, frame, hide, showAll
 
     var name: String {
         switch self {
@@ -1382,6 +1535,7 @@ enum Action: String, CaseIterable, Codable {
         case .split: "Split"
         case .hollow: "Hollow"
         case .measure: "Measure"
+        case .sculpt: "Sculpt"
         case .drop: "Drop onto the bed"
         case .frame: "Zoom to fit"
         case .hide: "Hide selection"
@@ -1393,7 +1547,7 @@ enum Action: String, CaseIterable, Codable {
 
 struct Settings: Codable, Equatable {
     static let defaultKeys: [String: String] = [
-        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "measure": "KeyM", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
+        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "measure": "KeyM", "sculpt": "KeyD", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
     ]
     var keys = Settings.defaultKeys
     var snap = 1.0
@@ -1465,10 +1619,10 @@ enum Paths {
 }
 
 enum Mode: Equatable {
-    case select, split, hollow, angles, thread, measure
+    case select, split, hollow, angles, thread, measure, sculpt
 
     // A tool with its own bar at the bottom in place of the inspector.
-    var isTool: Bool { [.split, .hollow, .measure].contains(self) }
+    var isTool: Bool { [.split, .hollow, .measure, .sculpt].contains(self) }
 }
 
 // The inspector's screens: its segments and the gizmo they bring.
@@ -1766,6 +1920,14 @@ final class Workbench: DesignHost {
     var hollowThickness = 2.0
     var focusWall: Int?
     var thread = Fastener(kind: .hex, size: 4)
+    // Sculpt: the body being shaped and its mesh as it is now (the document has it only on Done; shown in the body's
+    // place meanwhile), the detail Remesh makes it again at, and whether that's under way.
+    var sculptBody: UUID?
+    var sculptNow: Sculpt?
+    var sculptDetail = 1.0
+    var sculptBusy = false
+    @ObservationIgnored var sculptShown: Mesh?
+    @ObservationIgnored private var sculptToken = 0
     var splitAxis = 2
     // The ruler: its ends, the end the pointer is on, and the shortest distance between surfaces when an end is one.
     var measureA: MeasureEnd?
@@ -2352,6 +2514,7 @@ final class Workbench: DesignHost {
 
     func deleteSelection() {
         guard !selection.isEmpty else { return }
+        if mode == .sculpt || sculptBusy { leaveSculpt() }
         let ids = Set(selection)
         commit { $0.bodies.removeAll { ids.contains($0.id) } }
         selection = []
@@ -2884,6 +3047,124 @@ final class Workbench: DesignHost {
         }
     }
 
+    // MARK: sculpt
+
+    // Opens Sculpt on the selected body: a sculpted one as it is, any other made ready at a detail fitting its size (once
+    // Done, it's a mesh: its exact sizes and roundings are part of its surface from then on).
+    func enterSculpt() {
+        guard selection.count == 1, let b = primary else { flash(L("Select a shape to sculpt")); return }
+        if case .sculpt(let s) = b.node {
+            openSculpt(b.id, s.stretched(b.place.scale))
+            return
+        }
+        let size = meshes[b.id].map { simd_reduce_max($0.size * simd_abs(b.place.scale)) } ?? 20
+        let detail = Workbench.round2(min(5, max(0.05, size / 60)))
+        made(b.id, b.node, scale: b.place.scale, detail: detail) { [weak self] s in
+            self?.openSculpt(b.id, s)
+            self?.flash(L("{body} is now a mesh to shape: its exact sizes and roundings become part of its surface", ["body": b.name]))
+        }
+    }
+
+    // Made again evenly at the detail asked.
+    func remeshSculpt() {
+        guard let id = sculptBody, let s = sculptNow else { return }
+        made(id, .sculpt(s), scale: SIMD3(1, 1, 1), detail: sculptDetail) { [weak self] s in self?.show(s) }
+    }
+
+    // The body takes the sculpted mesh (its stretch now in it): one step to undo.
+    func commitSculpt() {
+        guard let id = sculptBody, let s = sculptNow, let b = body(id) else { leaveSculpt(); return }
+        let node = Node.sculpt(s)
+        if node == b.node && b.place.scale == SIMD3(1, 1, 1) { leaveSculpt(); return }
+        begin()
+        mutate(id) {
+            $0.node = node
+            $0.place.scale = SIMD3(1, 1, 1)
+        }
+        // (Shown as it was while sculpting: the same mesh, built already.)
+        if let m = sculptShown { meshes[id] = m }
+        leaveSculpt()
+        rebuildScene()
+    }
+
+    func leaveSculpt() {
+        sculptToken += 1
+        withAnimation(Neon.spring) {
+            sculptBody = nil
+            sculptNow = nil
+            sculptBusy = false
+            if mode == .sculpt { mode = .select }
+        }
+        sculptShown = nil
+        sceneVersion += 1
+    }
+
+    private func openSculpt(_ id: UUID, _ s: Sculpt) {
+        withAnimation(Neon.spring) {
+            sculptBody = id
+            sculptDetail = s.detail
+            mode = .sculpt
+            edgePicks = []
+            clearMeasure()
+        }
+        if sculptNow == s, sculptShown != nil { return }
+        sculptNow = s
+        // (Its mesh is built on the kernel's thread, then shown.)
+        let token = sculptToken
+        Kernel.shared.queue.async {
+            let m = Kernel.shared.mesh(.sculpt(s))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard token == self.sculptToken, self.sculptNow == s else { return }
+                    self.sculptShown = m
+                    self.sceneVersion += 1
+                }
+            }
+        }
+    }
+
+    private func show(_ s: Sculpt) {
+        sculptNow = s
+        sculptDetail = s.detail
+    }
+
+    // Makes `node` ready to sculpt at `detail`, its stretch taken in, on the kernel's thread; then `done` with the mesh
+    // (already built to show), unless the mode was left meanwhile.
+    private func made(_ id: UUID, _ node: Node, scale: SIMD3<Double>, detail: Double, done: @escaping (Sculpt) -> Void) {
+        guard !sculptBusy else { return }
+        sculptBusy = true
+        let fit = settings.fit, note = L("Getting ready to sculpt…"), token = sculptToken
+        withAnimation(Neon.spring) { busy = note }
+        Kernel.shared.queue.async {
+            Kernel.shared.fit = fit
+            _ = Kernel.shared.takeProblems()
+            let s = Kernel.shared.remesh(node, scale: scale, detail: detail).map { Sculpt(data: $0, detail: detail) }
+            let m = s.flatMap { Kernel.shared.mesh(.sculpt($0)) }
+            let problems = Kernel.shared.takeProblems()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.sculptBusy = false
+                    self.ended(note)
+                    guard token == self.sculptToken, self.body(id) != nil else { return }
+                    guard let s, let m else {
+                        self.report(problems.isEmpty ? ["failed"] : problems)
+                        return
+                    }
+                    self.sculptShown = m
+                    done(s)
+                    self.sceneVersion += 1
+                }
+            }
+        }
+    }
+
+    // A detail to two significant digits (0.33, 1.2, 4).
+    static func round2(_ v: Double) -> Double {
+        guard v > 0 else { return v }
+        let k = pow(10, 1 - floor(log10(v)))
+        return (v * k).rounded() / k
+    }
+
     // MARK: bed
 
     // Puts the selection (or every visible shape) down on the bed.
@@ -2962,6 +3243,7 @@ final class Workbench: DesignHost {
     func choose(_ s: Screen) {
         // The current screen again does nothing, unless a tool (split, hollow, the ruler) has the inspector hidden.
         guard s != screen || mode.isTool else { return }
+        if mode == .sculpt || sculptBusy { leaveSculpt() }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
             switch s {
@@ -3208,6 +3490,7 @@ final class Workbench: DesignHost {
 
     func enter(_ m: Mode) {
         if m == .split && selection.isEmpty { flash(L("Select a shape to split")); return }
+        if mode == .sculpt || sculptBusy { leaveSculpt() }
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
@@ -3220,6 +3503,7 @@ final class Workbench: DesignHost {
 
     func cancelMode() {
         if angleEdit != nil { closeAngles(); return }
+        if mode == .sculpt || sculptBusy { leaveSculpt(); return }
         if mode == .measure, measureA != nil { clearMeasure(); return }
         withAnimation(Neon.spring) {
             if mode != .select { mode = .select } else { selection = [] }
@@ -3358,6 +3642,8 @@ final class Workbench: DesignHost {
         if problems.contains(where: { $0.hasPrefix("shape: the tube is too thick") }) { return L("The tube is too thick for this torus") }
         if problems.contains(where: { $0.hasPrefix("shape:") }) { return L("These sizes don't make a shape") }
         if problems.contains("missing") { return L("Some picked edges or faces no longer exist and were skipped") }
+        if problems.contains(where: { $0.hasPrefix("remesh: too fine") }) { return L("This detail is too fine for this shape — try a larger one") }
+        if problems.contains(where: { $0.hasPrefix("remesh:") || $0.hasPrefix("mesh:") }) { return L("This shape can't be sculpted") }
         return problems.isEmpty ? nil : L("The shape operation failed")
     }
 
@@ -3376,6 +3662,7 @@ final class Workbench: DesignHost {
             if angleEdit != nil { applyAngles(); return true }
             if mode == .split { split(); return true }
             if mode == .hollow { commitHollow(); return true }
+            if mode == .sculpt { commitSculpt(); return true }
             return false
         case "Backspace", "Delete":
             deleteSelection(); return true
@@ -3406,6 +3693,7 @@ final class Workbench: DesignHost {
         case .split: enter(.split)
         case .hollow: enter(.hollow)
         case .measure: enter(.measure)
+        case .sculpt: if mode == .sculpt { leaveSculpt() } else { enterSculpt() }
         case .drop: dropToBed()
         case .frame: requestFit = true; sceneVersion += 1
         case .hide: hideSelection()
@@ -3505,6 +3793,11 @@ final class Workbench: DesignHost {
         hollowOpen = []
         hollowWalls = []
         focusWall = nil
+        sculptToken += 1
+        sculptBody = nil
+        sculptNow = nil
+        sculptShown = nil
+        sculptBusy = false
         hover = Hover()
         selection = []
         dropQueue = []

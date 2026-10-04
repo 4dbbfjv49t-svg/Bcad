@@ -454,6 +454,8 @@ struct ToolRail: View {
                        lit: lib.mode == .hollow, size: 30) { lib.perform(.hollow) }
             ToolButton(icon: "ruler", title: Action.measure.label, key: s.isOn(.measure) ? Keys.label(s.key(.measure)) : nil, tint: lib.accent2,
                        lit: lib.mode == .measure, size: 30) { lib.perform(.measure) }
+            ToolButton(icon: "hand.draw", title: Action.sculpt.label, key: s.isOn(.sculpt) ? Keys.label(s.key(.sculpt)) : nil, tint: lib.accent2,
+                       lit: lib.mode == .sculpt, size: 30) { lib.perform(.sculpt) }
             divider
             ToolButton(icon: "arrow.uturn.backward", title: L("Undo"), key: "⌘Z", size: 30) { lib.undo() }
             ToolButton(icon: "arrow.uturn.forward", title: L("Redo"), key: "⇧⌘Z", size: 30) { lib.redo() }
@@ -506,6 +508,7 @@ struct ModeBar: View {
         switch mode {
         case .hollow: L("Hollow")
         case .measure: L("Ruler")
+        case .sculpt: L("Sculpt")
         default: L("Split")
         }
     }
@@ -516,6 +519,7 @@ struct ModeBar: View {
         case .measure:
             lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
                 : lib.measureB == nil ? L("Click the second point") : L("Click to measure again · Esc clears")
+        case .sculpt: L("Remesh makes it again of even triangles the detail size apart · Done keeps it")
         default: L("Drag the arrow to move the plane · drag a ring to tilt it")
         }
     }
@@ -531,6 +535,7 @@ struct ModeBar: View {
                 switch mode {
                 case .hollow: hollow
                 case .measure: measure
+                case .sculpt: sculpt
                 default: split
                 }
                 // Not 28 or 34 points: at those sizes a hovered button ignores clicks along its middle line.
@@ -582,6 +587,24 @@ struct ModeBar: View {
             .buttonStyle(PillStyle(tint: lib.accent2))
             .frame(width: 90)
             .disabled(lib.editBody == nil)
+    }
+
+    // The detail to make it again at, Remesh, how many triangles it has, Done.
+    @ViewBuilder private var sculpt: some View {
+        Text(L("Detail")).foregroundStyle(Ink.text.opacity(0.55))
+        MMField(value: lib.sculptDetail, unit: L("mm"), range: 0.05...20, width: 58) { lib.sculptDetail = $0 }
+        Button(L("Remesh")) { lib.remeshSculpt() }
+            .buttonStyle(PillStyle(tint: lib.accent2))
+            .frame(width: 90)
+            .disabled(lib.sculptBusy || lib.sculptNow == nil)
+        if let s = lib.sculptNow {
+            Text(L("{n} triangles", ["n": s.data.triangleCount])).foregroundStyle(Ink.text.opacity(0.55)).monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        Button(L("Done")) { lib.commitSculpt() }
+            .buttonStyle(PillStyle(tint: lib.accent))
+            .frame(width: 90)
+            .disabled(lib.sculptBusy || lib.sculptNow == nil)
     }
 
     @ViewBuilder private var split: some View {
@@ -752,6 +775,7 @@ struct ObjectRow: View {
         case .primitive(let p): ShapeIcon(prim: p, size: 10)
         case .fastener(let f): Image(systemName: f.nut ? "circle.hexagonpath" : "screwdriver")
         case .group: Image(systemName: "square.on.square")
+        case .sculpt: Image(systemName: "hand.draw")
         default: Image(systemName: "cube")
         }
     }
@@ -917,6 +941,8 @@ struct LayerRow: View {
             SettingLine(title: p.title) { EmptyView() }
         case .fastener(let f):
             SettingLine(title: f.name) { EmptyView() }
+        case .sculpt(let sc):
+            SettingLine(title: L("Sculpted"), detail: L("{n} triangles", ["n": sc.data.triangleCount])) { EmptyView() }
         }
     }
 

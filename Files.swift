@@ -21,7 +21,7 @@ enum Zip {
         return c ^ 0xFFFF_FFFF
     }
 
-    private static func deflate(_ d: Data) -> Data? {
+    static func deflate(_ d: Data) -> Data? {
         guard !d.isEmpty else { return nil }
         let cap = d.count + d.count / 8 + 1024
         var out = Data(count: cap)
@@ -35,7 +35,7 @@ enum Zip {
     }
 
     // A damaged entry (nothing packed, or more unpacked than deflate can make of it) is refused, not unpacked.
-    private static func inflate(_ d: Data, size: Int) -> Data? {
+    static func inflate(_ d: Data, size: Int) -> Data? {
         if size == 0 { return Data() }
         guard !d.isEmpty, size <= 1 << 30, size <= d.count * 1032 else { return nil }
         var out = Data(count: size)
@@ -336,6 +336,11 @@ extension Node {
             return n.valid(depth: depth + 1) && legs.x.isFinite && legs.y.isFinite && corner.isFinite && picks.allSatisfy(\.valid)
         case .hollow(let n, let open, let walls, let thickness):
             return n.valid(depth: depth + 1) && thickness.isFinite && open.allSatisfy(\.valid) && walls.allSatisfy { $0.face.valid && $0.thickness.isFinite }
+        case .sculpt(let s):
+            // Within 10 m, every triangle's corners among its points (whether it's a closed solid is the engine's to tell).
+            let d = s.data, n = UInt32(d.pointCount)
+            return s.detail.isFinite && s.detail > 0 && d.triangleCount > 0 && d.positions.allSatisfy { $0.isFinite && abs($0) <= 10_000 } &&
+                d.indices.allSatisfy { $0 < n }
         }
     }
 }

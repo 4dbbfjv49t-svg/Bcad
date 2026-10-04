@@ -1532,6 +1532,27 @@
   "zh-Hans": "深度",
   "ja": "奥行き"
  },
+ "Detail": {
+  "uk": "Деталізація",
+  "cs": "Detail",
+  "de": "Detail",
+  "es": "Detalle",
+  "fr": "Détail",
+  "it": "Dettaglio",
+  "hu": "Részletesség",
+  "nl": "Detail",
+  "nb": "Detalj",
+  "pl": "Detal",
+  "ro": "Detaliu",
+  "fi": "Tarkkuus",
+  "sv": "Detalj",
+  "kk": "Деталь",
+  "ka": "დეტალი",
+  "ar": "الدقة",
+  "hi": "विवरण",
+  "zh-Hans": "细节",
+  "ja": "詳細"
+ },
  "Diameter": {
   "uk": "Діаметр",
   "cs": "Průměr",
@@ -1657,6 +1678,27 @@
   "hi": "न सहेजें",
   "zh-Hans": "不存储",
   "ja": "保存しない"
+ },
+ "Done": {
+  "uk": "Готово",
+  "cs": "Hotovo",
+  "de": "Fertig",
+  "es": "Listo",
+  "fr": "Terminé",
+  "it": "Fatto",
+  "hu": "Kész",
+  "nl": "Klaar",
+  "nb": "Ferdig",
+  "pl": "Gotowe",
+  "ro": "Gata",
+  "fi": "Valmis",
+  "sv": "Klar",
+  "kk": "Дайын",
+  "ka": "მზადაა",
+  "ar": "تم",
+  "hi": "हो गया",
+  "zh-Hans": "完成",
+  "ja": "完了"
  },
  "Double-click to rename": {
   "uk": "Двічі клацніть, щоб перейменувати",
@@ -2350,6 +2392,27 @@
   "hi": "अंतराल",
   "zh-Hans": "间隙",
   "ja": "すき間"
+ },
+ "Getting ready to sculpt…": {
+  "uk": "Підготовка до ліплення…",
+  "cs": "Příprava na modelování…",
+  "de": "Modellieren wird vorbereitet…",
+  "es": "Preparando para esculpir…",
+  "fr": "Préparation de la sculpture…",
+  "it": "Preparazione alla scultura…",
+  "hu": "Felkészülés a szobrászatra…",
+  "nl": "Boetseren wordt voorbereid…",
+  "nb": "Gjør klar til skulptering…",
+  "pl": "Przygotowanie do rzeźbienia…",
+  "ro": "Se pregătește sculptarea…",
+  "fi": "Valmistellaan muotoilua…",
+  "sv": "Förbereder skulptering…",
+  "kk": "Мүсіндеуге дайындалуда…",
+  "ka": "ძერწვისთვის მზადება…",
+  "ar": "جارٍ التحضير للنحت…",
+  "hi": "तराशने की तैयारी…",
+  "zh-Hans": "正在准备雕刻…",
+  "ja": "スカルプトの準備中…"
  },
  "Glass": {
   "uk": "Склянка",
@@ -4724,6 +4787,48 @@
   "zh-Hans": "减少动画",
   "ja": "アニメーションを減らす"
  },
+ "Remesh": {
+  "uk": "Перебудувати сітку",
+  "cs": "Přesíťovat",
+  "de": "Neu vernetzen",
+  "es": "Remallar",
+  "fr": "Remailler",
+  "it": "Rimesh",
+  "hu": "Újrahálózás",
+  "nl": "Opnieuw vermazen",
+  "nb": "Nytt nett",
+  "pl": "Przesiatkuj",
+  "ro": "Refă plasa",
+  "fi": "Verkota uudelleen",
+  "sv": "Nytt nät",
+  "kk": "Қайта тор",
+  "ka": "ხელახალი ბადე",
+  "ar": "إعادة التشبيك",
+  "hi": "रीमेश",
+  "zh-Hans": "重新网格化",
+  "ja": "リメッシュ"
+ },
+ "Remesh makes it again of even triangles the detail size apart · Done keeps it": {
+  "uk": "Перебудувати сітку: рівні трикутники на відстані деталізації · Готово зберігає",
+  "cs": "Přesíťovat vytvoří stejné trojúhelníky o velikosti detailu · Hotovo jej ponechá",
+  "de": "Neu vernetzen erzeugt gleichmäßige Dreiecke im Detailabstand · Fertig übernimmt es",
+  "es": "Remallar lo rehace con triángulos iguales del tamaño del detalle · Listo lo conserva",
+  "fr": "Remailler le refait en triangles réguliers de la taille du détail · Terminé le conserve",
+  "it": "Rimesh lo rifà con triangoli regolari della dimensione del dettaglio · Fatto lo mantiene",
+  "hu": "Az újrahálózás egyenletes, részletméretű háromszögekből építi újra · a Kész megtartja",
+  "nl": "Opnieuw vermazen maakt het van gelijke driehoeken op detailafstand · Klaar bewaart het",
+  "nb": "Nytt nett lager det av jevne trekanter i detaljstørrelsen · Ferdig beholder det",
+  "pl": "Przesiatkuj tworzy równe trójkąty o rozmiarze detalu · Gotowe je zachowuje",
+  "ro": "Refacerea plasei îl reface din triunghiuri egale la mărimea detaliului · Gata îl păstrează",
+  "fi": "Uudelleenverkotus tekee sen tasaisista kolmioista tarkkuuden välein · Valmis säilyttää sen",
+  "sv": "Nytt nät gör om det av jämna trianglar med detaljstorleken · Klar behåller det",
+  "kk": "Қайта тор деталь өлшеміндегі біркелкі үшбұрыштардан жасайды · Дайын оны сақтайды",
+  "ka": "ხელახალი ბადე მას დეტალის ზომის თანაბარი სამკუთხედებით ქმნის · მზადაა ინახავს",
+  "ar": "إعادة التشبيك تعيد بناءه من مثلثات متساوية بحجم الدقة · تم يحتفظ به",
+  "hi": "रीमेश इसे विवरण आकार के बराबर त्रिभुजों से फिर बनाता है · हो गया इसे रखता है",
+  "zh-Hans": "重新网格化会以细节尺寸的均匀三角形重建 · 完成即保留",
+  "ja": "リメッシュで詳細サイズの均一な三角形に作り直します · 完了で確定"
+ },
  "Remove": {
   "uk": "Вилучити",
   "cs": "Odebrat",
@@ -5185,6 +5290,69 @@
   "hi": "स्केल करें",
   "zh-Hans": "比例缩放",
   "ja": "スケール"
+ },
+ "Sculpt": {
+  "uk": "Ліплення",
+  "cs": "Modelovat",
+  "de": "Modellieren",
+  "es": "Esculpir",
+  "fr": "Sculpter",
+  "it": "Scolpisci",
+  "hu": "Szobrászat",
+  "nl": "Boetseren",
+  "nb": "Skulptur",
+  "pl": "Rzeźbienie",
+  "ro": "Sculptare",
+  "fi": "Muotoile",
+  "sv": "Skulptera",
+  "kk": "Мүсіндеу",
+  "ka": "ძერწვა",
+  "ar": "نحت",
+  "hi": "मूर्तिकला",
+  "zh-Hans": "雕刻",
+  "ja": "スカルプト"
+ },
+ "Sculpted": {
+  "uk": "Виліплене",
+  "cs": "Modelované",
+  "de": "Modelliert",
+  "es": "Esculpido",
+  "fr": "Sculpté",
+  "it": "Scolpito",
+  "hu": "Szobrászott",
+  "nl": "Geboetseerd",
+  "nb": "Skulptert",
+  "pl": "Wyrzeźbione",
+  "ro": "Sculptat",
+  "fi": "Muotoiltu",
+  "sv": "Skulpterad",
+  "kk": "Мүсінделген",
+  "ka": "გამოძერწილი",
+  "ar": "منحوت",
+  "hi": "तराशा हुआ",
+  "zh-Hans": "已雕刻",
+  "ja": "スカルプト済み"
+ },
+ "Select a shape to sculpt": {
+  "uk": "Виберіть фігуру для ліплення",
+  "cs": "Vyberte tvar k modelování",
+  "de": "Wählen Sie eine Form zum Modellieren",
+  "es": "Selecciona una forma para esculpir",
+  "fr": "Sélectionnez une forme à sculpter",
+  "it": "Seleziona una forma da scolpire",
+  "hu": "Jelöljön ki egy formát a szobrászathoz",
+  "nl": "Selecteer een vorm om te boetseren",
+  "nb": "Velg en form å skulptere",
+  "pl": "Zaznacz kształt do rzeźbienia",
+  "ro": "Selectați o formă de sculptat",
+  "fi": "Valitse muotoiltava muoto",
+  "sv": "Markera en form att skulptera",
+  "kk": "Мүсіндеу үшін пішінді таңдаңыз",
+  "ka": "აირჩიეთ ფორმა ძერწვისთვის",
+  "ar": "حدد شكلًا لنحته",
+  "hi": "तराशने के लिए आकार चुनें",
+  "zh-Hans": "选择要雕刻的形状",
+  "ja": "スカルプトする形状を選択してください"
  },
  "Select All": {
   "uk": "Вибрати все",
@@ -6341,6 +6509,27 @@
   "zh-Hans": "在这些尺寸下无法算出 — 请换一个稍有不同的尺寸",
   "ja": "このサイズでは計算できませんでした。少し違うサイズを試してください"
  },
+ "This detail is too fine for this shape — try a larger one": {
+  "uk": "Ця деталізація задрібна для цієї фігури — спробуйте більшу",
+  "cs": "Tento detail je pro tento tvar příliš jemný — zkuste větší",
+  "de": "Dieses Detail ist für diese Form zu fein — versuchen Sie ein größeres",
+  "es": "Este detalle es demasiado fino para esta forma: prueba uno mayor",
+  "fr": "Ce détail est trop fin pour cette forme — essayez-en un plus grand",
+  "it": "Questo dettaglio è troppo fine per questa forma — provane uno più grande",
+  "hu": "Ez a részletesség túl finom ehhez a formához — próbáljon nagyobbat",
+  "nl": "Dit detail is te fijn voor deze vorm — probeer een groter",
+  "nb": "Denne detaljen er for fin for denne formen — prøv en større",
+  "pl": "Ten detal jest za drobny dla tego kształtu — spróbuj większego",
+  "ro": "Acest detaliu este prea fin pentru această formă — încercați unul mai mare",
+  "fi": "Tämä tarkkuus on liian hieno tälle muodolle — kokeile suurempaa",
+  "sv": "Den här detaljen är för fin för formen — prova en större",
+  "kk": "Бұл деталь осы пішін үшін тым ұсақ — үлкенірегін көріңіз",
+  "ka": "ეს დეტალი ამ ფორმისთვის ძალიან წვრილია — სცადეთ უფრო დიდი",
+  "ar": "هذه الدقة أنعم من اللازم لهذا الشكل — جرّب قيمة أكبر",
+  "hi": "यह विवरण इस आकार के लिए बहुत बारीक है — बड़ा आज़माएँ",
+  "zh-Hans": "此细节对该形状来说太细了——请尝试更大的值",
+  "ja": "この詳細はこの形状には細かすぎます。もっと大きな値を試してください"
+ },
  "This edge can't be shown in a cut": {
   "uk": "Це ребро не можна показати в перерізі",
   "cs": "Tuto hranu nelze zobrazit v řezu",
@@ -6487,6 +6676,27 @@
   "hi": "यह मॉडल सहेजने के लिए बहुत बड़ा है",
   "zh-Hans": "此模型太大，无法存储",
   "ja": "このモデルは大きすぎて保存できません"
+ },
+ "This shape can't be sculpted": {
+  "uk": "Цю фігуру неможливо ліпити",
+  "cs": "Tento tvar nelze modelovat",
+  "de": "Diese Form lässt sich nicht modellieren",
+  "es": "Esta forma no se puede esculpir",
+  "fr": "Cette forme ne peut pas être sculptée",
+  "it": "Questa forma non si può scolpire",
+  "hu": "Ezt a formát nem lehet szobrászni",
+  "nl": "Deze vorm kan niet geboetseerd worden",
+  "nb": "Denne formen kan ikke skulpteres",
+  "pl": "Tego kształtu nie da się rzeźbić",
+  "ro": "Această formă nu poate fi sculptată",
+  "fi": "Tätä muotoa ei voi muotoilla",
+  "sv": "Den här formen går inte att skulptera",
+  "kk": "Бұл пішінді мүсіндеу мүмкін емес",
+  "ka": "ამ ფორმის ძერწვა შეუძლებელია",
+  "ar": "لا يمكن نحت هذا الشكل",
+  "hi": "इस आकार को तराशा नहीं जा सकता",
+  "zh-Hans": "无法雕刻此形状",
+  "ja": "この形状はスカルプトできません"
  },
  "This shape isn't a closed solid": {
   "uk": "Ця фігура не є замкненим тілом",
@@ -7622,6 +7832,27 @@
   "zh-Hans": "{body} 是空的",
   "ja": "{body}は空です"
  },
+ "{body} is now a mesh to shape: its exact sizes and roundings become part of its surface": {
+  "uk": "{body} тепер сітка для ліплення: її точні розміри й заокруглення стають частиною поверхні",
+  "cs": "{body} je nyní síť k modelování: její přesné rozměry a zaoblení se stávají součástí povrchu",
+  "de": "{body} ist jetzt ein Netz zum Modellieren: seine genauen Maße und Rundungen werden Teil seiner Oberfläche",
+  "es": "{body} es ahora una malla para modelar: sus medidas exactas y redondeos pasan a formar parte de su superficie",
+  "fr": "{body} est maintenant un maillage à modeler : ses cotes exactes et ses arrondis font désormais partie de sa surface",
+  "it": "{body} è ora una mesh da modellare: le sue misure esatte e gli arrotondamenti diventano parte della superficie",
+  "hu": "{body} most formázható háló: pontos méretei és lekerekítései a felülete részévé válnak",
+  "nl": "{body} is nu een net om te vormen: de exacte maten en afrondingen worden deel van het oppervlak",
+  "nb": "{body} er nå et nett å forme: de nøyaktige målene og avrundingene blir en del av overflaten",
+  "pl": "{body} jest teraz siatką do kształtowania: jego dokładne wymiary i zaokrąglenia stają się częścią powierzchni",
+  "ro": "{body} este acum o plasă de modelat: dimensiunile exacte și rotunjirile devin parte a suprafeței",
+  "fi": "{body} on nyt muotoiltava verkko: sen tarkat mitat ja pyöristykset tulevat osaksi pintaa",
+  "sv": "{body} är nu ett nät att forma: dess exakta mått och rundningar blir en del av ytan",
+  "kk": "{body} енді пішіндеуге арналған тор: оның нақты өлшемдері мен дөңгелектеулері бетінің бөлігіне айналады",
+  "ka": "{body} ახლა ფორმირებადი ბადეა: მისი ზუსტი ზომები და მომრგვალებები მისი ზედაპირის ნაწილი ხდება",
+  "ar": "أصبح {body} الآن شبكة للتشكيل: مقاساته الدقيقة وتدويراته تصبح جزءًا من سطحه",
+  "hi": "{body} अब आकार देने के लिए एक मेश है: इसके सटीक माप और गोलाइयाँ इसकी सतह का हिस्सा बन जाती हैं",
+  "zh-Hans": "{body} 现在是可塑形的网格：其精确尺寸和圆角成为表面的一部分",
+  "ja": "{body} は形を整えるメッシュになりました。正確な寸法と丸みは表面の一部になります"
+ },
  "{body} isn't a closed solid": {
   "uk": "{body} не є замкненим тілом",
   "cs": "{body} není uzavřené těleso",
@@ -8140,6 +8371,94 @@
   },
   "ja": {
    "other": "{n}個のシェイプ"
+  }
+ },
+ "{n} triangles": {
+  "en": {
+   "one": "{n} triangle",
+   "other": "{n} triangles"
+  },
+  "uk": {
+   "one": "{n} трикутник",
+   "few": "{n} трикутники",
+   "many": "{n} трикутників"
+  },
+  "cs": {
+   "one": "{n} trojúhelník",
+   "few": "{n} trojúhelníky",
+   "other": "{n} trojúhelníků"
+  },
+  "de": {
+   "one": "{n} Dreieck",
+   "other": "{n} Dreiecke"
+  },
+  "es": {
+   "one": "{n} triángulo",
+   "other": "{n} triángulos"
+  },
+  "fr": {
+   "one": "{n} triangle",
+   "other": "{n} triangles"
+  },
+  "it": {
+   "one": "{n} triangolo",
+   "other": "{n} triangoli"
+  },
+  "hu": {
+   "one": "{n} háromszög",
+   "other": "{n} háromszög"
+  },
+  "nl": {
+   "one": "{n} driehoek",
+   "other": "{n} driehoeken"
+  },
+  "nb": {
+   "one": "{n} trekant",
+   "other": "{n} trekanter"
+  },
+  "pl": {
+   "one": "{n} trójkąt",
+   "few": "{n} trójkąty",
+   "many": "{n} trójkątów"
+  },
+  "ro": {
+   "one": "{n} triunghi",
+   "few": "{n} triunghiuri",
+   "other": "{n} de triunghiuri"
+  },
+  "fi": {
+   "one": "{n} kolmio",
+   "other": "{n} kolmiota"
+  },
+  "sv": {
+   "one": "{n} triangel",
+   "other": "{n} trianglar"
+  },
+  "kk": {
+   "one": "{n} үшбұрыш",
+   "other": "{n} үшбұрыш"
+  },
+  "ka": {
+   "one": "{n} სამკუთხედი",
+   "other": "{n} სამკუთხედი"
+  },
+  "ar": {
+   "zero": "لا مثلثات",
+   "one": "مثلث واحد",
+   "two": "مثلثان",
+   "few": "{n} مثلثات",
+   "many": "{n} مثلثًا",
+   "other": "{n} مثلث"
+  },
+  "hi": {
+   "one": "{n} त्रिभुज",
+   "other": "{n} त्रिभुज"
+  },
+  "zh-Hans": {
+   "other": "{n} 个三角形"
+  },
+  "ja": {
+   "other": "{n} 個の三角形"
   }
  },
  "{n}-sided prism": {

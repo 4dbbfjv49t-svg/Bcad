@@ -1344,6 +1344,71 @@ enum SelfTest {
                   "\(stlSize) bytes · \(stepText.utf8.count) bytes")
         }
 
+        // Sculpt: a stretched box made ready to sculpt (its stretch taken into its mesh), made again coarser, Done (one step
+        // to undo, the body now a mesh of about the box's volume), saved and opened again the same (as a version 2 file);
+        // Esc leaves a body as it was.
+        do {
+            func waitFor(_ until: () -> Bool) {
+                let t = Date()
+                while !until() && Date().timeIntervalSince(t) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            }
+            func extent(_ s: Sculpt?) -> SIMD3<Double> {
+                guard let p = s?.data.positions, !p.isEmpty else { return .zero }
+                var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
+                for i in stride(from: 0, to: p.count, by: 3) {
+                    let q = SIMD3(Double(p[i]), Double(p[i + 1]), Double(p[i + 2]))
+                    lo = simd_min(lo, q), hi = simd_max(hi, q)
+                }
+                return hi - lo
+            }
+            let clayBox = Node.primitive(Primitive(kind: .box, size: [20, 20, 20]))
+            var stretched = Placement(move: SIMD3(0, 0, 10))
+            stretched.scale = SIMD3(1.5, 1, 1)
+            let clay = Solid(name: "Clay", color: Palette.colors[4], node: clayBox, place: stretched)
+            use([clay])
+            lib.selection = [clay.id]
+            lib.perform(.sculpt)
+            waitFor { lib.sculptNow != nil && lib.sculptShown != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            let first = lib.sculptNow, size = extent(first)
+            check("Sculpt makes a body ready to shape, its stretch taken in", lib.mode == .sculpt && (first?.data.triangleCount ?? 0) > 5000 &&
+                  simd_reduce_max(simd_abs(size - SIMD3(30, 20, 20))) < 0.6 && lib.sculptDetail == 0.5,
+                  "\(first?.data.triangleCount ?? 0) triangles, \(size), detail \(lib.sculptDetail)")
+            lib.sculptDetail = 1
+            lib.remeshSculpt()
+            waitFor { !lib.sculptBusy }
+            let coarser = lib.sculptNow
+            check("Remesh makes it again at another detail", (coarser?.data.triangleCount ?? .max) < (first?.data.triangleCount ?? 0) / 2 && coarser?.detail == 1,
+                  "\(coarser?.data.triangleCount ?? 0) triangles")
+            lib.commitSculpt()
+            settle()
+            let isSculpt: Bool = { if case .sculpt = lib.body(clay.id)?.node { return true } else { return false } }()
+            let volume = lib.meshes[clay.id]?.volume ?? 0
+            check("Done: the body is a mesh of about the box's volume, its scale taken in", isSculpt && lib.mode == .select &&
+                  lib.body(clay.id)?.place.scale == SIMD3(1, 1, 1) && abs(volume - 12000) < 0.03 * 12000, "volume \(volume)")
+            let sculpted = lib.doc
+            lib.undo()
+            settle()
+            let back = lib.body(clay.id)?.node == clayBox && lib.body(clay.id)?.place.scale == SIMD3(1.5, 1, 1)
+            lib.redo()
+            settle()
+            check("Done is one step to undo", back && lib.doc == sculpted)
+            let sculptFile = dir.appendingPathComponent("sculpted.3mf")
+            let reread = saveAs(sculptFile) ? try? ThreeMF.read(sculptFile) : nil
+            check("a sculpted body is saved and opened again the same", reread?.doc == sculpted && reread?.doc.version == 2,
+                  "version \(reread?.doc.version ?? 0)")
+            // Esc: nothing changes.
+            let plainAgain = Solid(name: "Untouched", color: Palette.colors[2], node: clayBox, place: Placement(move: SIMD3(40, 0, 10)))
+            use([plainAgain])
+            let untouched = lib.doc
+            lib.selection = [plainAgain.id]
+            lib.perform(.sculpt)
+            waitFor { lib.sculptNow != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            let opened = lib.mode == .sculpt
+            lib.cancelMode()
+            settle()
+            check("Esc leaves Sculpt with the body as it was", opened && lib.mode == .select && lib.doc == untouched && lib.sculptNow == nil)
+        }
+
         // Print samples for test/printcheck.py (and to open in slicers by hand): each saved as the app saves it and written as
         // an STL as it exports one; expect.json says what each holds.
         let samplesDir = dir.appendingPathComponent("print-samples")
@@ -1359,6 +1424,8 @@ enum SelfTest {
             return Solid(name: name, color: color, node: node, place: Placement(move: SIMD3(x, y, height / 2)))
         }
         let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))
+        // A sphere stretched along x made ready to sculpt (as Sculpt makes it): a mesh body, standing 20 mm tall.
+        let egg = k.queue.sync { k.remesh(.primitive(.make(.sphere)), scale: SIMD3(1.4, 1, 1), detail: 0.6) }.map { Node.sculpt(Sculpt(data: $0, detail: 0.6)) } ?? block(10)
         let samples: [(name: String, bodies: [Solid], stlWatertight: Bool)] = [
             ("colours", [standing("Red box", SIMD3(230, 40, 40), block(20), -40, 0),
                          standing("Blue cylinder", SIMD3(40, 80, 230), .primitive(.make(.cylinder)), 0, 0),
@@ -1372,6 +1439,7 @@ enum SelfTest {
             ("tiny", [standing("1 mm cube", Palette.colors[5], block(1), -2, 0), standing("1 mm pin", Palette.colors[6], .primitive(Primitive(kind: .cylinder, size: [1, 1])), 2, 0)], true),
             ("big", [standing("250 mm ring", Palette.colors[7], .primitive(Primitive(kind: .ring, size: [250, 240, 5])), 0, 0)], true),
             ("odd-name", [standing("Tom & \"Jerry\" <1> 'x' 🙂", mixed, block(10), 0, 0)], true),
+            ("sculpted", [standing("Sculpted egg", Palette.colors[1], egg, 0, 0)], true),
         ]
         var expected: [[String: Any]] = []
         for sample in samples {

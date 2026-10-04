@@ -316,8 +316,12 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         let bed = lib.settings.bed
         for b in lib.doc.bodies where !b.hidden {
-            guard let m = lib.meshes[b.id], let g = upload(b.id, m) else { continue }
-            let model = simd_float4x4(b.place.matrix)
+            // The body being sculpted shows its mesh as it is now (its stretch already in it).
+            var place = b.place
+            let sculpting = lib.mode == .sculpt && lib.sculptBody == b.id ? lib.sculptShown : nil
+            if sculpting != nil { place.scale = SIMD3(1, 1, 1) }
+            guard let m = sculpting ?? lib.meshes[b.id], let g = upload(b.id, m) else { continue }
+            let model = simd_float4x4(place.matrix)
             let n3 = simd_float3x3(SIMD3(model.columns.0.x, model.columns.0.y, model.columns.0.z),
                                    SIMD3(model.columns.1.x, model.columns.1.y, model.columns.1.z),
                                    SIMD3(model.columns.2.x, model.columns.2.y, model.columns.2.z)).inverse.transpose
@@ -1168,6 +1172,10 @@ final class CadView: MTKView {
             // Where it was clicked: on a face an earlier treatment made, that treatment is worked on again.
             lib.pickPoints[pk] = hv.point
             drag = .none
+            return
+        case .sculpt:
+            // (Brushes come with Phase 2: for now a drag turns or pans the view.)
+            drag = shift ? .pan : .orbit
             return
         case .select, .thread:
             break
