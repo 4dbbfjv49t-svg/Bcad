@@ -1804,7 +1804,7 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var keeping: Task<Void, Never>?
     nonisolated static let recoveryQueue = DispatchQueue(label: "Bcad.unsaved")
     // (What CI's launch check looks for: the files opened.)
-    nonisolated static let log = Logger(subsystem: "Bcad", category: "files")
+    nonisolated static let fileLog = Logger(subsystem: "Bcad", category: "files")
     #if SELFTEST
     @ObservationIgnored var testAnswer: NSApplication.ModalResponse?
     #endif
@@ -3513,7 +3513,7 @@ final class Workbench: DesignHost {
             docName = nil
             dropUnsaved()
             noteRecent(url)
-            Self.log.notice("Opened \(url.lastPathComponent, privacy: .public)")
+            Self.fileLog.notice("Opened \(url.lastPathComponent, privacy: .public)")
             // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
             meshes = [:]
             for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
