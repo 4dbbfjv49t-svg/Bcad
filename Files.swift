@@ -32,12 +32,15 @@ enum Zip {
         return out.prefix(n)
     }
 
+    // A damaged entry (nothing packed, or more unpacked than deflate can make of it) is refused, not unpacked.
     private static func inflate(_ d: Data, size: Int) -> Data? {
         if size == 0 { return Data() }
+        guard !d.isEmpty, size <= 256 << 20, size <= d.count * 1032 else { return nil }
         var out = Data(count: size)
         let n = out.withUnsafeMutableBytes { o in
-            d.withUnsafeBytes { i in
-                compression_decode_buffer(o.bindMemory(to: UInt8.self).baseAddress!, size, i.bindMemory(to: UInt8.self).baseAddress!, d.count, nil, COMPRESSION_ZLIB)
+            d.withUnsafeBytes { i -> Int in
+                guard let to = o.bindMemory(to: UInt8.self).baseAddress, let from = i.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(to, size, from, d.count, nil, COMPRESSION_ZLIB)
             }
         }
         return n == size ? out : nil
@@ -245,7 +248,10 @@ extension Document {
 }
 
 extension Placement {
-    var valid: Bool { move.finite && turn.finite && scale.finite }
+    var valid: Bool {
+        let s = simd_abs(scale)
+        return move.finite && turn.finite && scale.finite && simd_reduce_min(s) > 1e-9 && simd_reduce_max(s) < 1e6
+    }
 }
 
 extension Pick {

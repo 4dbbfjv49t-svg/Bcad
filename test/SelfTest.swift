@@ -336,6 +336,12 @@ enum SelfTest {
         let oddURL = dir.appendingPathComponent("odd.3mf")
         try? ThreeMF.write(oddURL, meshes: [], doc: odd)
         check("3mf with wrong sizes refused", (try? ThreeMF.read(oddURL)) == nil)
+        // A packed entry with nothing in it is refused rather than unpacked, and a shape scaled to nothing isn't read in.
+        var unpacked = [UInt8](Zip.write([("a", Data(repeating: 65, count: 1000))]))
+        let tail = unpacked.count - 22, central = Int(unpacked[tail + 16]) | Int(unpacked[tail + 17]) << 8 | Int(unpacked[tail + 18]) << 16 | Int(unpacked[tail + 19]) << 24
+        for i in 20..<24 { unpacked[central + i] = 0 }
+        check("a packed entry with nothing in it is refused", unpacked[central + 10] == 8 && (try? Zip.read(Data(unpacked))) == nil)
+        check("a shape scaled to nothing is refused", !Placement(scale: SIMD3(0, 1, 1)).valid && !Placement(scale: SIMD3(1, 1e7, 1)).valid && Placement(scale: SIMD3(-1, 1, 1)).valid)
 
         // Opening and editing (last: the workbench builds on the kernel's thread from here on).
         let lib = Workbench.shared
@@ -368,6 +374,21 @@ enum SelfTest {
         let returned = Date().timeIntervalSince(asked) < 0.5
         while saved == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
+        // Saved to `url`; `meanwhile` happens while the file is being written.
+        func saveAs(_ url: URL, meanwhile: () -> Void = {}) -> Bool {
+            lib.fileURL = url
+            var done: Bool?
+            let asked = Date()
+            lib.saveDocument { done = $0 }
+            meanwhile()
+            while done == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            return done == true
+        }
+        // A save that ends after another file was opened leaves that file's name and state as they are.
+        let before = dir.appendingPathComponent("before.3mf")
+        let savedBefore = saveAs(before) { lib.open(u3) }
+        check("a save ending after another file opened leaves that file be", savedBefore && lib.fileURL == u3 && !lib.dirty && FileManager.default.fileExists(atPath: before.path))
+        lib.fileURL = copy
 
         // Renaming: a saved file is renamed where it is and a name already taken is refused; an unsaved document keeps the
         // name for saving.
@@ -434,6 +455,17 @@ enum SelfTest {
         lib.stretch([left.id: left.place, right.id: right.place], axis: 0, by: 2, uniform: false, symmetric: false)
         check("several shapes stretch along one axis only", near(bounds(left.id).0, SIMD3(-30, -10, 0)) && near(bounds(left.id).1, SIMD3(10, 10, 20))
               && near(bounds(right.id).0, SIMD3(50, -10, 0)) && near(bounds(right.id).1, SIMD3(90, 10, 20)))
+        // A rounded shape (far slower to build than a frame) is pictured stretched while dragged, and built as the drag ends.
+        let dragged = Solid(name: "Dragged", color: Palette.colors[4], node: .round(of: box, picks: [edge], radius: 2), place: Placement(move: SIMD3(0, 0, 10)))
+        use([dragged])
+        lib.selection = [dragged.id]
+        lib.beginResize()
+        lib.stretch([dragged.id: dragged.place], axis: 2, by: 1.5, uniform: false, symmetric: false)
+        let pictured = lib.body(dragged.id).map { $0.node == dragged.node && $0.place.scale.z == 1.5 } == true
+        lib.finishScale()
+        settle()
+        let draggedMade = lib.body(dragged.id).map { $0.place.scale == SIMD3(1, 1, 1) && $0.node.base == .primitive(Primitive(kind: .box, size: [20, 20, 30])) } == true
+        check("a rounded shape is pictured while dragged and built as the drag ends", pictured && draggedMade)
 
         // Resizing keeps exactly the side it should, however the sizes come out: a cylinder pulled wider becomes an oval with
         // its left side where it was, a sphere pulled taller stays round on its bottom, ⌥ keeps the middle, ⇧ the corner, and
@@ -1122,6 +1154,16 @@ enum SelfTest {
             return r == 1 && parts.count == 2 && parts.allSatisfy { $0.node == box }
         }()
         check("all edges of a merge: its parts' roundings are replaced too", plainParts && lib.note == nil, lib.note ?? "")
+
+        // A shape the engine can't build (a bolt, on Bcad's own engine) is saved as it's shown, not left out of the file.
+        let bolt = Solid(name: "Bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(0, 0, 10)))
+        var boltDoc = Document()
+        boltDoc.bodies = [bolt]
+        let boltURL = dir.appendingPathComponent("bolt.3mf"), boltAgain = dir.appendingPathComponent("bolt-again.3mf")
+        try? ThreeMF.write(boltURL, meshes: meshes.first.map { [(bolt, $0.1)] } ?? [], doc: boltDoc)
+        lib.open(boltURL)
+        settle()
+        check("a shape the engine can't build is saved as it's shown", saveAs(boltAgain) && (try? ThreeMF.read(boltAgain))?.meshes[bolt.id] != nil)
 
         // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
         k.queue.sync {}

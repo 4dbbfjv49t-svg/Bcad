@@ -756,12 +756,49 @@ struct Mesh {
     }
 
     var size: SIMD3<Double> { high - low }
+
+    // Its triangles where the placement puts them (for files; faces and normals left as they are).
+    func placed(_ place: Placement) -> Mesh {
+        let m = simd_float4x4(place.matrix)
+        var out = self
+        out.vertices = vertices.map { v in SIMD4((m * SIMD4(v.xyz, 1)).xyz, v.w) }
+        return out
+    }
+}
+
+// A job waited on for a while: begun, or dropped by the one waiting.
+private final class Pending<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dropped = false, begun = false
+    var out: T?
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        begun = !dropped
+        return begun
+    }
+
+    func drop() -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        dropped = !begun
+        return nil
+    }
 }
 
 // One serial worker thread with a large stack: OpenCascade booleans and fillets recurse deeply (GCD threads get 512 KB).
 final class Worker: @unchecked Sendable {
     private let lock = NSCondition()
     private var jobs: [() -> Void] = []
+    private var running = false
+
+    // Nothing waiting and nothing under way: a job asked for now starts at once.
+    var idle: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return jobs.isEmpty && !running
+    }
 
     init() {
         let t = Thread { [unowned self] in
@@ -769,8 +806,12 @@ final class Worker: @unchecked Sendable {
                 lock.lock()
                 while jobs.isEmpty { lock.wait() }
                 let job = jobs.removeFirst()
+                running = true
                 lock.unlock()
                 job()
+                lock.lock()
+                running = false
+                lock.unlock()
             }
         }
         t.stackSize = 64 << 20
@@ -783,6 +824,18 @@ final class Worker: @unchecked Sendable {
         jobs.append(job)
         lock.signal()
         lock.unlock()
+    }
+
+    // As sync, waiting at most `limit` seconds: nil when earlier work held the worker that long, and then the job is
+    // dropped if it hasn't begun.
+    func sync<T>(within limit: TimeInterval, _ job: @escaping () -> T) -> T? {
+        let p = Pending<T>(), done = DispatchSemaphore(value: 0)
+        async {
+            guard p.begin() else { return }
+            p.out = job()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + limit) == .success ? p.out : p.drop()
     }
 
     // Escaping: the worker may still hold the job a moment after it has signalled that it's done.
@@ -1648,6 +1701,8 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var swipe = 0.0
     @ObservationIgnored private var swiped = false
     @ObservationIgnored private var cameraBeforeAngles: Camera?
+    // Counts the documents opened or begun here: work begun for one (a save, a build) changes nothing of the next.
+    @ObservationIgnored private var generation = 0
     @ObservationIgnored private var flight: Task<Void, Never>?
     @ObservationIgnored private var measureRun = 0
     @ObservationIgnored private var insetGlide: Task<Void, Never>?
@@ -2370,6 +2425,8 @@ final class Workbench: DesignHost {
         var keep = SIMD3<Double>(0, 0, 0)
     }
     @ObservationIgnored private var resizing: [UUID: Resize] = [:]
+    // A live resize step found the kernel busy with other work: the next steps wait for it to be free.
+    @ObservationIgnored private var resizeStalled = false
     @ObservationIgnored private var resizeBox: (lo: SIMD3<Double>, hi: SIMD3<Double>)?
 
     // Bcad's own engine builds a primitive in far less than a frame: a resize shows the very shape it makes as it goes (a
@@ -2380,6 +2437,7 @@ final class Workbench: DesignHost {
     // A new resize begins (a handle pressed, a size typed in).
     func beginResize() {
         resizing = [:]
+        resizeStalled = false
         resizeBox = nil
     }
 
@@ -2433,7 +2491,7 @@ final class Workbench: DesignHost {
         var live: [(UUID, Node)] = []
         for p in plan {
             guard let r = resizing[p.id] else { continue }
-            if Self.liveResize, case .primitive = r.node.base, let next = baked(r.node, by: p.scale) {
+            if Self.liveResize, case .primitive = r.node, let next = baked(r.node, by: p.scale) {
                 // Its sizes taken in at once; the kept point where it was, on the base as it really grew.
                 let node = followed(r.node, to: next), k = grown(r.node, to: next)
                 mutate(p.id) { $0.node = node; $0.place.scale = SIMD3(1, 1, 1); $0.place.move = p.at - p.start.rotation * (r.keep * k) }
@@ -2442,25 +2500,30 @@ final class Workbench: DesignHost {
                 mutate(p.id) { $0.node = r.node; $0.place.scale = p.scale; $0.place.move = p.at - p.start.rotation * (p.scale * r.keep) }
             }
         }
-        if !live.isEmpty { buildNow(live) }
+        // While the kernel is busy with other work, the shape shown catches up at a later step or as the resize ends, rather
+        // than the window waiting on it.
+        if !live.isEmpty, !resizeStalled || Kernel.shared.queue.idle { resizeStalled = !buildNow(live) }
         sceneVersion += 1
     }
 
     // Shapes built at once and shown, waiting for the kernel: a resize on Bcad's own engine, where that takes far less
     // than a frame. What building them says is said when the resize ends, if it still holds.
-    private func buildNow(_ shapes: [(UUID, Node)]) {
+    // False when the kernel was busy with other work too long to wait for.
+    @discardableResult private func buildNow(_ shapes: [(UUID, Node)]) -> Bool {
         let clearance = settings.clearance
-        let made = Kernel.shared.queue.sync { () -> [(UUID, Node, Mesh?)] in
+        let made = Kernel.shared.queue.sync(within: 0.1) { () -> [(UUID, Node, Mesh?)] in
             Kernel.shared.clearance = clearance
             let out = shapes.map { ($0.0, $0.1, Kernel.shared.mesh($0.1, keep: false)) }
             _ = Kernel.shared.takeProblems()
             return out
         }
+        guard let made else { return false }
         for (id, node, mesh) in made {
             guard let mesh else { continue }
             meshes[id] = mesh
             built[id] = node
         }
+        return true
     }
 
     // A body's base with a stretch taken into its sizes: a primitive's (kept round or made oval, see Primitive.scale) or a
@@ -2747,6 +2810,10 @@ final class Workbench: DesignHost {
             let edits = spots, sharpPicks = fresh
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    guard self.editBody == id, self.edgePicks == picks, self.body(id)?.node == node else {
+                        self.angleOpening = false
+                        return
+                    }
                     guard let section, self.mode == .angles, let b = self.body(id) else {
                         self.angleOpening = false
                         if section == nil { self.flash(L(smooth ? "This edge is smooth: there's no corner to work on" : "This edge can't be shown in a cut")) }
@@ -2756,7 +2823,11 @@ final class Workbench: DesignHost {
                     let at = m * SIMD4(section.point, 1)
                     let along = simd_normalize((m * SIMD4(section.direction, 0)).xyz)
                     self.cameraBeforeAngles = self.camera
-                    self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60) {
+                    self.fly(to: SIMD3<Float>(at.xyz), looking: SIMD3<Float>(along), distance: 60, cancelled: {
+                        // Another flight took over (a view picked meanwhile): the editor doesn't open, and can be opened again.
+                        self.angleOpening = false
+                        self.cameraBeforeAngles = nil
+                    }) {
                         var e = AngleEdit(body: id, picks: picks, section: section)
                         e.edits = edits
                         e.fresh = sharpPicks
@@ -2886,15 +2957,15 @@ final class Workbench: DesignHost {
     }
 
     // Glides the camera to a new view over half a second (eased), redrawing each frame.
-    private func fly(to target: SIMD3<Float>, looking dir: SIMD3<Float>, distance: Float, done: @escaping () -> Void) {
+    private func fly(to target: SIMD3<Float>, looking dir: SIMD3<Float>, distance: Float, cancelled: (() -> Void)? = nil, done: @escaping () -> Void) {
         let v = simd_length(dir) > 0 ? -simd_normalize(dir) : SIMD3<Float>(0, -1, 0)
         let facing = simd_dot(v, camera.eye - camera.target) < 0 ? -v : v
         let pitch = asin(max(-0.999, min(0.999, facing.z)))
         let yaw = atan2(facing.x, -facing.y)
-        fly(to: target, yaw: yaw, pitch: max(-1.55, min(1.55, pitch)), distance: distance, done: done)
+        fly(to: target, yaw: yaw, pitch: max(-1.55, min(1.55, pitch)), distance: distance, cancelled: cancelled, done: done)
     }
 
-    private func fly(to target: SIMD3<Float>, yaw: Float, pitch: Float, distance: Float, done: (() -> Void)? = nil) {
+    private func fly(to target: SIMD3<Float>, yaw: Float, pitch: Float, distance: Float, cancelled: (() -> Void)? = nil, done: (() -> Void)? = nil) {
         flight?.cancel()
         let from = camera
         var turn = yaw - from.yaw
@@ -2906,7 +2977,8 @@ final class Workbench: DesignHost {
             var t: Float = 0
             while t < 1 {
                 try? await Task.sleep(for: .milliseconds(16))
-                guard let self, !Task.isCancelled else { return }
+                guard let self else { return }
+                guard !Task.isCancelled else { cancelled?(); return }
                 t = Float(min(1, Date().timeIntervalSince(start) / length))
                 let k = t * t * (3 - 2 * t)
                 self.camera.target = from.target + (target - from.target) * k
@@ -3015,7 +3087,7 @@ final class Workbench: DesignHost {
         building = true
         builtClearance = clearance
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
-        let note = L("Building…")
+        let note = L("Building…"), generation = self.generation
         if slow { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
@@ -3029,6 +3101,8 @@ final class Workbench: DesignHost {
                 if trouble == nil, !problems.isEmpty { trouble = (name, problems) }
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
+                        // A shape of a document since closed isn't shown in the next (it may hold the same shape ids).
+                        guard self.generation == generation else { return }
                         self.built[id] = node
                         // A shape the kernel can't build keeps what it showed (its saved look after opening a file).
                         self.meshes[id] = mesh ?? self.meshes[id] ?? Mesh()
@@ -3044,7 +3118,7 @@ final class Workbench: DesignHost {
                     self.sceneVersion += 1
                     self.applyDrops()
                     // With several shapes built (a file opened), the message says which one.
-                    if let found { self.report(found.problems, name: todo.count > 1 ? found.name : nil) }
+                    if let found, self.generation == generation { self.report(found.problems, name: todo.count > 1 ? found.name : nil) }
                     if self.pendingBuild { self.pendingBuild = false; self.rebuildScene() }
                 }
             }
@@ -3197,6 +3271,7 @@ final class Workbench: DesignHost {
 
     // Leaves every tool, editor and pending step of the current document behind, before another one comes in.
     private func resetEditing() {
+        generation += 1
         flight?.cancel()
         angleEdit = nil
         angleOpening = false
@@ -3257,19 +3332,25 @@ final class Workbench: DesignHost {
             url = u
         }
         guard let url else { done(false); return }
-        let doc = self.doc, clearance = settings.clearance, note = L("Saving…")
+        let doc = self.doc, clearance = settings.clearance, note = L("Saving…"), generation = self.generation
+        // What the engine can't build (a bolt on Bcad's own engine) is saved as it's shown.
+        let looks = meshes
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
-            let meshes = doc.bodies.filter { !$0.hidden }.compactMap { b in Kernel.shared.worldMesh(b).map { (b, $0) } }
+            let shown = { (b: Solid) in looks[b.id].flatMap { $0.vertices.isEmpty ? nil : $0.placed(b.place) } }
+            let meshes = doc.bodies.filter { !$0.hidden }.compactMap { b in (Kernel.shared.worldMesh(b) ?? shown(b)).map { (b, $0) } }
             let ok = (try? ThreeMF.write(url, meshes: meshes, doc: doc)) != nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
+                    // Another document opened or begun meanwhile stays as it is: the file saved was the one before it.
                     if ok {
-                        self.fileURL = url
-                        self.docName = nil
-                        self.saved = doc
+                        if self.generation == generation {
+                            self.fileURL = url
+                            self.docName = nil
+                            self.saved = doc
+                        }
                         self.flash(L("Saved {name}", ["name": url.lastPathComponent]))
                     } else {
                         self.flash(L("Couldn't save the file"))
