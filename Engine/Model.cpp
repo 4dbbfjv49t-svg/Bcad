@@ -132,7 +132,7 @@ double Solid::sliver(size_t t) const {
 void Solid::transform(const Affine &a) {
   bool still = true;
   for (int i = 0; i < 12; i++) still = still && a.m[i] == Affine().m[i];
-  if (!still) grid = 0;
+  if (!still) grid = 0, sound.clear();
   // A triangle's slivers grow with volume while its area grows its own way: the gap between grows by the difference.
   std::vector<double> before;
   if (!gap.empty()) {

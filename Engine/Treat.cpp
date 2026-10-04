@@ -1831,8 +1831,6 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   std::set<int> flats, consumed;
   // Inside-corner roundings run on past a narrow face: by crease, the faces beyond that cut what they fill.
   std::map<size_t, std::vector<int>> fillCut;
-  // (Cut a hair short of that face, should cutting on it leave the merge open.)
-  bool fillHair = false;
   for (const auto &c : work) {
     for (size_t q = 0; q < c.edges.size(); q++) {
       int e = c.edges[q];
@@ -2089,45 +2087,17 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   }
 
   std::vector<Solid> take, add;
-  // A tool made one of pieces (a chain's): those pieces, by which list and where in it, to cut one by one should the whole
-  // fail.
-  std::map<std::pair<bool, size_t>, std::vector<Solid>> piecesOf;
   if (!lines.empty()) {
     std::vector<Solid> tools = lineTools(s, lines, balls, t.radius, d, tol);
     if (tools.empty()) return tooLarge();
     for (auto &tool : tools) take.push_back(std::move(tool));
   }
-  // Inward roundings meeting at a corner: each there a hair wider than the others, so their cylinders cross rather than
-  // touch (alone, each exact).
-  std::vector<int> shade(work.size(), 0);
-  if (t.kind == Treatment::Cove)
-    for (size_t i = 0; i < work.size(); i++) {
-      if (work[i].closed) continue;
-      std::set<int> taken;
-      for (size_t j = 0; j < i; j++) {
-        if (work[j].closed) continue;
-        bool meets = false;
-        for (V3 p : {work[i].pts.front(), work[i].pts.back()})
-          for (V3 q : {work[j].pts.front(), work[j].pts.back()}) meets = meets || norm(p - q) <= tol * 10;
-        if (meets) taken.insert(shade[j]);
-      }
-      while (taken.count(shade[i])) shade[i]++;
-    }
-  // One merge or cut; should it leave a hole, again with crossing points a little farther apart made one (a tool touching
-  // a face along a line crosses it only roughly there).
-  auto step = [](const Solid &a, const Solid &b, int op) {
-    // (Past the treatment's budget of merges: no result, so it's refused in moments rather than ground at.)
-    if (combineReport.calls >= mergesUntil) return Solid();
-    Solid r = combine(a, b, op);
-    if (!closed(r)) r = combine(a, b, op, 1e-9);
-    return r;
-  };
   // A run of edges meeting smoothly (a face's edges round a rounded corner): each edge its own piece. Straight ones
   // between flat faces are prisms, running on through a corner between two of them that turns away from the material
   // (where what they take is taken by the corner's piece too); arcs between faces turned round their axis (or flat across
   // it) are the section carried round that axis through the solid's own steps, cut off at the axis; anything else is
-  // swept. Pieces meeting share the ring of points where they meet, a straight one and an arc ending there both; the
-  // pieces of each section then made one tool (cut one by one, two meeting there would leave a face between them).
+  // swept. Pieces meeting share the ring of points where they meet, a straight one and an arc ending there both (merged
+  // with the shape all at once, the face two share there goes).
   auto chain = [&](const Crease &c, const Treatment &tw, int which) {
     std::map<std::pair<bool, size_t>, std::vector<Solid>> made;
     auto put = [&](bool fill, size_t q, Solid tool) { made[{fill, q}].push_back(std::move(tool)); };
@@ -2382,24 +2352,16 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         put(per[0][q].fill, q, std::move(tool));
       }
     }
-    for (auto &[key, parts] : made) {
-      Solid one = parts[0];
-      for (size_t i = 1; i < parts.size() && closed(one); i++) one = step(one, parts[i], BK_UNION);
-      auto &into = key.first ? add : take;
-      if (parts.size() > 1 && closed(one) && !one.tri.empty()) {
-        piecesOf[{key.first, into.size()}] = std::move(parts);
-        into.push_back(std::move(one));
-      } else {
-        for (auto &part : parts) into.push_back(std::move(part));
-      }
-    }
+    // (A chain's pieces go in as they are: merged with the rest at once, the faces two share meet exactly and go.)
+    for (auto &[key, parts] : made)
+      for (auto &part : parts) (key.first ? add : take).push_back(std::move(part));
     return true;
   };
 
-  // Every other crease's tools (inward roundings meeting at corners made `shadeBy` wider each, as shaded).
+  // Every other crease's tools.
   std::vector<Solid> lineTake = take;
-  auto tools = [&](double shadeBy) {
-    take = lineTake, add.clear(), piecesOf.clear();
+  auto tools = [&]() {
+    take = lineTake, add.clear();
     int which = 0;
     for (size_t ci = 0; ci < work.size(); ci++) {
       const Crease &c = work[ci];
@@ -2445,7 +2407,6 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         }
       }
       Treatment tw = t;
-      tw.radius = t.radius * (1 + shadeBy * shade[ci]);
       if (c.edges.size() > 1) {
         if (!chain(c, tw, which)) {
           tooLarge();
@@ -2496,7 +2457,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           }
           for (int end = 0; end < 2; end++)
             if (endFace[end] >= 0) tool = cut(tool, end == 0 ? c.pts.front() : c.pts.back(), -s.faces[endFace[end]].geom.pn, 0);
-          for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * (s.faces[f].geom.pd - (fillHair ? hair(t.radius) : 0)), -s.faces[f].geom.pn, 0);
+          for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * s.faces[f].geom.pd, -s.faces[f].geom.pn, 0);
           add.push_back(tool);
         }
       } else if (ring) {
@@ -2649,7 +2610,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
               if (others.size() == 1 && s.faces[others[0]].geom.flat) tool = cut(tool, c.pts[i], -s.faces[others[0]].geom.pn, 0);
             }
           if (per[0][k].fill)
-            for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * (s.faces[f].geom.pd - (fillHair ? hair(t.radius) : 0)), -s.faces[f].geom.pn, 0);
+            for (int f : fillCut[ci]) tool = cut(tool, s.faces[f].geom.pn * s.faces[f].geom.pd, -s.faces[f].geom.pn, 0);
           (per[0][k].fill ? add : take).push_back(tool);
         }
       }
@@ -2657,22 +2618,16 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     // A tool cut down to nothing (a fill wholly past the face that ends it) has nothing to do; one left open would make
     // nonsense of what it's merged with.
     for (auto *list : {&take, &add}) {
-      bool fill = list == &add;
       std::vector<Solid> keep;
-      std::map<std::pair<bool, size_t>, std::vector<Solid>> moved;
-      for (size_t i = 0; i < list->size(); i++) {
-        if ((*list)[i].tri.empty()) continue;
-        if (!closed((*list)[i])) {
+      for (auto &tool : *list) {
+        if (tool.tri.empty()) continue;
+        if (!closed(tool)) {
           tooLarge();
           return false;
         }
-        auto it = piecesOf.find({fill, i});
-        if (it != piecesOf.end()) moved[{fill, keep.size()}] = std::move(it->second);
-        keep.push_back(std::move((*list)[i]));
+        keep.push_back(std::move(tool));
       }
       list->swap(keep);
-      for (auto it = piecesOf.begin(); it != piecesOf.end();) it = it->first.first == fill ? piecesOf.erase(it) : std::next(it);
-      for (auto &[k, v] : moved) piecesOf[k] = std::move(v);
     }
     return true;
   };
@@ -2745,37 +2700,11 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     }
   }
 
-  // The tools taken away one by one, then those added; failing that, each kind all together.
-  // `how`: those taken away together (1), those added together (2), else one by one; last first, those taken away with 4,
-  // those added with 8 (where three inward roundings meet at a corner, two of them only touch, and which two that is
-  // depends on the order; fills meeting at an inside corner, alike).
-  auto made = [&](int how) {
-    Solid r = base;
-    for (int op : {BK_SUBTRACT, BK_UNION}) {
-      const std::vector<Solid> &tools = op == BK_SUBTRACT ? take : add;
-      if (tools.empty()) continue;
-      bool together = how & (op == BK_SUBTRACT ? 1 : 2);
-      if (!together) {
-        for (size_t k = 0; k < tools.size(); k++) {
-          size_t i = how & (op == BK_SUBTRACT ? 4 : 8) ? tools.size() - 1 - k : k;
-          Solid next = step(r, tools[i], op);
-          auto parts = piecesOf.find({op == BK_UNION, i});
-          if (!closed(next) && parts != piecesOf.end()) {
-            next = r;
-            for (const auto &part : parts->second)
-              if (closed(next)) next = step(next, part, op);
-          }
-          r = std::move(next);
-          if (!closed(r)) return r;
-        }
-        continue;
-      }
-      // A tool left open takes nothing away (or anything): no result, not the shape as it was (nor going on with it).
-      Solid all = tools[0];
-      for (size_t i = 1; i < tools.size() && closed(all); i++) all = step(all, tools[i], BK_UNION);
-      if (!closed(all)) return Solid();
-      r = step(r, all, op);
-    }
+  // The shape with every tool taken away and every fill added, then its corners cut.
+  auto made = [&]() {
+    // (Past the treatment's budget of merges: no result, so it's refused in moments rather than ground at.)
+    if (combineReport.calls >= mergesUntil) return Solid();
+    Solid r = combine(base, take, add);
     // The corners cut off, each only where all it cuts lies near its corner.
     for (const auto &k : corners) {
       bool near = true;
@@ -2806,11 +2735,10 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       }
     }
   };
-  // (For tests: the tools in another order, each one's pieces going with it.)
+  // (For tests: the tools in another order.)
   auto shuffle = [&]() {
     if (!toolOrderSeed) return;
     uint64_t state = (uint64_t)toolOrderSeed * 0x9E3779B97F4A7C15ull + 1;
-    std::map<std::pair<bool, size_t>, std::vector<Solid>> moved;
     for (bool fill : {false, true}) {
       std::vector<Solid> &list = fill ? add : take;
       std::vector<size_t> order(list.size());
@@ -2820,17 +2748,12 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
         std::swap(order[i - 1], order[(state >> 33) % i]);
       }
       std::vector<Solid> next;
-      for (size_t i = 0; i < order.size(); i++) {
-        next.push_back(std::move(list[order[i]]));
-        auto it = piecesOf.find({fill, order[i]});
-        if (it != piecesOf.end()) moved[{fill, i}] = std::move(it->second);
-      }
+      for (size_t i : order) next.push_back(std::move(list[i]));
       list.swap(next);
     }
-    piecesOf.swap(moved);
   };
   // A result is taken only when it's closed, keeps the shape's pieces and (an inward rounding wider than its faces hold)
-  // cuts no face it mustn't; it's finished as it's taken. Otherwise the next way of making it is tried.
+  // cuts no face it mustn't; it's finished as it's taken. Otherwise the treatment is refused.
   int was = pieces(base);
   std::vector<double> before;
   std::set<int> beside, near;
@@ -2877,45 +2800,21 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     result = std::move(r);
     return true;
   };
-  // The tools taken away one by one, then last first, then each kind all together: the first sound result. (Other
-  // orders, each kind apart, never made one the corpus's cases needed.)
-  auto ladder = [&]() {
-    std::vector<int> hows{0};
-    if (take.size() + add.size() > 1) hows.insert(hows.end(), {12, 3});
-    for (int how : hows)
-      if (accept(made(how))) return true;
-    return false;
-  };
-  // Inward roundings exact first; where their cylinders only touch at a corner, a little wider each there.
-  bool done = false;
-  for (double shadeBy : {0.0, 1e-4, 2e-3}) {
-    if (shadeBy > 0 && t.kind != Treatment::Cove) break;
-    if (!tools(shadeBy)) return s;
-    markAux(take, false), markAux(add, true);
-    shuffle();
-    // A rounding's faces (its tools' curved ones that are left) meet the faces beside them smoothly: so marked for what's
-    // done next.
-    if (t.kind != Treatment::Bevel)
-      for (auto *list : {&take, &add})
-        for (auto &tool : *list)
-          for (auto &f : tool.faces)
-            if (!f.geom.flat && !f.aux) f.blend = true;
-    if ((done = ladder())) break;
-  }
-  if (!done && !fillCut.empty()) {
-    fillHair = true;
-    if (!tools(0)) return s;
-    markAux(take, false), markAux(add, true);
-    shuffle();
+  if (!tools()) return s;
+  markAux(take, false), markAux(add, true);
+  shuffle();
+  // A rounding's faces (its tools' curved ones that are left) meet the faces beside them smoothly: so marked for what's
+  // done next.
+  if (t.kind != Treatment::Bevel)
     for (auto *list : {&take, &add})
       for (auto &tool : *list)
         for (auto &f : tool.faces)
           if (!f.geom.flat && !f.aux) f.blend = true;
-    done = ladder();
-  }
-  if (!done) {
+  // The tools taken away and those added, all in one merge: none is rounded before the others meet it, so faces meant to
+  // meet do so exactly.
+  if (!accept(made())) {
     if (coveChecked) return tooWide();
-    // Not a matter of size: every way of merging its tools came out unsound.
+    // Not a matter of size: merged, its tools left the shape unsound (in more pieces or fewer).
     fit.fits = false, fit.numeric = true;
     fit.why = std::string("numeric: ") + (t.kind == Treatment::Bevel ? "bevel" : t.kind == Treatment::Cove ? "cove" : "rounding") +
               " couldn't be worked out here";
@@ -2962,8 +2861,9 @@ Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const
 }
 
 static Solid treatedHere(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
-  // At most 300 merges for one treatment, its second try included (the most any case needed was 175): what can't be
-  // made in that many is refused in moments. (A treatment inside a hollow's has its own, within the hollow's.)
+  // At most 300 merges for one treatment, its second try included (its tools go in at once and each corner cut is one
+  // more: no case needs 30): what can't be made in that many is refused in moments. (A treatment inside a hollow's has
+  // its own, within the hollow's.)
   long outer = mergesUntil;
   mergesUntil = std::min(outer, combineReport.calls + 300);
   struct Restore {

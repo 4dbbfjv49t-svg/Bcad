@@ -418,8 +418,9 @@ int main(int argc, char **argv) {
   printf("%d cases, %d not as expected, %d open; %.1f s, slowest %s %.0f ms; %ld mesh booleans, most %s %ld\n", cases, wrong, open, total / 1000,
          slowestId.c_str(), slowest, booleans, mostId.c_str(), mostBooleans);
   const auto &cr = bce::combineReport;
-  printf("booleans: %ld; keeps failed %ld, cuts dropped %ld, crossings made %ld, detours %ld, edge fallbacks %ld, came out open %ld, "
-         "unsure regions %ld, regions torn %ld\n", cr.calls, cr.keepsFailed, cr.segsDropped, cr.crossingsMade, cr.detours, cr.edgeFallbacks, cr.open, cr.unsure, cr.torn);
+  printf("booleans: %ld; keeps failed %ld, cuts dropped %ld, cuts crossing %ld, misses %ld, overflows %ld, came out open %ld, "
+         "rays all grazing %ld, made again %ld\n", cr.calls, cr.keepsFailed, cr.segsDropped, cr.crossingsMade, cr.misses, cr.overflows, cr.open, cr.unsure,
+         cr.again);
   for (int k = 1; k < nv; k++)
     printf("%-7s outcome flips %d, volume drift >1e-6 %d, >1e-3 %d, faces or pieces differ %d\n", variants[k].name, flips[k], drift6[k], drift3[k], shape[k]);
   return wrong || open ? 1 : 0;

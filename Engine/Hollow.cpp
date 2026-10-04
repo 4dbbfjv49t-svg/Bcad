@@ -1226,14 +1226,11 @@ bool clearOfWalls(const Solid &S, const std::vector<double> &depth, double size,
   bool any = false;
   for (const auto &slab : each) {
     double was = hole.meshVolume(), most = slab.meshVolume(), slack = 1e-6 * (was + most);
-    for (double merge : {1e-11, 1e-9, 1e-7}) {
-      Solid cleared = combine(hole, slab, BK_SUBTRACT, merge);
-      double v = cleared.meshVolume();
-      if (cleared.tri.empty() || !(v > 0) || v > was + slack || v < was - most - slack || !shut(cleared)) continue;
-      hole = std::move(cleared);
-      any = true;
-      break;
-    }
+    Solid cleared = combine(hole, slab, BK_SUBTRACT);
+    double v = cleared.meshVolume();
+    if (cleared.tri.empty() || !(v > 0) || v > was + slack || v < was - most - slack || !shut(cleared)) continue;
+    hole = std::move(cleared);
+    any = true;
   }
   return any;
 }
@@ -1325,14 +1322,21 @@ static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &ou
     // clear of the walls (as is: when that can't be made, as it is).
     bool cleared = (compound(s) || !rules.open.empty()) && clearOfWalls(whole, depth, rules.size, d, hole);
     made = combine(whole, hole, BK_SUBTRACT);
+    bool through = combineReport.lastOutside > 0;
+    // Shut, the void must lie wholly inside (walls too thick at a rounding would break through): as the merge found,
+    // none of its surface outside the shape, or what reaches out (the void less the shape) no more than a millionth of it
+    // (a hair's sliver where its sharp corner meets a rounding, as the walls are made).
+    if (through && rules.open.empty()) {
+      double out = combine(hole, whole, BK_SUBTRACT).meshVolume(), inside = hole.meshVolume();
+      through = !(out <= 1e-6 * inside + 1e-9 * rules.size * rules.size * rules.size);
+    }
     finish(made, d);
     // A hair's remnant of a face where the void was cleared just short of a wall: into the face beside it.
     if (cleared && foldThin(made, 0.05 * d)) finish(made, d);
-    double v = made.meshVolume(), taken = all - v, inside = hole.meshVolume();
+    double v = made.meshVolume();
     // (A result left open by a merge that went wrong is no result.)
     if (!shut(made) || !(v > 0) || !(v < all * 0.999) || pieces(made) != parts) return false;
-    // Shut, the void must lie wholly inside (walls too thick at a rounding would break through).
-    if (rules.open.empty() && taken < inside * (1 - 1e-6) - 1e-9 * rules.size * rules.size * rules.size) return false;
+    if (rules.open.empty() && through) return false;
     out = std::move(made);
     return true;
   };

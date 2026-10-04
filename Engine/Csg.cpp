@@ -401,121 +401,243 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
 
 }  // namespace
 
-// Edges far shorter than anything a printer or a screen tells apart (a cut a hair from a corner) collapsed to a point, so
-// the mesh stays clean when it's handed on in floats. A collapse is made only where it keeps the surface closed, one
-// sheet and unflipped; the point kept is the one on more faces (a corner before a point inside a face).
-void tidy(Welded &w, double eps) {
-  size_t nt = w.count();
-  struct Short {
-    double l2;
-    uint32_t a, b;
-  };
-  std::vector<Short> shorts;
-  for (size_t t = 0; t < nt; t++)
-    for (int k = 0; k < 3; k++) {
-      uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3];
-      double l2 = norm2(w.pts[a] - w.pts[b]);
-      if (a < b && l2 < eps * eps) shorts.push_back({l2, a, b});
+// Edges shorter than `eps` (a cut a hair from a corner) and triangles thinner (a point a hair off the line between two
+// others, where a cut grazes a side) done away with, so the mesh stays clean when it's rounded or handed on in floats.
+// Every step keeps each side met by one running the other way, so a closed mesh stays closed whatever it looks like, and
+// none is ever refused: points nearer than twice `eps` across an edge are made one (the one on more faces kept: a corner
+// before a point inside a face), triangles left with two corners in one place go (their other two sides cancel), as do
+// two triangles on the same three points facing opposite ways; a corner nearer than `eps` to its triangle's long side
+// is put on that side, every triangle along the side split there and the thin one gone.
+void clean(Welded &w, double eps, const std::vector<char> *only) {
+  bool gaps = !w.gap.empty();
+  // (Triangles changed are no longer known not to cross others.)
+  bool marks = w.sound.size() == w.count();
+  // The triangles that may need it: those given (the rest known clean), and any changed on the way.
+  std::vector<char> fresh = only && only->size() == w.count() ? *only : std::vector<char>(w.count(), 1);
+  // Points are made one a little farther apart than a triangle counts as thin, so a thin one's corner off its long side is
+  // never so near either end that putting it on the side leaves another thin one the other way round.
+  double near = 2 * eps;
+  // Triangles out (by mark), the rest kept in order with all they carry.
+  auto compact = [&](const std::vector<char> &dead) {
+    size_t n = 0, all = w.count();
+    for (size_t t = 0; t < all; t++) {
+      if (dead[t]) continue;
+      for (int k = 0; k < 3; k++) w.tri[3 * n + k] = w.tri[3 * t + k], w.nrm[3 * n + k] = w.nrm[3 * t + k];
+      if (gaps)
+        for (int k = 0; k < 6; k++) w.gap[6 * n + k] = w.gap[6 * t + k];
+      if (marks) w.sound[n] = w.sound[t];
+      fresh[n] = fresh[t];
+      w.face[n++] = w.face[t];
     }
-  if (shorts.empty()) return;
-  std::sort(shorts.begin(), shorts.end(), [](const Short &x, const Short &y) {
-    return x.l2 != y.l2 ? x.l2 < y.l2 : x.a != y.a ? x.a < y.a : x.b < y.b;
-  });
-  std::vector<char> dead(nt, 0);
-  std::vector<std::vector<uint32_t>> around(w.pts.size());
-  for (size_t t = 0; t < nt; t++)
-    for (int k = 0; k < 3; k++) around[w.tri[3 * t + k]].push_back((uint32_t)t);
-  auto has = [&](uint32_t t, uint32_t v) { return w.tri[3 * t] == v || w.tri[3 * t + 1] == v || w.tri[3 * t + 2] == v; };
-  auto facesAt = [&](uint32_t v) {
-    std::vector<uint32_t> f;
-    for (uint32_t t : around[v])
-      if (!dead[t] && std::find(f.begin(), f.end(), w.face[t]) == f.end()) f.push_back(w.face[t]);
-    return f.size();
+    w.tri.resize(3 * n), w.nrm.resize(3 * n), w.face.resize(n), fresh.resize(n);
+    if (gaps) w.gap.resize(6 * n);
+    if (marks) w.sound.resize(n);
   };
-  auto turned = [&](uint32_t t, uint32_t gone, V3 to) {
-    V3 q[3];
-    for (int k = 0; k < 3; k++) q[k] = w.pts[w.tri[3 * t + k]];
-    V3 before = cross(q[1] - q[0], q[2] - q[0]);
-    for (int k = 0; k < 3; k++)
-      if (w.tri[3 * t + k] == gone) q[k] = to;
-    return dot(before, cross(q[1] - q[0], q[2] - q[0])) < 0;
-  };
-  // Where each point went (itself until it's collapsed into another).
-  std::vector<uint32_t> to(w.pts.size());
-  std::iota(to.begin(), to.end(), 0);
-  auto now = [&](uint32_t v) {
-    while (to[v] != v) v = to[v] = to[to[v]];
-    return v;
-  };
-  // A collapse can wait on another (a pinch undone by a neighbour's), so a few rounds.
-  for (int round = 0; round < 4 && !shorts.empty(); round++) {
-  std::vector<Short> left;
-  for (const Short &e : shorts) {
-    uint32_t a = now(e.a), b = now(e.b);
-    if (a == b || norm2(w.pts[a] - w.pts[b]) >= eps * eps) continue;
-    std::vector<uint32_t> both, onlyA, onlyB;
-    for (uint32_t t : around[a])
-      if (!dead[t]) (has(t, b) ? both : onlyA).push_back(t);
-    for (uint32_t t : around[b])
-      if (!dead[t] && !has(t, a)) onlyB.push_back(t);
-    if (both.size() != 2) {
-      if (!both.empty()) left.push_back(e);
-      continue;
-    }
-    // Their neighbours in common must be just the two across the edge, or the collapse would pinch the surface.
-    std::vector<uint32_t> na, opposite;
-    for (uint32_t t : both)
-      for (int k = 0; k < 3; k++)
-        if (w.tri[3 * t + k] != a && w.tri[3 * t + k] != b) opposite.push_back(w.tri[3 * t + k]);
-    if (opposite[0] == opposite[1]) continue;
-    for (uint32_t t : onlyA)
-      for (int k = 0; k < 3; k++) na.push_back(w.tri[3 * t + k]);
-    bool pinch = false;
-    for (uint32_t t : onlyB)
-      for (int k = 0; k < 3 && !pinch; k++) {
-        uint32_t v = w.tri[3 * t + k];
-        pinch = v != b && v != opposite[0] && v != opposite[1] && std::find(na.begin(), na.end(), v) != na.end();
+  // (Rounds while that leaves fewer thin triangles; a few on a tiny patch can go round in a circle, and are left.)
+  size_t fewest = SIZE_MAX;
+  int stale = 0;
+  for (int round = 0; round < 64 && stale < 3; round++) {
+    bool changed = false;
+    size_t nt = w.count();
+    // Points made one, nearest first.
+    {
+      struct Short {
+        double l2;
+        uint32_t a, b;
+      };
+      std::vector<Short> shorts;
+      for (size_t t = 0; t < nt; t++) {
+        if (!fresh[t]) continue;
+        for (int k = 0; k < 3; k++) {
+          uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3];
+          double l2 = norm2(w.pts[a] - w.pts[b]);
+          if (l2 < near * near) shorts.push_back({l2, std::min(a, b), std::max(a, b)});
+        }
       }
-    if (pinch) {
-      left.push_back(e);
-      continue;
-    }
-    uint32_t keep = a, gone = b;
-    if (facesAt(b) > facesAt(a)) std::swap(keep, gone);
-    auto flips = [&](uint32_t k, uint32_t g) {
-      for (uint32_t t : g == a ? onlyA : onlyB)
-        if (turned(t, g, w.pts[k])) return true;
-      return false;
-    };
-    if (flips(keep, gone)) {
-      std::swap(keep, gone);
-      if (flips(keep, gone)) {
-        left.push_back(e);
-        continue;
+      if (!shorts.empty()) {
+        std::sort(shorts.begin(), shorts.end(), [](const Short &x, const Short &y) {
+          return x.l2 != y.l2 ? x.l2 < y.l2 : x.a != y.a ? x.a < y.a : x.b < y.b;
+        });
+        shorts.erase(std::unique(shorts.begin(), shorts.end(), [](const Short &x, const Short &y) { return x.a == y.a && x.b == y.b; }), shorts.end());
+        // Faces at each point of a short edge.
+        std::vector<int> slot(w.pts.size(), -1);
+        std::vector<std::vector<uint32_t>> faces;
+        for (const Short &e : shorts)
+          for (uint32_t v : {e.a, e.b})
+            if (slot[v] < 0) slot[v] = (int)faces.size(), faces.emplace_back();
+        for (size_t t = 0; t < nt; t++)
+          for (int k = 0; k < 3; k++) {
+            int at = slot[w.tri[3 * t + k]];
+            if (at < 0) continue;
+            auto &f = faces[at];
+            if (std::find(f.begin(), f.end(), w.face[t]) == f.end()) f.push_back(w.face[t]);
+          }
+        std::vector<uint32_t> to(w.pts.size());
+        std::iota(to.begin(), to.end(), 0);
+        auto now = [&](uint32_t v) {
+          while (to[v] != v) v = to[v] = to[to[v]];
+          return v;
+        };
+        for (const Short &e : shorts) {
+          uint32_t a = now(e.a), b = now(e.b);
+          if (a == b || norm2(w.pts[a] - w.pts[b]) >= near * near) continue;
+          auto &fa = faces[slot[a]], &fb = faces[slot[b]];
+          uint32_t keep = a, gone = b;
+          if (fb.size() > fa.size() || (fb.size() == fa.size() && b < a)) std::swap(keep, gone);
+          to[gone] = keep;
+          auto &fk = faces[slot[keep]];
+          for (uint32_t f : faces[slot[gone]])
+            if (std::find(fk.begin(), fk.end(), f) == fk.end()) fk.push_back(f);
+          changed = true;
+        }
+        for (size_t t = 0; t < nt; t++)
+          for (int k = 0; k < 3; k++) {
+            uint32_t &v = w.tri[3 * t + k];
+            if (now(v) != v) {
+              v = now(v);
+              fresh[t] = 1;
+              if (marks) w.sound[t] = 0;
+            }
+          }
       }
     }
-    for (uint32_t t : both) dead[t] = 1;
-    for (uint32_t t : gone == a ? onlyA : onlyB) {
-      for (int k = 0; k < 3; k++)
-        if (w.tri[3 * t + k] == gone) w.tri[3 * t + k] = keep;
-      around[keep].push_back(t);
+    // Triangles with two corners in one place, and pairs on the same three points facing opposite ways, out.
+    {
+      std::vector<char> dead(nt, 0);
+      bool any = false;
+      std::vector<std::pair<std::array<uint32_t, 3>, uint32_t>> keyed;
+      for (size_t t = 0; t < nt; t++) {
+        if (!fresh[t]) continue;
+        const uint32_t *v = &w.tri[3 * t];
+        if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) {
+          dead[t] = 1, any = changed = true;
+          continue;
+        }
+        std::array<uint32_t, 3> k{v[0], v[1], v[2]};
+        std::sort(k.begin(), k.end());
+        keyed.push_back({k, (uint32_t)t});
+      }
+      std::sort(keyed.begin(), keyed.end());
+      // The way round a triangle runs: its corners from the least, as an even or odd turn of the sorted three.
+      auto turn = [&](uint32_t t) {
+        const uint32_t *v = &w.tri[3 * t];
+        int m = v[0] < v[1] && v[0] < v[2] ? 0 : v[1] < v[2] ? 1 : 2;
+        return v[(m + 1) % 3] < v[(m + 2) % 3];
+      };
+      for (size_t i = 0, j; i < keyed.size(); i = j) {
+        for (j = i + 1; j < keyed.size() && keyed[j].first == keyed[i].first;) j++;
+        if (j - i < 2) continue;
+        std::vector<uint32_t> up, down;
+        for (size_t k = i; k < j; k++) (turn(keyed[k].second) ? up : down).push_back(keyed[k].second);
+        for (size_t k = 0; k < std::min(up.size(), down.size()); k++) dead[up[k]] = dead[down[k]] = 1, any = changed = true;
+      }
+      if (any) compact(dead);
+      nt = w.count();
     }
-    around[gone].clear();
-    to[gone] = keep;
+    // Thin triangles: the corner off the long side put on it, longest side first.
+    {
+      struct Thin {
+        double l2;  // its long side's length, squared
+        uint32_t t;
+      };
+      // A triangle's long side (its corners k, k + 1) and length squared.
+      auto longSide = [&](uint32_t t, int &k) {
+        double best = -1;
+        k = 0;
+        for (int j = 0; j < 3; j++) {
+          double l2 = norm2(w.pts[w.tri[3 * t + (j + 1) % 3]] - w.pts[w.tri[3 * t + j]]);
+          if (l2 > best) best = l2, k = j;
+        }
+        return best;
+      };
+      std::vector<Thin> thin;
+      for (size_t t = 0; t < nt; t++) {
+        if (!fresh[t]) continue;
+        int k;
+        double best = longSide((uint32_t)t, k);
+        V3 A = w.pts[w.tri[3 * t + k]], B = w.pts[w.tri[3 * t + (k + 1) % 3]], C = w.pts[w.tri[3 * t + (k + 2) % 3]];
+        double h = best > 0 ? norm(cross(B - A, C - A)) / std::sqrt(best) : 0;
+        if (h < eps) thin.push_back({best, (uint32_t)t});
+      }
+      if (thin.size() < fewest) fewest = thin.size(), stale = 0;
+      else stale++;
+      if (!thin.empty()) {
+        // Longest side first: a thin triangle's pieces after a split are all shorter, so where thin ones lie side by side
+        // (points almost on one line) they're done from the outside in and the run ends.
+        std::sort(thin.begin(), thin.end(), [](const Thin &x, const Thin &y) { return x.l2 != y.l2 ? x.l2 > y.l2 : x.t < y.t; });
+        // The triangles along each thin one's long side.
+        std::vector<uint64_t> need;
+        for (const Thin &th : thin) {
+          int k;
+          longSide(th.t, k);
+          uint32_t a = w.tri[3 * th.t + k], b = w.tri[3 * th.t + (k + 1) % 3];
+          need.push_back((uint64_t)std::min(a, b) << 32 | std::max(a, b));
+        }
+        std::sort(need.begin(), need.end());
+        need.erase(std::unique(need.begin(), need.end()), need.end());
+        std::vector<std::pair<uint64_t, uint32_t>> sides;
+        for (size_t t = 0; t < nt; t++)
+          for (int k = 0; k < 3; k++) {
+            uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3];
+            uint64_t key = (uint64_t)std::min(a, b) << 32 | std::max(a, b);
+            if (std::binary_search(need.begin(), need.end(), key)) sides.push_back({key, (uint32_t)t});
+          }
+        std::sort(sides.begin(), sides.end());
+        std::vector<uint32_t> on;
+        std::vector<char> touched(nt, 0), dead(nt, 0);
+        for (const Thin &th : thin) {
+          uint32_t t = th.t;
+          if (touched[t]) continue;
+          int k;
+          double best = longSide(t, k);
+          uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3], c = w.tri[3 * t + (k + 2) % 3];
+          V3 A = w.pts[a], B = w.pts[b], C = w.pts[c];
+          double s = dot(C - A, B - A) / best;
+          if (!(s > 0 && s < 1)) continue;
+          uint64_t key = (uint64_t)std::min(a, b) << 32 | std::max(a, b);
+          on.clear();
+          for (auto it = std::lower_bound(sides.begin(), sides.end(), std::make_pair(key, 0u)); it != sides.end() && it->first == key; ++it) on.push_back(it->second);
+          bool free = true;
+          for (uint32_t u : on) free = free && !touched[u];
+          if (!free) continue;
+          for (uint32_t u : on) {
+            touched[u] = 1, dead[u] = 1;
+            int m = 0;
+            while (m < 3 && !((w.tri[3 * u + m] == a || w.tri[3 * u + m] == b) && (w.tri[3 * u + (m + 1) % 3] == a || w.tri[3 * u + (m + 1) % 3] == b))) m++;
+            if (m == 3) {
+              dead[u] = 0;
+              continue;
+            }
+            uint32_t x = w.tri[3 * u + m], y = w.tri[3 * u + (m + 1) % 3], d = w.tri[3 * u + (m + 2) % 3];
+            if (d == c) continue;
+            V3 nx = w.nrm[3 * u + m], ny = w.nrm[3 * u + (m + 1) % 3], nd = w.nrm[3 * u + (m + 2) % 3];
+            double sx = x == a ? s : 1 - s;  // c's place along x → y
+            V3 nc = unit(nx * (1 - sx) + ny * sx);
+            V3 q[3] = {w.pts[w.tri[3 * u]], w.pts[w.tri[3 * u + 1]], w.pts[w.tri[3 * u + 2]]};
+            double g[6] = {0, 0, 0, 0, 0, 0};
+            if (gaps) std::copy(&w.gap[6 * u], &w.gap[6 * u] + 6, g);
+            uint32_t f = w.face[u];
+            auto put = [&](uint32_t p0, uint32_t p1, uint32_t p2, V3 n0, V3 n1, V3 n2) {
+              w.tri.insert(w.tri.end(), {p0, p1, p2}), w.nrm.insert(w.nrm.end(), {n0, n1, n2}), w.face.push_back(f);
+              if (marks) w.sound.push_back(0);
+              fresh.push_back(1);
+              if (gaps) {
+                V3 piece[3] = {w.pts[p0], w.pts[p1], w.pts[p2]};
+                w.gap.resize(w.gap.size() + 6);
+                gapOfPiece(g, q[0], q[1], q[2], piece, &w.gap[w.gap.size() - 6]);
+              }
+              touched.push_back(1), dead.push_back(0);
+            };
+            put(x, c, d, nx, nc, nd);
+            put(c, y, d, nc, ny, nd);
+          }
+          changed = true;
+        }
+        compact(dead);
+      }
+    }
+    if (!changed) break;
   }
-  if (left.size() == shorts.size()) break;
-  shorts.swap(left);
-  }
-  size_t n = 0;
-  for (size_t t = 0; t < nt; t++) {
-    if (dead[t]) continue;
-    for (int k = 0; k < 3; k++) w.tri[3 * n + k] = w.tri[3 * t + k], w.nrm[3 * n + k] = w.nrm[3 * t + k];
-    if (!w.gap.empty())
-      for (int k = 0; k < 6; k++) w.gap[6 * n + k] = w.gap[6 * t + k];
-    w.face[n++] = w.face[t];
-  }
-  w.tri.resize(3 * n), w.nrm.resize(3 * n), w.face.resize(n);
-  if (!w.gap.empty()) w.gap.resize(6 * n);
 }
 
 bool balanced(const Welded &w) {
@@ -532,77 +654,12 @@ bool balanced(const Welded &w) {
 
 bool sameForm(const FaceGeom &a, const FaceGeom &b) { return sameSurface(a, b); }
 
-// Triangles thinner than anything told apart (a point a hair off the line between two others, where a cut grazes a side)
-// done away with: the long side swapped for one from that point to the corner across it, the two triangles there taking
-// the neighbour's face, normals and slivers. Swaps that would fold or double a side are left.
-void unneedle(Welded &w, double eps) {
-  size_t nt = w.count();
-  for (int round = 0; round < 4; round++) {
-    std::unordered_map<uint64_t, uint32_t> side;
-    side.reserve(3 * nt);
-    for (size_t t = 0; t < nt; t++)
-      for (int k = 0; k < 3; k++) side[(uint64_t)w.tri[3 * t + k] << 32 | w.tri[3 * t + (k + 1) % 3]] = (uint32_t)t;
-    std::vector<char> done(nt, 0);
-    int swaps = 0;
-    for (size_t t = 0; t < nt; t++) {
-      if (done[t]) continue;
-      // The longest side a → b, and c across it.
-      int k = 0;
-      double best = -1;
-      for (int j = 0; j < 3; j++) {
-        double l2 = norm2(w.pts[w.tri[3 * t + (j + 1) % 3]] - w.pts[w.tri[3 * t + j]]);
-        if (l2 > best) best = l2, k = j;
-      }
-      uint32_t a = w.tri[3 * t + k], b = w.tri[3 * t + (k + 1) % 3], c = w.tri[3 * t + (k + 2) % 3];
-      V3 A = w.pts[a], B = w.pts[b], C = w.pts[c], ab = B - A;
-      if (!(best > 0) || norm(cross(ab, C - A)) / std::sqrt(best) >= eps) continue;
-      double s = dot(C - A, ab) / best;
-      if (!(s > 0 && s < 1)) continue;
-      auto it = side.find((uint64_t)b << 32 | a);
-      if (it == side.end() || done[it->second] || it->second == t) continue;
-      uint32_t n = it->second;
-      int kn = 0;
-      while (w.tri[3 * n + kn] != b) kn++;
-      uint32_t d = w.tri[3 * n + (kn + 2) % 3];
-      V3 D = w.pts[d], up = cross(A - B, D - B);
-      if (norm(up) / std::sqrt(best) < eps || side.count((uint64_t)c << 32 | d) || side.count((uint64_t)d << 32 | c)) continue;
-      if (dot(cross(D - A, C - A), up) <= 0 || dot(cross(B - D, C - D), up) <= 0) continue;
-      // The neighbour's corners, normals and slivers, as they were.
-      V3 q[3] = {w.pts[w.tri[3 * n]], w.pts[w.tri[3 * n + 1]], w.pts[w.tri[3 * n + 2]]};
-      V3 nb = w.nrm[3 * n + kn], na = w.nrm[3 * n + (kn + 1) % 3], nd = w.nrm[3 * n + (kn + 2) % 3];
-      V3 nc = unit(na * (1 - s) + nb * s);
-      double g[6];
-      bool gaps = !w.gap.empty();
-      if (gaps) std::copy(&w.gap[6 * n], &w.gap[6 * n] + 6, g);
-      uint32_t f = w.face[n];
-      auto put = [&](size_t at, uint32_t x, uint32_t y, uint32_t z, V3 nx, V3 ny, V3 nz) {
-        w.tri[3 * at] = x, w.tri[3 * at + 1] = y, w.tri[3 * at + 2] = z;
-        w.nrm[3 * at] = nx, w.nrm[3 * at + 1] = ny, w.nrm[3 * at + 2] = nz;
-        w.face[at] = f;
-        if (gaps) {
-          V3 piece[3] = {w.pts[x], w.pts[y], w.pts[z]};
-          gapOfPiece(g, q[0], q[1], q[2], piece, &w.gap[6 * at]);
-        }
-        done[at] = 1;
-      };
-      put(t, a, d, c, na, nd, nc);
-      put(n, d, b, c, nd, nb, nc);
-      for (int j = 0; j < 3; j++)
-        for (size_t at : {t, (size_t)n}) side[(uint64_t)w.tri[3 * at + j] << 32 | w.tri[3 * at + (j + 1) % 3]] = (uint32_t)at;
-      side.erase((uint64_t)a << 32 | b), side.erase((uint64_t)b << 32 | a);
-      swaps++;
-    }
-    if (swaps == 0) break;
-  }
-}
-
 void finish(Solid &s, double deflection) {
   Welded w = weld(s);
   {
     double size = 0;
     for (V3 q : w.pts) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
-    tidy(w, std::max(1e-4, 2e-7 * size));
-    unneedle(w, std::max(1e-4, 2e-7 * size));
+    clean(w, std::max(1e-4, 2e-7 * size));
   }
   size_t nt = w.count();
   // Edges between triangles: which triangles, so faces meeting on one surface can be joined and edges found.

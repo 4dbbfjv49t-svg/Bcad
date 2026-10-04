@@ -100,6 +100,9 @@ struct Solid {
   // The grid a merge last put its points on (0: none, or moved off it since): a merge of this keeps to that grid, so its
   // points stay where they are and a part made afresh lands on them.
   double grid = 0;
+  // Per triangle, whether it's known to cross none of the others so marked (a merge marks those it let through whole), so
+  // the next merge on the same grid needn't look at those pairs again. Empty, or not one per triangle: none known.
+  std::vector<uint8_t> sound;
 
   uint32_t vertex(V3 pos, V3 nrm) {
     p.push_back(pos), n.push_back(nrm);
@@ -255,17 +258,34 @@ bool inside(const Solid &s, V3 q);
 
 // Merges and splits of meshes (Boolean.cpp, Split.cpp), and what's made of their results afterwards (Csg.cpp): faces on
 // one surface joined, edges, corners and circles found again.
-// merge: crossing points this close (a part of the shapes' size) are one.
+// (merge: no longer used; every crossing point is exact.)
 Solid combine(const Solid &a, const Solid &b, int op, double merge = 1e-11, bool keepGrid = false);
+// A shape less every one of `take` and with every one of `add`, in one merge (none rounded in between, so a part meant
+// to meet another exactly does).
+Solid combine(const Solid &base, const std::vector<Solid> &take, const std::vector<Solid> &add);
 // What the mesh booleans on this thread ran into since it was last cleared (for tests and measuring): merges made, cuts
-// a triangle's triangulation couldn't keep or lost an end of, points it made where two cuts crossed, cuts led round an
-// outline corner, points put on a side that wasn't found, results left open, regions judged inside or out by a winding
-// number too near a half to be sure, and regions whose pieces beside cuts disagreed (a cut not made let them run on).
+// a triangle's triangulation couldn't keep or lost an end of, cuts crossing inside a triangle (where a shape meets
+// itself or folds over), decisions found impossible to make exactly (misses), sums too wide for the exact tests
+// (overflows), results left open, regions whose every ray grazed something (told in floating point instead), and merges
+// made again looking at every pair (see combine). Of a merge made again only the second try counts. Only the first, the
+// crossings and the second tries are ever expected to be more than 0.
 struct CombineReport {
-  long calls = 0, keepsFailed = 0, segsDropped = 0, crossingsMade = 0, detours = 0, edgeFallbacks = 0, open = 0, unsure = 0, torn = 0;
+  long calls = 0, keepsFailed = 0, segsDropped = 0, crossingsMade = 0, misses = 0, overflows = 0, open = 0, unsure = 0, again = 0;
+  // The last merge alone: pieces of the second shape's own surface lying outside the first (for a subtract, where what's
+  // taken away reaches out of the shape).
+  long lastOutside = 0;
 };
 extern thread_local CombineReport combineReport;
+// A mesh cut by a plane (point p, normal n), the side n points to kept (side 0) or the other (side 1); the new face, if
+// any, numbered after the shape's own.
 Solid cut(const Solid &s, V3 p, V3 n, int side);
+// The outline of that new face, side by side (each running round it as its triangles would, so counter-clockwise seen
+// from outside it), with the face of the mesh beside each.
+struct CutSide {
+  V3 a, b;
+  int face;
+};
+std::vector<CutSide> cutOutline(const Solid &s, V3 p, V3 n, int side);
 // Whether two faces lie on one surface (one plane facing one way; one turned profile piece in one place).
 bool sameForm(const FaceGeom &a, const FaceGeom &b);
 void finish(Solid &s, double deflection);

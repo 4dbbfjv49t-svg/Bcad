@@ -3,11 +3,14 @@
 // orientation, and how fast it all is.
 // c++ -std=c++17 -O2 -I. test/engine.cpp Engine/*.cpp -o engine-test && ./engine-test
 #include "BcadKernel.h"
+#include "Engine/Bolts.hpp"
 #include "Engine/Fasteners.hpp"
+#include "Engine/Implicit.hpp"
 #include "Engine/Math.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Treat.hpp"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -418,6 +421,155 @@ int main() {
     check("exact orientation of nearly flat tetrahedra", wrong == 0, fmt("%.0f wrong of %.0f", wrong, tested));
   }
 
+  // MARK: exact points where meshes cross
+  // A point where an edge meets a plane, kept as the two and the three it's made from: on its plane and its line exactly,
+  // the same point made another way one point with it, and which side of a plane or another point it lies on as worked
+  // out by hand in whole numbers (small ones, so that points fall on one another's planes and lines often).
+  {
+    std::mt19937_64 rng(5);
+    using I3 = std::array<long long, 3>;
+    auto det = [](I3 a, I3 b, I3 c, I3 d) {
+      __int128 m[3][3];
+      I3 p[3] = {a, b, c};
+      for (int i = 0; i < 3; i++)
+        for (int k = 0; k < 3; k++) m[i][k] = (__int128)p[i][k] - d[k];
+      return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    };
+    auto sign = [](__int128 v) { return v > 0 ? 1 : v < 0 ? -1 : 0; };
+    int tested = 0, off = 0, apart = 0, wrongSide = 0, wrongOrder = 0, unequal = 0;
+    for (int round = 0; round < 400; round++) {
+      long long range = round % 2 ? 6 : 900;
+      double step = std::ldexp(1.0, -7);
+      bce::ExactPoints E(step);
+      std::vector<I3> at;
+      auto grid = [&]() {
+        I3 q{(long long)(rng() % (2 * range + 1)) - range, (long long)(rng() % (2 * range + 1)) - range, (long long)(rng() % (2 * range + 1)) - range};
+        at.push_back(q);
+        return E.grid({q[0] * step, q[1] * step, q[2] * step});
+      };
+      for (int i = 0; i < 12; i++) grid();
+      auto pick = [&]() { return (uint32_t)(rng() % at.size()); };
+      for (int k = 0; k < 40; k++) {
+        uint32_t a = pick(), b = pick(), c = pick(), p = pick(), q = pick();
+        __int128 dp = det(at[a], at[b], at[c], at[p]), dq = det(at[a], at[b], at[c], at[q]);
+        if (dp == dq) continue;
+        uint32_t x = E.line(p, q, {a, b, c});
+        tested++;
+        // On its plane, on its line (seen along each axis), and the same point from q to p and the plane's corners turned.
+        if (E.orient3d(a, b, c, x) != 0) off++;
+        for (int axis = 0; axis < 3; axis++)
+          if (E.orient2d(axis, false, p, q, x) != 0) off++;
+        if (E.lex(x, E.line(q, p, {b, c, a})) != 0) apart++;
+        // Where two planes through its line meet the plane: the same point again.
+        uint32_t r = pick(), s = pick();
+        if (det(at[p], at[q], at[r], at[s]) != 0 && E.lex(x, E.planes({a, b, c}, {p, q, r}, {p, q, s})) != 0) apart++;
+        // Its side of another plane: (dp·f(q) − dq·f(p)) / (dp − dq), f the plane's orient3d at a point.
+        uint32_t u = pick(), v = pick(), w = pick();
+        int want = sign(dp * det(at[u], at[v], at[w], at[q]) - dq * det(at[u], at[v], at[w], at[p])) * sign(dp - dq);
+        if (E.orient3d(u, v, w, x) != want || E.orient3d(v, u, w, x) != -want) wrongSide++;
+        // Its place against a grid point's, axis by axis.
+        uint32_t g = pick();
+        for (int i = 0; i < 3; i++) {
+          int cmp = sign(dp * at[q][i] - dq * at[p][i] - (__int128)at[g][i] * (dp - dq)) * sign(dp - dq);
+          if (E.compare(i, x, g) != cmp || E.compare(i, g, x) != -cmp) wrongOrder++;
+        }
+        // The middle of three points on the plane is on it too.
+        uint32_t p2 = pick(), q2 = pick();
+        __int128 dp2 = det(at[a], at[b], at[c], at[p2]), dq2 = det(at[a], at[b], at[c], at[q2]);
+        if (dp2 != dq2 && E.orient3d(a, b, c, E.middle(x, E.line(p2, q2, {a, b, c}), a)) != 0) unequal++;
+      }
+    }
+    check("exact points: on their planes and lines, one point however made, sides and order as worked out by hand",
+          off + apart + wrongSide + wrongOrder + unequal == 0 && tested > 5000,
+          fmt("%.0f points: %.0f off, %.0f apart, ", tested, off, apart) + fmt("%.0f wrong sides, %.0f out of order, %.0f middles off", wrongSide, wrongOrder, unequal));
+  }
+
+  // MARK: exact merging
+  // Pairs of shapes (boxes, cylinders, balls, cones, bolts), half lined up on whole millimetres (faces on faces, edges
+  // along edges, touching) and half turned any way: every merge, subtract and intersect closed, A ∪ B and A ∩ B adding up
+  // to A and B and A − B to A less A ∩ B to the last digits, the same to the last bit when made again, and nothing the
+  // exact arithmetic couldn't decide.
+  {
+    std::mt19937 rng(23);
+    std::uniform_real_distribution<double> U(0, 1);
+    auto made = [&](bool square) {
+      bce::Shape s;
+      std::string why;
+      auto len = [&](double lo, double hi) { return square ? (double)(int)(lo + (hi - lo) * U(rng)) : lo + (hi - lo) * U(rng); };
+      int kind = rng() % 5;
+      if (kind == 4) {
+        BKFastener f{};
+        f.kind = (int)(rng() % 3) == 0 ? BK_HEX_NUT : BK_HEX, f.size = 2 + rng() % 4;
+        bk_fastener_defaults(&f, 1);
+        bce::fastener(f, 0.2, s, why);
+      } else {
+        double p[3] = {len(6, 20), len(6, 20), len(6, 20)};
+        if (kind == 3) p[1] = len(0, 4);
+        bce::primitive(kind == 0 ? BK_BOX : kind == 1 ? BK_CYLINDER : kind == 2 ? BK_SPHERE : BK_CONE, p, s, why);
+      }
+      bce::Solid m;
+      bce::mesh(s, 0.1, m);
+      double a = U(rng) * 2 * PI, b = U(rng) * PI, c = U(rng) * 2 * PI;
+      if (square) a = (rng() % 4) * PI / 2, b = (rng() % 2) * PI, c = (rng() % 4) * PI / 2;
+      double ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b), cc = std::cos(c), sc = std::sin(c);
+      if (square) ca = std::round(ca), sa = std::round(sa), cb = std::round(cb), sb = std::round(sb), cc = std::round(cc), sc = std::round(sc);
+      double t[3] = {(U(rng) - 0.5) * 16, (U(rng) - 0.5) * 16, (U(rng) - 0.5) * 16};
+      if (square)
+        for (auto &v : t) v = std::round(v);
+      double r[12] = {ca * cc - sa * cb * sc, -ca * sc - sa * cb * cc, sa * sb, t[0], sa * cc + ca * cb * sc, -sa * sc + ca * cb * cc, -ca * sb, t[1], sb * sc, sb * cc, cb, t[2]};
+      m.transform(bce::Affine::from(r));
+      return m;
+    };
+    auto same = [](const bce::Solid &x, const bce::Solid &y) {
+      return x.p.size() == y.p.size() && x.tri == y.tri && std::memcmp(x.p.data(), y.p.data(), sizeof(bce::V3) * x.p.size()) == 0;
+    };
+    bce::combineReport = {};
+    int pairs = 300, open = 0, unequal = 0, differ = 0;
+    double worst = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < pairs; i++) {
+      bool square = i % 2 == 0;
+      bce::Solid a = made(square), b = made(square);
+      double va = a.meshVolume(), vb = b.meshVolume(), v[3];
+      for (int op = 0; op < 3; op++) {
+        bce::Solid r = bce::combine(a, b, op);
+        if (!bce::shut(r)) open++;
+        v[op] = r.meshVolume();
+        if (i % 5 == 0 && !same(r, bce::combine(a, b, op))) differ++;
+      }
+      double e = std::max(std::fabs(v[0] + v[2] - va - vb), std::fabs(v[1] + v[2] - va)) / std::max(va, vb);
+      worst = std::max(worst, e);
+      if (e > 1e-9) unequal++;
+    }
+    // A shape with several taken away and several added in one merge: as the same merges one after another.
+    int manyOpen = 0, manyOff = 0;
+    double manyWorst = 0;
+    for (int i = 0; i < 40; i++) {
+      bool square = i % 2 == 0;
+      bce::Solid base = made(square);
+      std::vector<bce::Solid> take, add;
+      for (int k = 0, n = 1 + rng() % 3; k < n; k++) take.push_back(made(square));
+      for (int k = 0, n = rng() % 3; k < n; k++) add.push_back(made(square));
+      bce::Solid once = bce::combine(base, take, add), steps = base;
+      for (const auto &s : take) steps = bce::combine(steps, s, BK_SUBTRACT);
+      for (const auto &s : add) steps = bce::combine(steps, s, BK_UNION);
+      if (!bce::shut(once)) manyOpen++;
+      double e = std::fabs(once.meshVolume() - steps.meshVolume()) / std::max(1.0, base.meshVolume());
+      manyWorst = std::max(manyWorst, e);
+      if (e > 1e-9) manyOff++;
+    }
+    check("exact merging: many taken away and added at once, as one after another", manyOpen == 0 && manyOff == 0,
+          fmt("%.0f open, worst %.2g (%.0f off)", manyOpen, manyWorst, manyOff));
+    const auto &cr = bce::combineReport;
+    check("exact merging: lined up and turned any way, all closed", open == 0, fmt("%.0f open of %.0f", open, 3 * pairs));
+    check("exact merging: volumes add up to the last digits", unequal == 0, fmt("worst %.2g (%.0f off)", worst, unequal));
+    check("exact merging: the same to the last bit made again", differ == 0, fmt("%.0f differ", differ));
+    check("exact merging: nothing left undecided", cr.misses == 0 && cr.keepsFailed == 0 && cr.segsDropped == 0 && cr.overflows == 0 && cr.open == 0 && cr.unsure == 0,
+          fmt("misses %.0f, keeps failed %.0f, ", cr.misses, cr.keepsFailed) + fmt("dropped %.0f, overflows %.0f, ", cr.segsDropped, cr.overflows) +
+              fmt("open %.0f, unsure %.0f", cr.open, cr.unsure));
+    printf("  %ld merges in %.0f ms (%ld made again)\n", cr.calls, ms(t0), cr.again);
+  }
+
   // MARK: merging and splitting
   {
     auto at = [](BKShape *s, double x, double y = 0, double z = 0) {
@@ -764,10 +916,10 @@ int main() {
       bool shut = false;
       std::string why;
     };
-    auto look = [&](BKShape *s) {
+    auto look = [&](BKShape *s, double deflection = 0.05) {
       Got g;
       if (!s) return g.why = bk_last_error(), g;
-      BKMesh *m = bk_mesh(s, 0.05);
+      BKMesh *m = bk_mesh(s, deflection);
       double sv;
       g.volume = m->volume, g.faces = m->faceCount, g.shut = closed(m, sv, g.why) && bk_piece_count(s) == 1;
       bk_mesh_free(m);
@@ -1130,10 +1282,12 @@ int main() {
       // A ring cut aslant, bevelled all round: the cut's line of mesh points zigzags across the ring's facets; each cross-
       // section is square to where the faces meet, not to that zigzag (else neighbours cross and the tool folds onto
       // itself); the bevel's face one face along the whole cut, as OpenCascade's five. OpenCascade's 1099.5708 (its legs on
-      // the curved face measured to points on it).
+      // the curved face measured to points on it). Looked at on a finer mesh: on the usual one the leg on the faceted face
+      // moves by about a millimetre³ with how the facets beside the cut are split.
       double ring623[3] = {0, 37.9599, 5.10573}, at623[3] = {1.75048, 0.957164, 1.17883}, n623[3] = {0.481551, 0.64596, -0.246432};
       BKShape *cutRing = keep(bk_split(keep(bk_primitive(BK_TORUS, ring623)), at623, n623, 1));
-      is("bevel: a ring cut aslant, all round", bk_chamfer(cutRing, &kb, body, 1, 0.87252, 1.4573, 0, &miss), 1099.5708, 2, 5);
+      Got g623 = look(keep(bk_chamfer(cutRing, &kb, body, 1, 0.87252, 1.4573, 0, &miss)), 0.02);
+      check("bevel: a ring cut aslant, all round", g623.shut && near(g623.volume, 1099.5708, 0.5) && g623.faces == 5, says(g623) + " (want 1099.5708)");
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
       // Every edge bevelled after every edge rounded (c501): the hair-thin remnants of faces where roundings met are left as

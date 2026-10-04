@@ -528,41 +528,23 @@ bool creaseAt(const Solid &s, int kind, const double *pick, Crease &out, size_t 
 
 std::vector<std::vector<std::pair<double, double>>> sliceAcross(const Solid &s, const Crease &c, size_t i, std::vector<std::vector<int>> *faceOf) {
   V3 E = c.pts[i], x = -c.ia[i], y = unit(c.na[i] - x * dot(c.na[i], x)), z = cross(x, y);
-  // Cut keeping the side behind the plane: its new face faces +z, its outline running counter-clockwise round it.
-  Solid half = cut(s, E, -z, 0);
+  // The outline of a cut keeping the side behind the plane: its new face faces +z, the outline running counter-clockwise
+  // round it, each side beside the face of the shape it cuts.
   std::vector<std::vector<std::pair<double, double>>> loops;
-  if (half.faces.size() <= s.faces.size()) return loops;
-  uint32_t cap = (uint32_t)half.faces.size() - 1;
-  // The cap's sides that no other cap triangle shares: its outline.
   std::unordered_map<Key, std::vector<std::pair<Key, V3>>, KeyHash> next;
   // (Walked from in the order first met, not the table's.)
   std::vector<Key> firstSeen;
-  std::set<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>> sides;
-  auto arr = [](Key k) { return std::array<uint64_t, 3>{k.x, k.y, k.z}; };
-  for (size_t t = 0; t < half.triFace.size(); t++)
-    if (half.triFace[t] == cap)
-      for (int k = 0; k < 3; k++) sides.insert({arr(keyOf(half.p[half.tri[3 * t + k]])), arr(keyOf(half.p[half.tri[3 * t + (k + 1) % 3]]))});
-  for (size_t t = 0; t < half.triFace.size(); t++) {
-    if (half.triFace[t] != cap) continue;
-    for (int k = 0; k < 3; k++) {
-      V3 a = half.p[half.tri[3 * t + k]], b = half.p[half.tri[3 * t + (k + 1) % 3]];
-      if (sides.count({arr(keyOf(b)), arr(keyOf(a))})) continue;
-      auto &outs = next[keyOf(a)];
-      if (outs.empty()) firstSeen.push_back(keyOf(a));
-      outs.push_back({keyOf(b), b});
-    }
-  }
   std::unordered_map<Key, V3, KeyHash> where;
-  for (size_t t = 0; t < half.triFace.size(); t++)
-    if (half.triFace[t] == cap)
-      for (int k = 0; k < 3; k++) where[keyOf(half.p[half.tri[3 * t + k]])] = half.p[half.tri[3 * t + k]];
-  // Each outline side's face: the one whose triangle runs the side the other way (the cut keeps the shape's face numbers).
+  auto arr = [](Key k) { return std::array<uint64_t, 3>{k.x, k.y, k.z}; };
   std::map<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>, int> owner;
-  if (faceOf)
-    for (size_t t = 0; t < half.triFace.size(); t++)
-      if (half.triFace[t] != cap)
-        for (int k = 0; k < 3; k++)
-          owner[{arr(keyOf(half.p[half.tri[3 * t + (k + 1) % 3]])), arr(keyOf(half.p[half.tri[3 * t + k]]))}] = (int)half.triFace[t];
+  for (const CutSide &e : cutOutline(s, E, -z, 0)) {
+    Key a = keyOf(e.a), b = keyOf(e.b);
+    auto &outs = next[a];
+    if (outs.empty()) firstSeen.push_back(a);
+    outs.push_back({b, e.b});
+    where[a] = e.a, where[b] = e.b;
+    if (faceOf) owner[{arr(a), arr(b)}] = e.face;
+  }
   std::set<std::pair<std::array<uint64_t, 3>, std::array<uint64_t, 3>>> used;
   for (const Key &start : firstSeen) {
     for (auto &first : next[start]) {

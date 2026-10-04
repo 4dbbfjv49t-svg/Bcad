@@ -14,6 +14,7 @@ struct Welded {
   std::vector<uint32_t> face;  // per triangle
   std::vector<V3> nrm;         // 3 per triangle: the normal at each corner (for shading)
   std::vector<double> gap;     // 6 per triangle, as Solid::gap (or none)
+  std::vector<uint8_t> sound;  // per triangle, as Solid::sound (or none)
   size_t count() const { return face.size(); }
 };
 
@@ -52,14 +53,13 @@ inline Welded weld(const Solid &s, double step = 0) {
   for (size_t k = 0; k < s.tri.size(); k++) w.tri[k] = id[s.tri[k]], w.nrm[k] = s.n[s.tri[k]];
   w.face = s.triFace;
   w.gap = s.gap;
+  if (s.sound.size() == s.triFace.size()) w.sound = s.sound;
   return w;
 }
 
-// Triangles thinner than `eps` (a point that far or less off the line between two others) swapped away: the long side
-// for one from that point across to the neighbour's far corner (Csg.cpp).
-void unneedle(Welded &w, double eps);
-// Edges shorter than `eps` collapsed to a point where that keeps the surface closed (Csg.cpp).
-void tidy(Welded &w, double eps);
+// Edges shorter than `eps` and triangles thinner done away with, every side still met by one running the other way
+// (Csg.cpp). Only the triangles marked in `only` (and any changed on the way) are looked at, where it's given.
+void clean(Welded &w, double eps, const std::vector<char> *only = nullptr);
 // Whether every side of every triangle is met by one running the other way (point numbers, not places).
 bool balanced(const Welded &w);
 
@@ -93,6 +93,7 @@ inline void unweld(const Welded &w, Solid &out) {
   }
   out.triFace = w.face;
   out.gap = w.gap;
+  out.sound = w.sound.size() == w.face.size() ? w.sound : std::vector<uint8_t>();
 }
 
 }  // namespace bce
