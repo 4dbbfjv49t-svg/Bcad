@@ -15,7 +15,7 @@ namespace bce {
 namespace {
 
 constexpr double pi = M_PI;
-// No chord turns by more than this, however coarse the mesh asked for (as OpenCascade's meshes).
+// No chord turns by more than this, however coarse the mesh asked for.
 constexpr double maxTurn = 0.35;
 
 // The angle a chord may span on a circle of radius r with a sagitta of at most d.

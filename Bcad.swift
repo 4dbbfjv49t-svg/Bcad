@@ -787,7 +787,7 @@ private final class Pending<T>: @unchecked Sendable {
     }
 }
 
-// One serial worker thread with a large stack: OpenCascade booleans and fillets recurse deeply (GCD threads get 512 KB).
+// One serial worker thread with a large stack (GCD threads get 512 KB): a deep tree of shapes is built recursively.
 final class Worker: @unchecked Sendable {
     private let lock = NSCondition()
     private var jobs: [() -> Void] = []
@@ -1260,12 +1260,18 @@ final class Kernel: @unchecked Sendable {
         return Mesh(m)
     }
 
+    // A STEP file of the bodies, each a solid under its own name.
     func exportStep(_ bodies: [Solid], to path: String) -> Bool {
         let shapes = bodies.compactMap { placed($0) }
         guard shapes.count == bodies.count else { return false }
+        let names = bodies.map { strdup($0.name) }
+        defer { names.forEach { free($0) } }
         return withExtendedLifetime(shapes) {
             let ptrs: [OpaquePointer?] = shapes.map { $0.with { $0 } }
-            return ptrs.withUnsafeBufferPointer { bk_export_step($0.baseAddress, Int32(ptrs.count), path) } != 0
+            let named: [UnsafePointer<CChar>?] = names.map { $0.map { UnsafePointer($0) } }
+            return ptrs.withUnsafeBufferPointer { p in
+                named.withUnsafeBufferPointer { n in bk_export_step(p.baseAddress, n.baseAddress, Int32(ptrs.count), path) }
+            } != 0
         }
     }
 }
@@ -2429,11 +2435,6 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var resizeStalled = false
     @ObservationIgnored private var resizeBox: (lo: SIMD3<Double>, hi: SIMD3<Double>)?
 
-    // Bcad's own engine builds a primitive in far less than a frame: a resize shows the very shape it makes as it goes (a
-    // cylinder grown oval, a sphere kept round), not a stretched picture of the old one. On OpenCascade, the stretched
-    // picture, the sizes taken in at the end.
-    static let liveResize = String(cString: bk_occt_version()).isEmpty
-
     // A new resize begins (a handle pressed, a size typed in).
     func beginResize() {
         resizing = [:]
@@ -2491,7 +2492,9 @@ final class Workbench: DesignHost {
         var live: [(UUID, Node)] = []
         for p in plan {
             guard let r = resizing[p.id] else { continue }
-            if Self.liveResize, case .primitive = r.node, let next = baked(r.node, by: p.scale) {
+            // A primitive builds in far less than a frame: a resize shows the very shape it makes as it goes (a cylinder grown
+            // oval, a sphere kept round), not a stretched picture of the old one.
+            if case .primitive = r.node, let next = baked(r.node, by: p.scale) {
                 // Its sizes taken in at once; the kept point where it was, on the base as it really grew.
                 let node = followed(r.node, to: next), k = grown(r.node, to: next)
                 mutate(p.id) { $0.node = node; $0.place.scale = SIMD3(1, 1, 1); $0.place.move = p.at - p.start.rotation * (r.keep * k) }
@@ -2506,8 +2509,8 @@ final class Workbench: DesignHost {
         sceneVersion += 1
     }
 
-    // Shapes built at once and shown, waiting for the kernel: a resize on Bcad's own engine, where that takes far less
-    // than a frame. What building them says is said when the resize ends, if it still holds.
+    // Shapes built at once and shown, waiting for the kernel: a resize, where that takes far less than a frame. What
+    // building them says is said when the resize ends, if it still holds.
     // False when the kernel was busy with other work too long to wait for.
     @discardableResult private func buildNow(_ shapes: [(UUID, Node)]) -> Bool {
         let clearance = settings.clearance
@@ -3131,7 +3134,6 @@ final class Workbench: DesignHost {
     }
 
     private static func message(_ problems: [String]) -> String? {
-        if problems.contains(where: { $0.hasSuffix("not in Bcad's engine yet") }) { return L("Not in Bcad's own engine yet") }
         if let m = problems.first(where: { $0.hasPrefix("max:") }) {
             return L("Rounding too large — the most this edge takes is {r} mm", ["r": String(format: "%.2f", Double(m.dropFirst(4)) ?? 0)])
         }
@@ -3333,7 +3335,7 @@ final class Workbench: DesignHost {
         }
         guard let url else { done(false); return }
         let doc = self.doc, clearance = settings.clearance, note = L("Saving…"), generation = self.generation
-        // What the engine can't build (a bolt on Bcad's own engine) is saved as it's shown.
+        // What the engine can't build is saved as it's shown.
         let looks = meshes
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
@@ -3411,8 +3413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // OpenCascade tears itself down as the process exits and crashes if a shape is still being built; everything worth
-    // keeping is saved by now, so the app leaves without that teardown.
+    // A shape may still be being built on the worker as the app quits; everything worth keeping is saved by now, so the app
+    // leaves at once rather than tearing down around it.
     func applicationWillTerminate(_ n: Notification) { _exit(0) }
 
     func application(_ app: NSApplication, open urls: [URL]) {

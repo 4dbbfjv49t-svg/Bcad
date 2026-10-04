@@ -1,5 +1,4 @@
 // ISO metric coarse threads (ISO 261) with bolt heads and nut shapes: their sizes, and how each size fits the others.
-// Bcad's own code, shared by both geometry engines.
 #include "Engine/Fasteners.hpp"
 
 #include <algorithm>

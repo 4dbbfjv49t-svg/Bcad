@@ -639,7 +639,7 @@ Solid sweptTool(const std::vector<V3> &E, const std::vector<V3> &U, const std::v
 // Each side of an outline (as pointsOf made it, `runOf` each side's run): its arc's radius, 0 where straight; below zero
 // as the arc's centre lies outside the tool (a rounding's arc, which curves in from its chords). A cove's disc is left
 // at 0: what its chords miss, the cut it makes in the faces' meshes makes up (over random shapes its volumes match
-// OpenCascade's within its meshes' error so, and are off by more with its chords' slivers counted).
+// the exact ones within its meshes' error so, and are off by more with its chords' slivers counted).
 std::vector<double> radiiOf(const Section2 &sec, const std::vector<int> &runOf) {
   std::vector<double> out(runOf.size(), 0);
   if (sec.circle) return out;
@@ -1871,8 +1871,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           V3 w = C - at;
           return std::fabs(w.x * way.y - w.y * way.x) < t.radius * (1 - 1e-6);
         };
-        // At an inside corner, what it fills past the narrow face is cut off by the flat face beyond (as OpenCascade's
-        // kernel does): it ends there, square to that face.
+        // At an inside corner, what it fills past the narrow face is cut off by the flat face beyond: it ends there,
+        // square to that face.
         auto flatNext = [&](int f) { return phi < pi || (f >= 0 && s.faces[f].geom.flat); };
         spillA = ra < t.radius && r.aOpen && !r.aShared && crosses(r.aNext, r.aWay) && flatNext(r.aNextFace);
         spillB = rb < t.radius && r.bOpen && !r.bShared && crosses(r.bNext, r.bWay) && flatNext(r.bNextFace);
@@ -1965,7 +1965,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     fit.fits = false;
     return s;
   }
-  // An inward rounding past that may still do (as OpenCascade's kernel takes it): cut, then checked (below).
+  // An inward rounding past that may still do: cut, then checked (below).
   bool coveChecked = t.kind == Treatment::Cove && t.radius >= most * (1 - 1e-6);
   auto tooWide = [&]() {
     fit.fits = false;
@@ -2633,7 +2633,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
   };
 
   // Where three bevelled edges meet at a corner of three flat faces, the corner cut off flat too, through the points where
-  // the bevels' lines meet on each face (as OpenCascade's kernel does).
+  // the bevels' lines meet on each face.
   struct Corner {
     V3 mid, n, V;
     double reach;

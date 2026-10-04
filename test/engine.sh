@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Bcad's own geometry engine against exact maths; needs no OpenCascade: ./test/engine.sh
+# Bcad's geometry engine against exact maths: ./test/engine.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${TMPDIR:-/tmp}/bcad-engine-test"

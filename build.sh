@@ -1,7 +1,6 @@
 #!/bin/zsh
-# Builds /Applications/Bcad.app (or the given .app). ./build.sh --selftest builds and runs the kernel/file self-test instead.
-# --engine own: on Bcad's own geometry engine (Engine/, nothing from OpenCascade) instead of OpenCascade; it does all but
-# STEP export, and says so (the self-test skips that check and says so).
+# Builds /Applications/Bcad.app (or the given .app) on Bcad's own geometry engine (Engine/). ./build.sh --selftest builds
+# and runs the kernel/file self-test instead.
 set -euo pipefail
 
 # Interface languages, in the order of the in-app menu (English first).
@@ -9,19 +8,13 @@ LANGS=(en uk cs de es fr it hu nl nb pl ro fi sv kk ka ar hi zh-Hans ja)
 
 cd "$(dirname "$0")"
 SELFTEST=0
-ENGINE=occt
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --selftest) SELFTEST=1 ;;
-    --engine) ENGINE="${2:-}"; shift ;;
     *) echo "✗ Unknown option $1"; exit 1 ;;
   esac
   shift
 done
-if [[ "$ENGINE" != occt && "$ENGINE" != own ]]; then
-  echo "✗ --engine is occt or own"
-  exit 1
-fi
 TARGET="${1:-/Applications/Bcad.app}"
 if [[ "$TARGET" != *.app ]]; then
   echo "✗ Target must end with .app"
@@ -33,33 +26,17 @@ if (( ${SDKV%%.*} < 26 )); then
   exit 1
 fi
 
-OCCT="$PWD/Vendor/occt"
-[[ "$ENGINE" == occt ]] && ./occt.sh
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/bcad.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "▸ Compiling the geometry kernel ($ENGINE)"
+echo "▸ Compiling the geometry engine"
 CXX=(clang++ -std=c++17 -isysroot "$SDK" -target arm64-apple-macos26.0 -I"$PWD")
 KERNEL=()
-LIBS=()
 FLAGS=()
-if [[ "$ENGINE" == occt ]]; then
-  "${CXX[@]}" -O2 -isystem "$OCCT/include/opencascade" -c BcadKernel.cpp -o "$WORK/BcadKernel.o"
-  KERNEL+=("$WORK/BcadKernel.o")
-  KSOURCES=(Engine/Fasteners.cpp)
-  # One -l per OpenCascade library (libTKernel.dylib; the numbered names are links to it); only those Bcad uses are kept.
-  LIBS=(-L"$OCCT/lib" -Xlinker -dead_strip_dylibs)
-  for f in "$OCCT"/lib/lib*.dylib; do b=${f:t:r}; [[ $b == *.* ]] || LIBS+=(-l${b#lib}); done
-  # The app finds OpenCascade in its own Frameworks folder, the self-test where it was built.
-  FLAGS=(-Xlinker -rpath -Xlinker @executable_path/../Frameworks)
-  (( SELFTEST )) && FLAGS=(-Xlinker -rpath -Xlinker "$OCCT/lib")
-else
-  KSOURCES=(Engine/*.cpp)
-fi
 # No fused multiply-adds: the engine's results then come out bit for bit as on any other machine (its tests run on Linux).
-for f in $KSOURCES; do
+for f in Engine/*.cpp; do
   "${CXX[@]}" -O3 -ffp-contract=off -c "$f" -o "$WORK/${f:t:r}.o"
   KERNEL+=("$WORK/${f:t:r}.o")
 done
@@ -68,7 +45,7 @@ if (( SELFTEST )); then SOURCES+=(test/SelfTest.swift); FLAGS+=(-D SELFTEST); fi
 
 echo "▸ Compiling"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 $FLAGS \
-  -import-objc-header BcadKernel.h $SOURCES $KERNEL $LIBS -lc++ -o "$WORK/Bcad"
+  -import-objc-header BcadKernel.h $SOURCES $KERNEL -lc++ -o "$WORK/Bcad"
 
 if (( SELFTEST )); then
   OUT="${TMPDIR:-/tmp}/bcad-selftest"
@@ -81,8 +58,7 @@ fi
 
 echo "▸ Rendering icon"
 mkdir -p "$WORK/icon.iconset"
-# Run before the app is put together: OpenCascade is still where it was built.
-DYLD_LIBRARY_PATH="$OCCT/lib" "$WORK/Bcad" --render-icon "$WORK/icon.png"
+"$WORK/Bcad" --render-icon "$WORK/icon.png"
 for s in 16 32 128 256 512; do
   sips -z $s $s "$WORK/icon.png" --out "$WORK/icon.iconset/icon_${s}x${s}.png" >/dev/null
   sips -z $((s*2)) $((s*2)) "$WORK/icon.png" --out "$WORK/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
@@ -149,33 +125,17 @@ if pgrep -xq Bcad; then
   fi
 fi
 rm -rf "$TARGET"
-FW="$TARGET/Contents/Frameworks"
 mkdir -p "$TARGET/Contents/MacOS" "$TARGET/Contents/Resources"
 cp "$WORK/Bcad" "$TARGET/Contents/MacOS/Bcad"
 cp "$WORK/Info.plist" "$TARGET/Contents/Info.plist"
 cp "$WORK/AppIcon.icns" "$TARGET/Contents/Resources/AppIcon.icns"
 cp i18n.json "$TARGET/Contents/Resources/i18n.json"
 cp -R "$WORK"/lproj/*.lproj "$TARGET/Contents/Resources/"
-if [[ "$ENGINE" == occt ]]; then
-  mkdir -p "$FW"
-  # OpenCascade's libraries Bcad uses, and the ones those use, as separate files anyone can replace with their own build
-  # (LGPL 2.1), with its licence.
-  todo=("$TARGET/Contents/MacOS/Bcad")
-  while (( $#todo )); do
-    for dep in $(otool -L "$todo[1]" | awk 'NR > 1 && $1 ~ /^@rpath\// { print substr($1, 8) }'); do
-      [[ -e "$FW/$dep" ]] && continue
-      cp -L "$OCCT/lib/$dep" "$FW/$dep"
-      todo+=("$FW/$dep")
-    done
-    shift todo
-  done
-  if otool -L "$TARGET/Contents/MacOS/Bcad" "$FW"/*.dylib | awk '$1 !~ /:$/ && $1 !~ /^(@rpath\/|\/usr\/lib\/|\/System\/)/' | grep -q .; then
-    echo "✗ Bcad would load a library from outside the app and the system:"
-    otool -L "$TARGET/Contents/MacOS/Bcad" "$FW"/*.dylib
-    exit 1
-  fi
-  cat "$OCCT"/share/doc/opencascade*/OCCT_LGPL_EXCEPTION.txt "$OCCT"/share/doc/opencascade*/LICENSE_LGPL_21.txt > "$TARGET/Contents/Resources/OpenCASCADE-License.txt"
-  codesign --force -s - "$FW"/*.dylib
+# Nothing but the system's own libraries.
+if otool -L "$TARGET/Contents/MacOS/Bcad" | awk 'NR > 1 && $1 !~ /^(\/usr\/lib\/|\/System\/)/' | grep -q .; then
+  echo "✗ Bcad would load a library from outside the system:"
+  otool -L "$TARGET/Contents/MacOS/Bcad"
+  exit 1
 fi
 codesign --force -s - "$TARGET"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" 2>/dev/null || true

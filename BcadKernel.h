@@ -1,4 +1,4 @@
-// Bcad geometry kernel: a small C API over OpenCascade. All sizes are millimetres.
+// Bcad geometry kernel: the C API of Bcad's own geometry engine (Engine/). All sizes are millimetres.
 #ifndef BCAD_KERNEL_H
 #define BCAD_KERNEL_H
 #include <stdint.h>
@@ -139,10 +139,10 @@ typedef struct {
 
 BKMesh *bk_mesh(const BKShape *s, double deflection);
 void bk_mesh_free(BKMesh *m);
-int bk_export_step(const BKShape *const *shapes, int count, const char *path);
+// A STEP file (AP214, millimetres) of the shapes, each a closed solid named as given (names may be NULL): flat faces as
+// they are, curved ones as fine flat facets (0.01 mm). 0 when it can't be written (bk_last_error says why).
+int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path);
 const char *bk_last_error(void);
-// The version of OpenCascade the kernel runs on, such as "7.9.3".
-const char *bk_occt_version(void);
 
 #ifdef __cplusplus
 }

@@ -2024,44 +2024,10 @@ struct SettingsPane: View {
                 Button(L("Restore defaults")) { lib.restoreDefaults() }
                     .buttonStyle(PillStyle(tint: lib.accent2))
                     .padding(.top, 10)
-                // Only while Bcad is built on OpenCascade (its own engine reports no OpenCascade version).
-                if !String(cString: bk_occt_version()).isEmpty {
-                    Acknowledgements().padding(.top, 14)
-                }
             }
             .padding(.bottom, 12)
         }
         .scrollIndicators(.never)
-    }
-}
-
-// What Bcad is built on: OpenCascade, with its licence (LGPL 2.1 and the Open CASCADE exception) and its source.
-struct Acknowledgements: View {
-    @Environment(Workbench.self) private var lib
-
-    var body: some View {
-        let version = String(cString: bk_occt_version())
-        let license = Bundle.main.url(forResource: "OpenCASCADE-License", withExtension: "txt")
-        VStack(alignment: .leading, spacing: 8) {
-            SettingsTitle(text: L("Acknowledgements"))
-            Text(L("Bcad uses Open CASCADE Technology {version} under the GNU Lesser General Public License 2.1 with the Open CASCADE exception. Its libraries are in the app's Frameworks folder and can be replaced with your own build.",
-                   ["version": version]))
-                .font(.ui(size: 11.5, weight: .medium, design: .rounded))
-                .foregroundStyle(Ink.text.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12)
-            HStack(spacing: 8) {
-                Button(L("License")) { if let license { NSWorkspace.shared.open(license) } }
-                    .disabled(license == nil)
-                Button(L("Source code")) {
-                    if let url = URL(string: "https://github.com/Open-Cascade-SAS/OCCT/tree/V" + version.replacingOccurrences(of: ".", with: "_")) {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-            }
-            .buttonStyle(PillStyle(tint: lib.accent))
-            .padding(.horizontal, 12)
-        }
     }
 }
 

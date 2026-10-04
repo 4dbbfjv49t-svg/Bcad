@@ -1,14 +1,15 @@
-// Bcad's own geometry engine behind the same C API as BcadKernel.cpp (BcadKernel.h): shapes, bolts and nuts, placements,
-// meshes, boxes, measuring, merging, splitting, rounding and hollowing. What it can't do yet (STEP export) answers with
-// nothing and says so in bk_last_error.
+// Bcad's geometry engine behind its C API (BcadKernel.h): shapes, bolts and nuts, placements, meshes, boxes, measuring,
+// merging, splitting, rounding, hollowing and STEP files.
 #include "BcadKernel.h"
 
 #include "Engine/Bolts.hpp"
 #include "Engine/Distance.hpp"
 #include "Engine/Fasteners.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -22,11 +23,9 @@ struct BKShape {
 
 static thread_local std::string lastError;
 
-static const char *notYet = "not in Bcad's engine yet";
-
 const char *bk_last_error(void) { return lastError.c_str(); }
-// No OpenCascade in this engine.
-const char *bk_occt_version(void) { return ""; }
+
+const Shape &bce::heldShape(const BKShape *s) { return s->shape; }
 
 static bool finite(const double *v, int n) {
   for (int i = 0; i < n; i++)
@@ -412,7 +411,21 @@ void bk_section_free(BKSection *section) {
   delete section;
 }
 
-int bk_export_step(const BKShape *const *, int, const char *) {
-  lastError = std::string("STEP: ") + notYet;
-  return 0;
+int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path) {
+  if (!shapes || count < 0 || !path) return lastError = "STEP: nothing to write", 0;
+  std::vector<Shape> list;
+  std::vector<std::string> named;
+  for (int i = 0; i < count; i++) {
+    if (!shapes[i]) return lastError = "STEP: nothing to write", 0;
+    list.push_back(shapes[i]->shape);
+    named.push_back(names && names[i] ? names[i] : "");
+  }
+  std::string file = path, text, why;
+  if (size_t slash = file.find_last_of('/'); slash != std::string::npos) file.erase(0, slash + 1);
+  if (!stepText(list, named, file, text, why)) return lastError = "STEP: " + why, 0;
+  FILE *f = fopen(path, "wb");
+  bool ok = f && fwrite(text.data(), 1, text.size(), f) == text.size();
+  if (f) ok = fclose(f) == 0 && ok;
+  if (!ok) return lastError = "STEP: couldn't write the file", 0;
+  return 1;
 }

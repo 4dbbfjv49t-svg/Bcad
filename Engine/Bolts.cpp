@@ -1,4 +1,4 @@
-// Bolts and nuts as Bcad's own engine makes them: OpenCascade's shapes (BcadKernel.cpp) told as radii round the axis
+// Bolts and nuts as Bcad's engine makes them: each shape told as radii round the axis
 // (Radial.hpp), so each is meshed in one go, closed by how it's made. The sizes, and how they fit, are Fasteners.cpp's.
 #include "Engine/Bolts.hpp"
 
@@ -208,8 +208,8 @@ bool fastenerSpec(const BKFastener &f, double clearance, RadialSpec &s, double &
       chamfers(mk, z, face, w / std::sqrt(3.0), true, true);
       s.outer.push_back(z);
     }
-    // The tap: OpenCascade's thread from −1 (so the same phase), countersunk 45° down to the crest radius at each end, and
-    // on into the thread a little steeper (where OpenCascade has a flat ring exactly at the crest, touching it edge on).
+    // The tap: the thread from −1 (so the same phase), countersunk 45° down to the crest radius at each end, and on into
+    // the thread a little steeper (rather than a flat ring exactly at the crest, touching it edge on).
     double sink = std::min({p * 0.6, L / 4, 0.6 * (face - r)});
     Zone tap = threaded(mk, r, r - rootDepth * p, p, -1, 0, L);
     tap.reach = r + sink;

@@ -11,7 +11,7 @@ concurrency:
 jobs:
   mac:
     runs-on: macos-26
-    timeout-minutes: 300
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -48,27 +48,6 @@ jobs:
           name: digest-mac
           path: ${{ runner.temp }}/digest/mac.txt
 
-      - name: Restore OpenCascade
-        id: occt
-        uses: actions/cache/restore@v4
-        with:
-          path: Vendor/occt
-          key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
-          restore-keys: occt-${{ runner.arch }}-
-
-      - name: Build OpenCascade
-        run: |
-          start=$(date +%s)
-          ./occt.sh
-          echo "occt.sh took $(( $(date +%s) - start )) s"
-
-      - name: Save OpenCascade
-        if: steps.occt.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: Vendor/occt
-          key: occt-${{ runner.arch }}-${{ hashFiles('occt.sh') }}
-
       - name: Self-test
         run: |
           mkdir -p "$RUNNER_TEMP/results"
@@ -76,34 +55,18 @@ jobs:
           ./test/selftest.sh 2>&1 | tee "$RUNNER_TEMP/results/selftest.log"
           echo "self-test took $(( $(date +%s) - start )) s"
 
-      - name: Self-test on Bcad's engine
-        run: |
-          mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/owntmp"
-          start=$(date +%s)
-          TMPDIR="$RUNNER_TEMP/owntmp" ./build.sh --selftest --engine own 2>&1 | tee "$RUNNER_TEMP/results/selftest-own.log"
-          echo "self-test took $(( $(date +%s) - start )) s"
-
       - name: Build app
         run: |
           start=$(date +%s)
           ./build.sh "$RUNNER_TEMP/out/Bcad.app"
           echo "build took $(( $(date +%s) - start )) s"
+          du -sh "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS/Bcad"
           ls -la "$RUNNER_TEMP/out/Bcad.app/Contents" "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS"
+          otool -L "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS/Bcad"
+          if [ -e "$RUNNER_TEMP/out/Bcad.app/Contents/Frameworks" ]; then echo "✗ libraries bundled"; exit 1; fi
           codesign -dv "$RUNNER_TEMP/out/Bcad.app" 2>&1 || true
-          codesign --verify --strict "$RUNNER_TEMP/out/Bcad.app" && echo "signature ok" || echo "signature NOT valid"
+          codesign --verify --strict "$RUNNER_TEMP/out/Bcad.app" && echo "signature ok"
           ditto -c -k --keepParent "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app.zip"
-
-      - name: Build app on Bcad's engine
-        run: |
-          start=$(date +%s)
-          ./build.sh --engine own "$RUNNER_TEMP/own/Bcad.app"
-          echo "build took $(( $(date +%s) - start )) s"
-          du -sh "$RUNNER_TEMP/own/Bcad.app" "$RUNNER_TEMP/own/Bcad.app/Contents/MacOS/Bcad"
-          otool -L "$RUNNER_TEMP/own/Bcad.app/Contents/MacOS/Bcad"
-          if otool -L "$RUNNER_TEMP/own/Bcad.app/Contents/MacOS/Bcad" | grep -qiE "TK|rpath|occt"; then echo "✗ OpenCascade linked in"; exit 1; fi
-          ls "$RUNNER_TEMP/own/Bcad.app/Contents"
-          codesign --verify --strict "$RUNNER_TEMP/own/Bcad.app" && echo "signature ok"
-          ditto -c -k --keepParent "$RUNNER_TEMP/own/Bcad.app" "$RUNNER_TEMP/own/Bcad.app.zip"
 
       - name: Launch and open a file
         continue-on-error: true
@@ -151,36 +114,6 @@ jobs:
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
 
-      - name: Launch Bcad's engine app and open a file
-        continue-on-error: true
-        run: |
-          APP="$RUNNER_TEMP/own/Bcad.app"
-          FILE="$RUNNER_TEMP/owntmp/bcad-selftest/test.3mf"
-          R="$RUNNER_TEMP/results"
-          mkdir -p "$R/shots"
-          ls -la "$FILE" || echo "no test.3mf from the self-test"
-          snap() {
-            sleep "$2"
-            screencapture -x "$R/shots/$1.png" || echo "screencapture failed"
-            if pgrep -x Bcad >/dev/null; then echo "$1: Bcad running"; else echo "$1: Bcad NOT running"; fi
-          }
-          quit() {
-            pkill -TERM -x Bcad || true
-            for i in $(seq 1 50); do pgrep -x Bcad >/dev/null || break; sleep 0.2; done
-            pkill -KILL -x Bcad 2>/dev/null || true
-          }
-          echo "▸ own 1 launch empty"
-          open --stdout "$R/own1.out" --stderr "$R/own1.err" "$APP"
-          snap own-1-empty 15
-          quit
-          echo "▸ own 2 cold launch with the file"
-          open -a "$APP" --stdout "$R/own2.out" --stderr "$R/own2.err" "$FILE"
-          snap own-2-cold-30s 30
-          quit
-          mkdir -p "$R/crashes"
-          cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null || echo "no crash reports"
-          for f in "$R"/own*.out "$R"/own*.err; do echo "── $f"; cat "$f"; done
-
       - name: Thumbnails
         if: always()
         continue-on-error: true
@@ -198,11 +131,6 @@ jobs:
         with:
           name: Bcad.app
           path: ${{ runner.temp }}/out/Bcad.app.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Bcad-own-engine.app
-          path: ${{ runner.temp }}/own/Bcad.app.zip
 
       - uses: actions/upload-artifact@v4
         if: always()

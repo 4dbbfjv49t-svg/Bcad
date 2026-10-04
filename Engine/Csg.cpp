@@ -815,7 +815,7 @@ void finish(Solid &s, double deflection) {
           e.pts.push_back(w.pts[cur]);
         }
         // A line on a turned face at one height along its axis is a circle round that axis (a hole's rim, a cut across a
-        // cylinder): exact again from the face's profile. Half a turn or more is listed as a circle, as OpenCascade lists them.
+        // cylinder): exact again from the face's profile. Half a turn or more is listed as a circle.
         for (int f : {e.f0, e.f1}) {
           Ring ring;
           if (!circleOn(faces[f].geom, e.pts, deflection, ring)) continue;

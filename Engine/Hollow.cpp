@@ -54,7 +54,7 @@ bool bounded(const Solid &s, int f) {
 // in a merge, common part or cut (`inBool`), a face that doesn't show in the shape moves out.
 double moveOf(const Rules &r, const FaceGeom &g0, int sign, bool flip, bool inBool) {
   FaceGeom g = flip ? flipped(g0) : g0;
-  // An opening before a wall of its own, should a face be picked as both (as OpenCascade's kernel takes it).
+  // An opening before a wall of its own, should a face be picked as both.
   if (sign > 0)
     for (const auto &o : r.open)
       if (sameForm(o, g)) return -r.out;
@@ -747,7 +747,7 @@ bool voidOf(const Shape &s, const Affine &W, int sign, bool flip, bool inBool, C
 
 // MARK: - walls from the finished faces
 
-// The shape's own faces moved in by their walls, as OpenCascade offsets a shape's faces: the walls are what lies within
+// The shape's own faces moved in by their walls, face by face: the walls are what lies within
 // them, whatever the shape was made of (a merge has no inside faces left to wall, a rounding's face is a face like any).
 // Faces meeting smoothly are one patch, moved in together: a slab, the patch raised a hair out of the shape and moved in
 // by its wall, closed round its rim. Where a patch meets another inside a corner (or an opening at more than a right
@@ -1285,7 +1285,7 @@ static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &ou
     if (f < 0) lost++;
     else {
       rules.own.push_back({whole.faces[f].geom, std::max(h.wallThickness[i / 6], 0.01)});
-      // An opening before a wall of its own, should a face be picked as both (as OpenCascade's kernel takes it).
+      // An opening before a wall of its own, should a face be picked as both.
       if (depth[f] >= 0) depth[f] = std::max(h.wallThickness[i / 6], 0.01);
     }
   }

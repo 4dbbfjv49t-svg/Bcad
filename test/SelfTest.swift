@@ -14,14 +14,8 @@ enum SelfTest {
         }
         let k = Kernel.shared
         k.clearance = 0.2
-        let occt = String(cString: bk_occt_version())
-        // On Bcad's own engine (./build.sh --selftest --engine own) what only OpenCascade does yet is skipped, and said.
-        let own = occt.isEmpty
-        func skipped(_ what: String) { print("–", what, "(not in Bcad's own engine yet)") }
-        check(own ? "Bcad's own engine has no OpenCascade to acknowledge" : "OpenCascade's version is known for the acknowledgements",
-              own || occt.split(separator: ".").count == 3, occt)
-        // As exact as each engine tells a shape's box: Bcad's own to the last digits, OpenCascade's to a tenth of a micron.
-        let tight = own ? 1e-9 : 1e-4
+        // As exact as the engine tells a shape's box: to the last digits.
+        let tight = 1e-9
         func mesh(_ n: Node) -> Mesh? { k.mesh(n) }
         func manifold(_ m: Mesh) -> Bool {
             let (_, tris) = Weld.run(m)
@@ -282,7 +276,7 @@ enum SelfTest {
 
         var doc = Document()
         let mixed = SIMD3<UInt8>(12, 34, 56)
-        // Treated shapes (hollowed, inward-rounded, bevelled), a holed block, a half sphere and bolts, on either engine.
+        // Treated shapes (hollowed, inward-rounded, bevelled), a holed block, a half sphere and bolts.
         let treated = [Solid(name: "Box", color: Palette.colors[2], node: .hollow(of: box, open: [top], walls: [Wall(face: bottom, thickness: 5)], thickness: 2), place: Placement(move: SIMD3(-40, 0, 10))),
                        Solid(name: "Oval", color: Palette.colors[3], node: .cove(of: .primitive(Primitive(kind: .oval, size: [20, 12, 70, 20])),
                                                                   picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 1), place: Placement(move: SIMD3(0, 40, 10))),
@@ -308,11 +302,15 @@ enum SelfTest {
         try? STL.write(stl, meshes: meshes.map(\.1))
         let stlSize = (try? Data(contentsOf: stl).count) ?? 0
         check("stl", stlSize == 84 + 50 * meshes.reduce(0) { $0 + $1.1.indices.count / 3 })
-        if own { skipped("STEP") } else {
-            let step = dir.appendingPathComponent("test.step")
-            let wrote = k.exportStep(doc.bodies, to: step.path)
-            check("step", wrote && ((try? String(contentsOf: step, encoding: .utf8))?.hasPrefix("ISO-10303-21") ?? false))
-        }
+        // STEP: a product under each shape's name, each a solid (or more, for a shape in pieces).
+        let step = dir.appendingPathComponent("test.step")
+        let wrote = k.exportStep(doc.bodies, to: step.path)
+        let stepText = (try? String(contentsOf: step, encoding: .utf8)) ?? ""
+        let products = stepText.components(separatedBy: "=PRODUCT('").count - 1
+        let solids = stepText.components(separatedBy: "=MANIFOLD_SOLID_BREP(").count + stepText.components(separatedBy: "=BREP_WITH_VOIDS(").count - 2
+        let named = doc.bodies.allSatisfy { stepText.contains("=PRODUCT('\($0.name)'") }
+        check("step", wrote && stepText.hasPrefix("ISO-10303-21;") && stepText.hasSuffix("END-ISO-10303-21;\n") && products == doc.bodies.count
+              && solids >= doc.bodies.count && named, "\(products) products, \(solids) solids, \(stepText.utf8.count / 1024) kB")
 
         // Sizes the kernel must refuse at once (they crashed or hung it), and results with nothing left in them.
         let t1 = Date()
@@ -424,7 +422,7 @@ enum SelfTest {
             settle()
         }
         lib.settings = Settings()
-        let rounded = Solid(name: "Rounded", color: Palette.colors[0], node: own ? box : .round(of: box, picks: [edge], radius: 2), place: Placement(move: SIMD3(0, 0, 30)))
+        let rounded = Solid(name: "Rounded", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 30)))
         use([rounded])
         lib.reshape(rounded.id) { n in
             guard case .primitive(var p) = n else { return n }
@@ -434,8 +432,8 @@ enum SelfTest {
         settle()
         let (wideLo, wideHi) = bounds(rounded.id)
         check("a new size keeps the left, front and bottom sides", near(wideLo, SIMD3(-10, -10, 20)) && near(wideHi, SIMD3(30, 10, 60)))
-        let wide = lib.meshes[rounded.id]?.volume ?? 0, wideWant = 32000 - (own ? 0 : (4 - Double.pi) * 40)
-        check(own ? "a new size is built" : "a rounding goes along with a new size", abs(wide - wideWant) < 1, String(format: "%.2f / %.2f mm³", wide, wideWant))
+        let wide = lib.meshes[rounded.id]?.volume ?? 0, wideWant = 32000.0
+        check("a new size is built", abs(wide - wideWant) < 1, String(format: "%.2f / %.2f mm³", wide, wideWant))
         lib.settings.symmetric = true
         lib.reshape(rounded.id) { n in
             guard case .primitive(var p) = n else { return n }
@@ -473,7 +471,7 @@ enum SelfTest {
 
         // Resizing keeps exactly the side it should, however the sizes come out: a cylinder pulled wider becomes an oval with
         // its left side where it was, a sphere pulled taller stays round on its bottom, ⌥ keeps the middle, ⇧ the corner, and
-        // sizes rounded to 0.01 mm move nothing. On Bcad's own engine what a resize shows as it goes is what it makes.
+        // sizes rounded to 0.01 mm move nothing. What a resize shows as it goes is what it makes.
         func prim(_ id: UUID) -> Primitive? {
             if case .primitive(let p)? = lib.body(id)?.node { return p }
             return nil
@@ -501,10 +499,8 @@ enum SelfTest {
         let ballResize = afterResize(tallBall, axis: 2, by: 1.5)
         check("a sphere pulled taller stays round and keeps its bottom", prim(tallBall.id)?.size == [30]
               && near(ballResize.made.0, SIMD3(-15, -15, 0), tight) && near(ballResize.made.1, SIMD3(15, 15, 30), tight), spans(ballResize.made))
-        if own {
-            check("what a resize shows as it goes is what it makes", near(canResize.shown.0, canResize.made.0, 1e-9) && near(canResize.shown.1, canResize.made.1, 1e-9)
-                  && near(ballResize.shown.0, ballResize.made.0, 1e-9) && near(ballResize.shown.1, ballResize.made.1, 1e-9), spans(ballResize.shown))
-        }
+        check("what a resize shows as it goes is what it makes", near(canResize.shown.0, canResize.made.0, 1e-9) && near(canResize.shown.1, canResize.made.1, 1e-9)
+              && near(ballResize.shown.0, ballResize.made.0, 1e-9) && near(ballResize.shown.1, ballResize.made.1, 1e-9), spans(ballResize.shown))
         let offBlock = Solid(name: "Block", color: Palette.colors[4], node: box, place: Placement(move: SIMD3(5, 5, 10)))
         let middleResize = afterResize(offBlock, axis: 0, by: 1.5, symmetric: true)
         check("a symmetric resize keeps the middle", near(middleResize.made.0, SIMD3(-10, -5, 0), tight) && near(middleResize.made.1, SIMD3(20, 15, 20), tight),
@@ -968,10 +964,8 @@ enum SelfTest {
         let notAdded = lib.addFiles([dir.appendingPathComponent("notes.txt")])
         let saysSo: Bool = lib.note == L("Only 3MF files made by Bcad can be added")
         check("a file that isn't a Bcad 3MF adds nothing and says so", !notAdded && lib.doc.bodies.count == 1 + kept.bodies.count && saysSo, lib.note ?? "")
-        // Sizes in mm and in percent on shapes that were edited after they were made: a rounded, hollowed box and a merge.
-        // (On Bcad's own engine, a box split across.)
-        let editedNode: Node = own ? .split(of: box, plane: Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1)), side: 1)
-            : .round(of: .hollow(of: box, open: [top], walls: [], thickness: 2), picks: [edge], radius: 1)
+        // Sizes in mm and in percent on shapes that were edited after they were made: a box split across and a merge.
+        let editedNode: Node = .split(of: box, plane: Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1)), side: 1)
         let edited = Solid(name: "Edited", color: Palette.colors[3], node: editedNode, place: Placement(move: SIMD3(0, 0, 10)))
         let mergedShape = Solid(name: "Merged", color: Palette.colors[4], node: .group(op: Int32(BK_UNION), parts: [
             Part(node: box, place: Placement()), Part(node: .primitive(.make(.cylinder)), place: Placement(move: SIMD3(15, 0, 0)))
@@ -1167,7 +1161,7 @@ enum SelfTest {
         settle()
         check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
 
-        // The workbench's build must end before the process does: OpenCascade tears itself down at exit.
+        // The workbench's build must end before the process does (the app leaves at once as it quits).
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")
         return ok

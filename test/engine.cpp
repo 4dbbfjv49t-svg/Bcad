@@ -8,6 +8,7 @@
 #include "Engine/Implicit.hpp"
 #include "Engine/Math.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
 #include <array>
@@ -95,7 +96,7 @@ struct Case {
   std::vector<double> p;
   double volume;
   double lo[3], hi[3];
-  int faces, edges, corners, circles;  // as OpenCascade's own topology for the same shape (what the app expects)
+  int faces, edges, corners, circles;  // as the app expects them for the shape
 };
 
 int main() {
@@ -898,7 +899,7 @@ int main() {
   }
 
   // MARK: edges and hollows
-  // Sections across edges; roundings, inward roundings and bevels against exact volumes (and OpenCascade's figures where
+  // Sections across edges; roundings, inward roundings and bevels against exact volumes (and reference figures where
   // a corner is a matter of convention), closed and as many faces; hollows with openings and walls of their own.
   {
     double b20[3] = {20, 20, 20}, body[6] = {0}, mr;
@@ -973,7 +974,7 @@ int main() {
     double inside[6] = {10, 0, 0, 0, 1, 0};
     is("round: an inside corner is filled", bk_fillet(L, &ke, inside, 1, 2, &mr, &miss), 16000 + (4 - PI) * 20, 1e-6, 11);
     // An inside corner rounded wider than the narrow face beside it is across (c1044): what it fills past that face is cut
-    // off by the face beyond, as OpenCascade's kernel does (its 3466.8184 mm³).
+    // off by the face beyond (reference 3466.8184 mm³).
     {
       double box1044[3] = {8.17306, 9.76692, 22.3589}, five1044[3] = {5, 12.2671, 20.3772}, edge1044[6] = {3.74027, 4.88346, 7.8643, -1, 0, 0};
       BKShape *joined = keep(bk_boolean(BK_UNION, keep(bk_primitive(BK_BOX, box1044)), keep(at(keep(bk_primitive(BK_PRISM, five1044)), 7.92584, 2.62818, -2.3243))));
@@ -993,7 +994,7 @@ int main() {
       double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
       check("cove: every edge of a prism, made or refused in moments", took < 5, fmt("%.1f s, ", took) + (coved ? "made" : bk_last_error()));
       // Every edge of a three-sided prism and of a wedge: where three meet at a corner two cylinders only touch, which
-      // merging takes well only in some orders (OpenCascade's 261.0555 and 2656.6523 mm³).
+      // merging takes well only in some orders (reference 261.0555 and 2656.6523 mm³).
       double three[3] = {3, 11.6451, 6.32203}, wedge406[3] = {20.7767, 15.8337, 16.3498};
       is("cove: every edge of a three-sided prism", bk_cove(keep(bk_primitive(BK_PRISM, three)), &kb, body, 1, 0.579835, &mr, &miss), 261.0555, 0.01, 14);
       is("cove: every edge of a wedge", bk_cove(keep(bk_primitive(BK_WEDGE, wedge406)), &kb, body, 1, 0.525139, &mr, &miss), 2656.6523, 0.01, 14);
@@ -1001,7 +1002,7 @@ int main() {
     is("bevel: 2 × 4 mm", bk_chamfer(box, &ke, edge, 1, 2, 4, 0, &miss), 8000 - 80, 1e-6, 7);
     // Softened: each of the bevel's edges (135°) rounded, ρ²(cot(φ/2) − (π − φ)/2) per edge.
     is("bevel: softened", bk_chamfer(box, &ke, edge, 1, 2, 2, 0.5, &miss), 8000 - 40 - 2 * 0.25 * (1 / std::tan(3 * PI / 8) - PI / 8) * 20, 1e-3, 9);
-    // Every edge: three bevels at each corner cut it off flat (a tetrahedron of 2/3 mm³ more), as OpenCascade's kernel does.
+    // Every edge: three bevels at each corner cut it off flat (a tetrahedron of 2/3 mm³ more).
     is("bevel: every edge, the corners cut off flat", bk_chamfer(box, &kb, body, 1, 2, 2, 0, &miss), 8000 - 12 * 40 + 8 * (8 - 2) - 8 * 2.0 / 3, 1e-6, 26);
     {
       // A leg longer than the 1 mm plate is thick: the bevel runs on past the front, cutting into the bottom (exact: 7.5 mm³
@@ -1011,7 +1012,7 @@ int main() {
       BKShape *thin = keep(bk_primitive(BK_BOX, plate1));
       is("bevel: a leg past the face beside it, running on", bk_chamfer(thin, &ke, top1, 1, 0.5, 2, 0, &miss), 392.5, 1e-6, 6);
       is("bevel: two across a narrow face, meeting in a ridge", bk_chamfer(thin, ke2, both1, 2, 0.5, 0.7, 0, &miss), 393.189189, 1e-5, 7);
-      // Every edge of a block with a slot (c578): the fills of its inside corners merge only in some orders (OpenCascade's
+      // Every edge of a block with a slot (c578): the fills of its inside corners merge only in some orders (reference
       // 4928.0541 mm³; inside corners are finished a little differently).
       double block578[3] = {14.5673, 23.7556, 16.9797}, slot578[3] = {7.50662, 18.9013, 16.2504};
       BKShape *slotted = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, block578)), keep(at(keep(bk_primitive(BK_BOX, slot578)), -0.519449, -6.57891, 8.40813))));
@@ -1034,7 +1035,7 @@ int main() {
     }
     // As wide as the corners: a ball's eighth there.
     is("round: a top as wide as its rounded corners", bk_fillet(up2, &kf, top, 1, 2, &mr, &miss), 8000 - 4 * (4 - PI) * 20 - 4 * (4 - PI) * 16 - 4 * (PI * 4 / 4 * 2 - 4 * PI / 3 * 8 / 8), 0.5);
-    // Wider than the corners (OpenCascade's 7917.562 mm³; the section's circle cut off at the corner's axis here).
+    // Wider than the corners (reference 7917.562 mm³; the section's circle cut off at the corner's axis here).
     is("round: a top wider than its rounded corners", bk_fillet(up1, &kf, top, 1, 2, &mr, &miss), 7917.562, 1);
     printf("  sections, roundings, coves and bevels in %.0f ms\n", ms(t0));
 
@@ -1099,11 +1100,11 @@ int main() {
       double v = inner * inner * inner - (12 * (1 - PI / 4) * rho * rho * (inner - 2 * rho) + 8 * (1 - PI / 6) * rho * rho * rho);
       is("hollow: a rounded cube, walls thinner than its rounding", hollow(roundAll, nullptr, 0, nullptr, nullptr, 0, 1), roundVolume - v, 0.05);
     }
-    // OpenCascade's 3309.562 mm³: the cube rounded 1 mm up its sides, 2 mm round its top, its top open.
+    // Reference 3309.562 mm³: the cube rounded 1 mm up its sides, 2 mm round its top, its top open.
     is("hollow: sides and top rounded differently, the top open", hollow(keep(bk_fillet(up1, &kf, top, 1, 2, &mr, &miss)), top, 1, nullptr, nullptr, 0, 2, box), 3309.562, 1);
     printf("  hollows in %.0f ms\n", ms(t0));
 
-    // Found by running random shapes through this engine and OpenCascade's side by side.
+    // Found by running random shapes through this engine and a reference kernel side by side.
     {
       // Where three smooth edges meet: no run walked twice (it read past an empty one).
       double ball[1] = {21.0713}, p[3] = {-1.25366, -0.358263, -1.36067}, n[3] = {-0.965991, -0.691866, -0.395964};
@@ -1115,11 +1116,11 @@ int main() {
       if (bevelled) bk_free(bevelled);
       // A rounding's tool touching a face along a line: its crossings there come out loosely, and are made one.
       double cone[3] = {24.7353, 18.4702, 11.8902};
-      is("round: a cone's rims at a radius whose crossings come out a hair apart (OpenCascade's 4357.4627)", bk_fillet(keep(bk_primitive(BK_CONE, cone)), &kb, body, 1, 0.937602, &mr, &miss), 4357.4627, 0.01, 5);
+      is("round: a cone's rims at a radius whose crossings come out a hair apart (reference 4357.4627)", bk_fillet(keep(bk_primitive(BK_CONE, cone)), &kb, body, 1, 0.937602, &mr, &miss), 4357.4627, 0.01, 5);
       // A wedge's edges: how much they may take, from its faces shrunk by the roundings (the end's in-circle), not halves.
       double wedge[3] = {21.7653, 9.62249, 13.3893};
       BKShape *w = keep(bk_primitive(BK_WEDGE, wedge));
-      is("round: a wedge all round, close to the most it takes (OpenCascade's 493.5294)", bk_fillet(w, &kb, body, 1, 3.79, &mr, &miss), 493.5294, 1e-3);
+      is("round: a wedge all round, close to the most it takes (reference 493.5294)", bk_fillet(w, &kb, body, 1, 3.79, &mr, &miss), 493.5294, 1e-3);
       BKShape *over = bk_fillet(w, &kb, body, 1, 3.85, &mr, &miss);
       check("round: a wedge's ends hold no more than their in-circle", !over && near(mr, 3.79, 0.011), over ? "made" : fmt("most %.2f", mr));
       if (over) bk_free(over);
@@ -1140,13 +1141,13 @@ int main() {
       double ov[4] = {17.8737, 10.0376, 90, 17.6743}, a = ov[0] / 2, b = ov[1] / 2, h = ov[3], t = 0.910856, round = 0;
       for (int k = 0, n = 100000; k < n; k++) round += std::hypot(a * std::sin(2 * PI * (k + 0.5) / n), b * std::cos(2 * PI * (k + 0.5) / n)) * 2 * PI / n;
       is("hollow: an oval", hollow(keep(bk_primitive(BK_OVAL, ov)), nullptr, 0, nullptr, nullptr, 0, t), PI * a * b * h - (PI * a * b - t * round + PI * t * t) * (h - 2 * t), 1e-3);
-      // A face both opened and given a wall of its own: open (as OpenCascade's kernel takes it).
+      // A face both opened and given a wall of its own: open.
       double cy[2] = {25.0234, 25.4184}, cyTop[6] = {0, 0, 1, 0, 0, 12.7092}, three = 3.03;
-      is("hollow: a face both opened and walled is open (OpenCascade's 2680.0055)", hollow(keep(bk_primitive(BK_CYLINDER, cy)), cyTop, 1, cyTop, &three, 1, 1.15996), 2680.0055, 1e-3);
-      // A bevel wider than a small disc's edge reaches past the axis: its tool cut off there (OpenCascade's 1652.8131).
+      is("hollow: a face both opened and walled is open (reference 2680.0055)", hollow(keep(bk_primitive(BK_CYLINDER, cy)), cyTop, 1, cyTop, &three, 1, 1.15996), 2680.0055, 1e-3);
+      // A bevel wider than a small disc's edge reaches past the axis: its tool cut off there (reference 1652.8131).
       double cone2[3] = {19.5542, 5.66193, 12.1836}, rim[6] = {-2.83097, 0, 6.0918, 0.0980171, -0.995185, 0};
       is("bevel: a narrow cone's top rim, wide on the top", bk_chamfer(keep(bk_primitive(BK_CONE, cone2)), &ke, rim, 1, 2.14342, 1.59471, 0, &miss), 1652.8131, 0.05);
-      // A face whose outline was walked from part way along a side: its two parts one side (OpenCascade's 942.7708).
+      // A face whose outline was walked from part way along a side: its two parts one side (reference 942.7708).
       double slab[3] = {29.2304, 26.1938, 11.7463}, peg[2] = {12.8745, 13.187};
       BKShape *pegged = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, slab)), keep(at(keep(bk_primitive(BK_CYLINDER, peg)), -0.532917, 3.19933, 5.03263))));
       is("round: a box and a cylinder's common part all round", bk_fillet(pegged, &kb, body, 1, 1.22653, &mr, &miss), 942.7708, 0.01);
@@ -1155,7 +1156,7 @@ int main() {
       is("hollow: a half ball open below, a thick wall picked there too", hollow(keep(bk_primitive(BK_HEMISPHERE, d12)), base, 1, base, &wallBase, 1, 1.60785),
          2 * PI / 3 * (Ro * Ro * Ro - (Ro - 1.60785) * (Ro - 1.60785) * (Ro - 1.60785)), 0.01);
       // An edge where a turned face meets a flat one: its angle where they meet exactly, not at the mesh's point a chord's sag
-      // off (OpenCascade's 20.8083°).
+      // off (reference 20.8083°).
       double slab2[3] = {27.4638, 29.2663, 29.211}, hole2[2] = {8.74376, 19.6135}, seam[6] = {13.7319, -2.48913, -0.867683, 0, 0, 1};
       BKShape *bitten = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, slab2)), keep(at(keep(bk_primitive(BK_CYLINDER, hole2)), 9.64518, -3.96658, -0.867683))));
       BKSection *across = bk_section(bitten, ke, seam, 20);
@@ -1167,14 +1168,14 @@ int main() {
       BKShape *rb = keep(bk_fillet(keep(bk_primitive(BK_BOWL, bowl)), &kb, body, 1, 0.402626, &mr, &miss));
       Got before = look(rb);
       is("bevel: a rounded bowl, every edge (none left sharp)", bk_chamfer(rb, &kb, body, 1, 0.383957, 1.12174, 0, &miss), before.volume, 1e-6);
-      // A rim rounded wider than half its disc's radius: the rounding's circle crosses the axis, its arc doesn't (OpenCascade's
+      // A rim rounded wider than half its disc's radius: the rounding's circle crosses the axis, its arc doesn't (reference
       // 1296.4767; by Pappus, the corner's area turned round at its middle's distance from the axis).
       double rod[2] = {8.32971, 24.226}, Rr = rod[0] / 2, rr = 2.18641, rodRim[6] = {-Rr, 0, rod[1] / 2, 0, -1, 0};
       double spandrel = (1 - PI / 4) * rr * rr, inset = rr * (10 - 3 * PI) / (12 - 3 * PI);
       is("round: a narrow cylinder's top rim, wide", bk_fillet(keep(bk_primitive(BK_CYLINDER, rod)), &ke, rodRim, 1, rr, &mr, &miss),
          PI * Rr * Rr * rod[1] - spandrel * 2 * PI * (Rr - inset), 1e-3);
       // Two edges rounded where they meet at a corner, then the sharp edge ending there bevelled: the bevel runs on up the
-      // seam the two roundings meet along, to where they meet the top smoothly (OpenCascade's 7914.7425: its legs on the
+      // seam the two roundings meet along, to where they meet the top smoothly (reference 7914.7425: its legs on the
       // roundings measured as chords, so its bevel stays a hair wider to the end; not run on, 7916.83).
       double cube20[3] = {20, 20, 20}, twoTop[12] = {0, 10, 10, 1, 0, 0, 10, 0, 10, 0, 1, 0}, upright[6] = {10, 10, 0, 0, 0, 1};
       int ke2[2] = {BK_PICK_EDGE, BK_PICK_EDGE};
@@ -1195,19 +1196,19 @@ int main() {
       double blockA[3] = {10, 20, 20}, blockB[3] = {10.1, 30, 20}, wallTop[6] = {5, 0, 10, 0, 1, 0};
       BKShape *wall = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, blockA)), keep(at(keep(bk_primitive(BK_BOX, blockB)), -0.95, 0, 2))));
       is("round: a thin wall's top edge, wider than the wall", bk_fillet(wall, &ke, wallTop, 1, 1, &mr, &miss), 724 - 0.214435 * 20, 0.01);
-      // A top rounded, then bevelled all round: each upright edge's bevel runs on up its seam (OpenCascade's 6303.9067; its
+      // A top rounded, then bevelled all round: each upright edge's bevel runs on up its seam (reference 6303.9067; its
       // four alike corners come out up to 1.2 apart, by which of its faces takes which leg).
       double b30[3] = {13.2815, 20.7227, 23.1038}, top30[6] = {0, 0, 1, 0, 0, b30[2] / 2};
       BKShape *roundTop = keep(bk_fillet(keep(bk_primitive(BK_BOX, b30)), &kf, top30, 1, 1.08193, &mr, &miss));
       is("bevel: a box with its top rounded, all round", bk_chamfer(roundTop, &kb, body, 1, 0.786019, 0.658416, 0, &miss), 6303.9067, 2.5);
       // One edge rounded, then bevelled all round: the bevel runs on round the rounding's ends, each run one tool (cut piece
-      // by piece, its straight part and its arc left a face between them). OpenCascade's 6092.0459.
+      // by piece, its straight part and its arc left a face between them). Reference 6092.0459.
       double b1509[3] = {11.3016, 19.6324, 27.8478}, side[6] = {-b1509[0] / 2, 0, b1509[2] / 2, 0, 1, 0};
       BKShape *oneEdge = keep(bk_fillet(keep(bk_primitive(BK_BOX, b1509)), &ke, side, 1, 1.40145, &mr, &miss));
       is("bevel: a box with one edge rounded, all round", bk_chamfer(oneEdge, &kb, body, 1, 1.06377, 0.715423, 0, &miss), 6092.0459, 0.5);
 
       // A ball cut off-centre by a slanted plane: its rim a circle round the plane's normal (a ball is turned round any line
-      // through its middle); three faces, as OpenCascade's (bits of the tool's outer faces left a hair inside the ball's mesh
+      // through its middle); three faces (bits of the tool's outer faces left a hair inside the ball's mesh
       // taken into the faces beside them). Exact volumes by turning the cut's outline (ρ, z) round that normal; kept: the side the normal
       // points to (0) or away from (1).
       auto turned = [](const std::vector<std::pair<double, double>> &loop) {
@@ -1237,16 +1238,16 @@ int main() {
       double ball774[1] = {17.5967}, cutAt[3] = {-0.5319, -1.11591, -1.111}, cutN[3] = {0.318081, 0.797479, 0.814279};
       double h774 = (cutAt[0] * cutN[0] + cutAt[1] * cutN[1] + cutAt[2] * cutN[2]) / std::hypot(cutN[0], cutN[1], cutN[2]);
       BKShape *capped = keep(bk_split(keep(bk_primitive(BK_SPHERE, ball774)), cutAt, cutN, 1));
-      is("round: a ball cut aslant, its rim (OpenCascade's 901.9012)", bk_fillet(capped, &kb, body, 1, 2.11565, &mr, &miss), capRounded(ball774[0] / 2, -h774, 2.11565), 0.15, 3);
+      is("round: a ball cut aslant, its rim (reference 901.9012)", bk_fillet(capped, &kb, body, 1, 2.11565, &mr, &miss), capRounded(ball774[0] / 2, -h774, 2.11565), 0.15, 3);
       // Hollowed: the void a ball cut and rounded as well, each smaller by the wall (it was left sharp: a cut shape's void came
-      // without its edges). OpenCascade's 423.5560.
+      // without its edges). Reference 423.5560.
       double ball85[1] = {17.3662}, at85[3] = {1.01316, 1.55386, 0.529631}, n85[3] = {0.382081, 0.566047, -0.504127}, wall85 = 0.890721;
       double h85 = (at85[0] * n85[0] + at85[1] * n85[1] + at85[2] * n85[2]) / std::hypot(n85[0], n85[1], n85[2]), R85 = ball85[0] / 2;
       BKShape *rounded85 = keep(bk_fillet(keep(bk_split(keep(bk_primitive(BK_SPHERE, ball85)), at85, n85, 0)), &kb, body, 1, 1.9793, &mr, &miss));
       is("hollow: a ball cut aslant and rounded", hollow(rounded85, nullptr, 0, nullptr, nullptr, 0, wall85),
          capRounded(R85, h85, 1.9793) - capRounded(R85 - wall85, h85 + wall85, 1.9793 - wall85), 0.1);
       // A ball cut flat, its rim bevelled: the leg on the ball a straight line to a point on it, not along its tangent
-      // (OpenCascade's 1301.5833; the cut ball itself comes out 0.03 mm³ over, its curved face's missed volume shared out
+      // (reference 1301.5833; the cut ball itself comes out 0.03 mm³ over, its curved face's missed volume shared out
       // by area).
       double slab470[3] = {20.0164, 24.817, 24.8619}, ball470[1] = {14.8439}, rim470[6] = {0, 1, 0, 2.4948, 12.4085, -1.54868};
       BKShape *dome470 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, slab470)), keep(at(keep(bk_primitive(BK_SPHERE, ball470)), 2.4948, 9.16612, -1.54868))));
@@ -1256,7 +1257,7 @@ int main() {
       arcTo(bev, 0, 0, R470, std::atan2(h470, e470), PI / 2 - a470);
       bev.push_back({e470 - leg, h470});
       // Two boxes' common part, open at the top and at one side: that side the second box's face, with the first box's own
-      // face just past it (not in the shape, so no wall). OpenCascade's 641.7472.
+      // face just past it (not in the shape, so no wall). Reference 641.7472.
       double big79[3] = {29.1248, 28.4093, 13.6934}, small79[3] = {15.4352, 8.28922, 11.1492}, wall79 = 1.59593;
       BKShape *common79 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, big79)), keep(at(keep(bk_primitive(BK_BOX, small79)), -6.91055, 9.93607, -0.716893))));
       double open79[12] = {0, 0, 1, -6.87767, 9.93607, 4.85771, 0, 1, 0, -6.87767, 14.0807, -0.716893};
@@ -1264,7 +1265,7 @@ int main() {
       is("hollow: two boxes' common part, open at the top and a side", hollow(common79, open79, 2, nullptr, nullptr, 0, wall79),
          x79 * y79 * z79 - (x79 - 2 * wall79) * (y79 - wall79) * (z79 - wall79), 1e-3);
       // Rounded all round, then hollowed: the void rounded too, narrower by the wall, each edge picked on it at its middle by
-      // length (one of an edge's points by count could lie near its end, past the void's corner). OpenCascade's 347.6992.
+      // length (one of an edge's points by count could lie near its end, past the void's corner). Reference 347.6992.
       double big250[3] = {13.4032, 29.4925, 10.5391}, small250[3] = {11.2809, 16.3106, 20.0836}, r250 = 2.18804, t250 = 0.887828;
       BKShape *common250 = keep(bk_boolean(BK_INTERSECT, keep(bk_primitive(BK_BOX, big250)), keep(at(keep(bk_primitive(BK_BOX, small250)), -6.93709, 5.51232, -5.8938))));
       double l250[3] = {(-6.93709 + small250[0] / 2) + big250[0] / 2, small250[1], (-5.8938 + small250[2] / 2) + big250[2] / 2};
@@ -1275,13 +1276,13 @@ int main() {
       is("hollow: two boxes' common part rounded all round", hollow(keep(bk_fillet(common250, &kb, body, 1, r250, &mr, &miss)), nullptr, 0, nullptr, nullptr, 0, t250),
          roundedBox(l250, r250, 0) - roundedBox(l250, r250 - t250, t250), 1e-3);
       // Inward roundings wider than a face beside them is across: cut, and kept while every face beside them is left and
-      // none away from their edges is touched (as OpenCascade's kernel takes it: its 3264.7941).
+      // none away from their edges is touched (reference 3264.7941).
       double slab741[3] = {25.3699, 11.1879, 14.3455}, notch741[3] = {8.05339, 15.9867, 18.1881}, face741[6] = {0, 1, 0, 2.91354, 5.59395, -0.473284};
       BKShape *notched = keep(bk_boolean(BK_SUBTRACT, keep(bk_primitive(BK_BOX, slab741)), keep(at(keep(bk_primitive(BK_BOX, notch741)), -8.43071, 7.58588, 4.66032))));
       is("cove: wider than a face beside it is across", bk_cove(notched, &kf, face741, 1, 2.13207, &mr, &miss), 3264.7941, 0.05);
       // A ring cut aslant, bevelled all round: the cut's line of mesh points zigzags across the ring's facets; each cross-
       // section is square to where the faces meet, not to that zigzag (else neighbours cross and the tool folds onto
-      // itself); the bevel's face one face along the whole cut, as OpenCascade's five. OpenCascade's 1099.5708 (its legs on
+      // itself); the bevel's face one face along the whole cut, five faces in all. Reference 1099.5708 (its legs on
       // the curved face measured to points on it). Looked at on a finer mesh: on the usual one the leg on the faceted face
       // moves by about a millimetre³ with how the facets beside the cut are split.
       double ring623[3] = {0, 37.9599, 5.10573}, at623[3] = {1.75048, 0.957164, 1.17883}, n623[3] = {0.481551, 0.64596, -0.246432};
@@ -1291,7 +1292,7 @@ int main() {
       is("bevel: a ball cut flat, its rim", bk_chamfer(dome470, &kf, rim470, 1, leg, leg, 0, &miss),
          4 * PI / 3 * R470 * R470 * R470 - PI * (R470 - h470) * (R470 - h470) * (2 * R470 + h470) / 3 - turned(bev), 0.05);
       // Every edge bevelled after every edge rounded (c501): the hair-thin remnants of faces where roundings met are left as
-      // they are, the rest bevelled (OpenCascade's 4567.990 mm³).
+      // they are, the rest bevelled (reference 4567.990 mm³).
       double can501[2] = {18.3527, 27.7191}, at501[3] = {-0.950215, -1.85683, -0.327635}, n501[3] = {-0.738288, -0.877353, 0.235435};
       BKShape *cut501 = keep(bk_split(keep(bk_primitive(BK_CYLINDER, can501)), at501, n501, 1));
       BKShape *round501 = keep(bk_fillet(cut501, &kb, body, 1, 1.54905, &mr, &miss));
@@ -1472,6 +1473,275 @@ int main() {
       bk_free(s), bk_free(b);
     }
     bk_free(bolt);
+  }
+
+  // MARK: STEP files
+  // Shapes written out and read back by a small reader of the test's own: every reference there, every loop closed, every
+  // edge met once each way within its shell, every corner on its face's plane, the volume as the mesh's, a solid per piece
+  // (a sealed hollow a void of its solid), flat faces one face each, names as given, the same text when written again.
+  {
+    printf("— STEP files\n");
+    struct Entity {
+      std::string type, args;
+    };
+    // The DATA section's entities (a complex one's type left empty), and the schema the header names.
+    auto parse = [](const std::string &text, std::map<int, Entity> &out, std::string &schema) {
+      size_t sch = text.find("FILE_SCHEMA(");
+      if (sch != std::string::npos) schema = text.substr(sch, text.find(';', sch) - sch);
+      size_t at = text.find("DATA;"), end = text.rfind("ENDSEC;");
+      if (at == std::string::npos || end == std::string::npos) return false;
+      std::string stmt;
+      bool quoted = false;
+      for (size_t i = at + 5; i < end; i++) {
+        char c = text[i];
+        if (c == '\'') quoted = !quoted;
+        if (c == '\n' && !quoted) continue;
+        if (c == ';' && !quoted) {
+          size_t eq = stmt.find('=');
+          if (stmt.empty() || stmt[0] != '#' || eq == std::string::npos) return false;
+          int id = std::atoi(stmt.c_str() + 1);
+          std::string body = stmt.substr(eq + 1);
+          size_t open = body.find('(');
+          if (open == std::string::npos || body.back() != ')') return false;
+          out[id] = {body.substr(0, open), body.substr(open + 1, body.size() - open - 2)};
+          stmt.clear();
+          continue;
+        }
+        stmt += c;
+      }
+      return true;
+    };
+    // An entity's arguments, split at the top level.
+    auto split = [](const std::string &s) {
+      std::vector<std::string> parts;
+      std::string cur;
+      int depth = 0;
+      bool quoted = false;
+      for (char c : s) {
+        if (c == '\'') quoted = !quoted;
+        if (!quoted && c == '(') depth++;
+        if (!quoted && c == ')') depth--;
+        if (!quoted && depth == 0 && c == ',') {
+          parts.push_back(cur), cur.clear();
+          continue;
+        }
+        cur += c;
+      }
+      parts.push_back(cur);
+      return parts;
+    };
+    auto refs = [&](const std::string &s) {
+      std::vector<int> out;
+      for (const auto &p : split(s.size() > 1 && s[0] == '(' ? s.substr(1, s.size() - 2) : s))
+        if (!p.empty() && p[0] == '#') out.push_back(std::atoi(p.c_str() + 1));
+      return out;
+    };
+    struct Read {
+      bool ok = true;
+      std::string why;
+      int solids = 0, voids = 0, faces = 0, products = 0;
+      double volume = 0, off = 0;
+      std::vector<std::string> names;
+    };
+    auto read = [&](const std::string &text) {
+      Read r;
+      std::map<int, Entity> e;
+      std::string schema;
+      auto fail = [&](const std::string &why) {
+        if (r.ok) r.ok = false, r.why = why;
+      };
+      if (!parse(text, e, schema) || schema.find("AUTOMOTIVE_DESIGN") == std::string::npos) {
+        fail("not read");
+        return r;
+      }
+      for (auto &[id, en] : e)
+        for (size_t i = en.args.find('#'); i != std::string::npos; i = en.args.find('#', i + 1))
+          if (!e.count(std::atoi(en.args.c_str() + i + 1))) fail("a reference to nothing");
+      auto args = [&](int id, const char *type) {
+        auto it = e.find(id);
+        if (it == e.end() || it->second.type != type) {
+          fail(std::string("not a ") + type);
+          return std::vector<std::string>();
+        }
+        return split(it->second.args);
+      };
+      auto point = [&](int id) {
+        auto a = args(id, "CARTESIAN_POINT");
+        bce::V3 p{0, 0, 0};
+        if (a.size() == 2) {
+          auto c = split(a[1].substr(1, a[1].size() - 2));
+          if (c.size() == 3) p = {std::atof(c[0].c_str()), std::atof(c[1].c_str()), std::atof(c[2].c_str())};
+        }
+        return p;
+      };
+      // One shell: its faces' loops closed, its edges met once each way; what it bounds (its faces' loops fanned from the
+      // origin).
+      auto shell = [&](int id) {
+        auto a = args(id, "CLOSED_SHELL");
+        double v = 0;
+        std::map<int, std::pair<int, int>> used;
+        if (a.size() != 2) return v;
+        for (int f : refs(a[1])) {
+          auto fa = args(f, "ADVANCED_FACE");
+          if (fa.size() != 4 || fa[3] != ".T.") {
+            fail("a face");
+            continue;
+          }
+          r.faces++;
+          auto pa = args(std::atoi(fa[2].c_str() + 1), "PLANE");
+          auto ax = pa.size() == 2 ? args(std::atoi(pa[1].c_str() + 1), "AXIS2_PLACEMENT_3D") : std::vector<std::string>();
+          if (ax.size() != 4) {
+            fail("a plane");
+            continue;
+          }
+          bce::V3 o = point(std::atoi(ax[1].c_str() + 1)), n{0, 0, 0};
+          auto da = args(std::atoi(ax[2].c_str() + 1), "DIRECTION");
+          if (da.size() == 2) {
+            auto c = split(da[1].substr(1, da[1].size() - 2));
+            if (c.size() == 3) n = {std::atof(c[0].c_str()), std::atof(c[1].c_str()), std::atof(c[2].c_str())};
+          }
+          auto bounds = refs(fa[1]);
+          for (size_t b = 0; b < bounds.size(); b++) {
+            auto it = e.find(bounds[b]);
+            if (it == e.end() || it->second.type != (b == 0 ? "FACE_OUTER_BOUND" : "FACE_BOUND")) {
+              fail("a bound");
+              continue;
+            }
+            auto ba = split(it->second.args);
+            auto la = args(std::atoi(ba[1].c_str() + 1), "EDGE_LOOP");
+            if (la.size() != 2 || ba[2] != ".T.") {
+              fail("a loop");
+              continue;
+            }
+            std::vector<bce::V3> q;
+            std::vector<int> starts, ends;
+            for (int oe : refs(la[1])) {
+              auto oa = args(oe, "ORIENTED_EDGE");
+              if (oa.size() != 5) continue;
+              int edge = std::atoi(oa[3].c_str() + 1);
+              bool along = oa[4] == ".T.";
+              auto ea = args(edge, "EDGE_CURVE");
+              if (ea.size() != 5) continue;
+              int v1 = std::atoi(ea[1].c_str() + 1), v2 = std::atoi(ea[2].c_str() + 1);
+              starts.push_back(along ? v1 : v2), ends.push_back(along ? v2 : v1);
+              (along ? used[edge].first : used[edge].second)++;
+              auto va = args(starts.back(), "VERTEX_POINT");
+              if (va.size() == 2) q.push_back(point(std::atoi(va[1].c_str() + 1)));
+            }
+            for (size_t k = 0; k < starts.size(); k++)
+              if (ends[k] != starts[(k + 1) % starts.size()]) fail("a loop not closed");
+            bce::V3 newell{0, 0, 0};
+            for (size_t k = 0; k < q.size(); k++) {
+              r.off = std::max(r.off, std::fabs(bce::dot(n, q[k] - o)));
+              newell = newell + bce::cross(q[k], q[(k + 1) % q.size()]);
+              if (k >= 1 && k + 1 < q.size()) v += bce::dot(q[0], bce::cross(q[k], q[k + 1])) / 6;
+            }
+            if ((bce::dot(newell, n) > 0) != (b == 0)) fail("a loop turning the wrong way");
+          }
+        }
+        for (auto &[edge, c] : used)
+          if (c.first != 1 || c.second != 1) fail("an edge not met once each way");
+        return v;
+      };
+      for (auto &[id, en] : e) {
+        if (en.type == "PRODUCT") {
+          r.products++;
+          r.names.push_back(split(en.args)[0]);
+        }
+        if (en.type == "MANIFOLD_SOLID_BREP" || en.type == "BREP_WITH_VOIDS") {
+          auto a = split(en.args);
+          r.solids++;
+          r.volume += shell(std::atoi(a[1].c_str() + 1));
+          if (en.type == "BREP_WITH_VOIDS")
+            for (int v : refs(a[2])) {
+              auto va = args(v, "ORIENTED_CLOSED_SHELL");
+              if (va.size() != 4 || va[3] != ".F.") {
+                fail("a void");
+                continue;
+              }
+              r.voids++;
+              r.volume -= shell(std::atoi(va[2].c_str() + 1));
+            }
+        }
+      }
+      return r;
+    };
+    auto data = [](const std::string &text) { return text.substr(text.find("DATA;")); };
+    double b20[3] = {20, 30, 10}, cyl[2] = {14, 20}, ball[1] = {20}, hole[2] = {8, 40}, cube[3] = {10, 10, 10}, body6[6] = {0};
+    int kb = BK_PICK_BODY, miss;
+    auto at = [](BKShape *s, double x, double y, double z) {
+      double m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+      return bk_transform(s, m);
+    };
+    BKShape *box = bk_primitive(BK_BOX, b20), *c = bk_primitive(BK_CYLINDER, cyl), *s = bk_primitive(BK_SPHERE, ball);
+    BKShape *drill = bk_primitive(BK_CYLINDER, hole), *drilled = bk_boolean(BK_SUBTRACT, box, drill);
+    BKShape *hollowed = bk_hollow(box, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr);
+    BKShape *k1 = bk_primitive(BK_BOX, cube), *k2 = at(k1, 10, 10, 0), *touching = bk_boolean(BK_UNION, k1, k2);
+    BKFastener f{};
+    f.kind = BK_HEX, f.size = 4;
+    bk_fastener_defaults(&f, 1);
+    BKShape *bolt = bk_fastener(&f, 0.2);
+    BKShape *rounded = bk_fillet(box, &kb, body6, 1, 2, nullptr, &miss);
+    struct Want {
+      const char *name;
+      std::vector<BKShape *> shapes;
+      int solids, voids, faces;  // (faces −1: not counted)
+    };
+    std::vector<Want> wants = {{"a box", {box}, 1, 0, 6},
+                               {"a cylinder", {c}, 1, 0, -1},
+                               {"a ball", {s}, 1, 0, -1},
+                               {"a drilled box", {drilled}, 1, 0, -1},
+                               {"a hollow box (its void inside it)", {hollowed}, 1, 1, 12},
+                               {"two cubes touching along an edge (two solids)", {touching}, 2, 0, 12},
+                               {"an M8 hex bolt", {bolt}, 1, 0, -1},
+                               {"a rounded box", {rounded}, 1, 0, -1},
+                               {"three bodies in one file", {box, c, bolt}, 3, 0, -1}};
+    bool ok = true;
+    std::string notes;
+    for (const auto &w : wants) {
+      std::vector<bce::Shape> shapes;
+      bool built = true;
+      for (BKShape *x : w.shapes) {
+        built = built && x;
+        if (x) shapes.push_back(bce::heldShape(x));
+      }
+      std::string text, again, why;
+      std::vector<std::string> names{"Bolt’s 'part' 1"};
+      bool wrote = built && bce::stepText(shapes, names, "test.step", text, why) && bce::stepText(shapes, names, "test.step", again, why);
+      Read r = wrote ? read(text) : Read{};
+      double want = 0;
+      for (const auto &x : shapes) {
+        bce::Solid m;
+        bce::mesh(x, bce::stepDeflection, m);
+        want += m.meshVolume();
+      }
+      bool good = wrote && r.ok && r.solids == w.solids && r.voids == w.voids && (w.faces < 0 || r.faces == w.faces) && r.products == (int)shapes.size() &&
+                  std::fabs(r.volume - want) <= 1e-9 * want && r.off <= 1e-6 && data(text) == data(again) &&
+                  !r.names.empty() && r.names[0] == "'Bolt\\X2\\2019\\X0\\s ''part'' 1'";
+      char note[400];
+      snprintf(note, sizeof note, "%s%s: %d solids, %d voids, %d faces, volume %.6f (mesh %.6f), %.0f kB; %s", w.name, good ? "" : " ✗", r.solids, r.voids, r.faces,
+               r.volume, want, text.size() / 1024.0, wrote ? r.why.c_str() : why.c_str());
+      if (!good) ok = false, notes += std::string(note) + "\n  ";
+      else printf("  %s\n", note);
+    }
+    check("STEP: shapes written as closed solids and read back alike", ok, notes);
+    // Through the C API, to a file.
+    std::string path = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/bcad-engine-test.step";
+    const BKShape *two[2] = {box, bolt};
+    const char *named[2] = {"Box", "Bolt"};
+    bool wroteFile = bk_export_step(two, named, 2, path.c_str()) == 1;
+    std::string fileText;
+    if (FILE *fp = fopen(path.c_str(), "rb")) {
+      char buf[65536];
+      size_t n;
+      while ((n = fread(buf, 1, sizeof buf, fp)) > 0) fileText.append(buf, n);
+      fclose(fp);
+    }
+    Read rf = read(fileText);
+    check("STEP: written to a file through the C API", wroteFile && fileText.rfind("ISO-10303-21;", 0) == 0 && rf.ok && rf.solids == 2 && rf.products == 2,
+          wroteFile ? fmt("%.0f solids", rf.solids) + " " + rf.why : std::string(bk_last_error()));
+    remove(path.c_str());
+    for (BKShape *x : {box, c, s, drill, drilled, hollowed, k1, k2, touching, bolt, rounded}) bk_free(x);
   }
 
   // MARK: speed

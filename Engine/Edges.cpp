@@ -115,7 +115,7 @@ double lengthOf(const std::vector<V3> &pts) {
   return l;
 }
 
-// The material angle from face A's into-direction and normal and face B's into-direction (as OpenCascade's kernel counts it).
+// The material angle from face A's into-direction and normal and face B's into-direction.
 double materialAngle(V3 ia, V3 na, V3 ib) {
   double deg = trig::atan2(dot(ib, na), -dot(ib, ia)) * 180 / M_PI - 180;
   return deg <= 0 ? deg + 360 : deg;
@@ -362,7 +362,7 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
   }
   if (missing) *missing = miss;
 
-  // Runs meeting smoothly are taken whole (as OpenCascade rounds them): an edge going on from a chosen one's end the same
+  // Runs meeting smoothly are taken whole: an edge going on from a chosen one's end the same
   // way, beside one of its faces — or beside none, its faces going on smoothly from the edge's (where two roundings
   // meet at a corner, the line between them goes on from the sharp edge that ends there).
   Ends ends = endsOf(s, usable);

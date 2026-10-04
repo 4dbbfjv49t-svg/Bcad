@@ -9,8 +9,8 @@
 namespace bce {
 
 // An edge between two faces (or a run of edges meeting smoothly), seen at each of its points. Face A is the one whose
-// outward normal at the run's middle points most up (ties: most +y, then +x), as OpenCascade's kernel names them; the
-// "into" directions run from the edge square across it into each face.
+// outward normal at the run's middle points most up (ties: most +y, then +x); the "into" directions run from the edge
+// square across it into each face.
 struct Crease {
   std::vector<V3> pts;
   std::vector<int> fa, fb;          // the faces either side at each point (a run may pass from face to face)
@@ -26,12 +26,12 @@ struct Crease {
   double angleAt(size_t i) const;
 };
 
-// Edges a pick stands for on a mesh (as OpenCascade's kernel resolves them): an edge pick the edge through its point, a
+// Edges a pick stands for on a mesh: an edge pick the edge through its point, a
 // corner pick the edge at the corner leaving its face, a face pick its face's edges, a body pick every edge between faces
 // that don't meet smoothly. Runs meeting smoothly are taken whole. `missing` counts picks that match nothing.
 std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *picks, int count, int *missing);
 
-// The face a face pick (normal, a point on it) stands for (as OpenCascade's kernel finds it), or -1.
+// The face a face pick (normal, a point on it) stands for, or -1.
 int faceAt(const Solid &s, const double *pick);
 
 // The crease one pick stands for, described at the pick's point (an edge pick) or the middle of the longest edge; false
