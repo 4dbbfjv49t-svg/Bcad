@@ -13,7 +13,8 @@ enum SelfTest {
             if !cond { ok = false }
         }
         let k = Kernel.shared
-        k.clearance = 0.2
+        // Bolts and nuts at their exact sizes (shrinkage has a check of its own).
+        k.fit = Fit(clearance: 0.2, shrink: 0)
         // As exact as the engine tells a shape's box: to the last digits.
         let tight = 1e-9
         func mesh(_ n: Node) -> Mesh? { k.mesh(n) }
@@ -162,7 +163,7 @@ enum SelfTest {
                     let m = mesh(.fastener(fs))
                     let h = m?.size.z ?? 0
                     let tall = fs.length + (kind.nut || kind.countersunk || kind == .rod ? 0 : fs.height)
-                    let sizeOK = m.map { simd_reduce_max(simd_abs($0.size - fs.extent(clearance: 0.2))) < 0.05 } == true
+                    let sizeOK = m.map { simd_reduce_max(simd_abs($0.size - fs.extent(fit: k.fit))) < 0.05 } == true
                     check("\(fs.name) · \(kind)", m?.valid == true && abs(h - tall) < 0.01 && sizeOK && manifold(m!), String(format: "h %.2f · %.1f s", h, Date().timeIntervalSince(t0)))
                 }
             }
@@ -176,6 +177,18 @@ enum SelfTest {
                   && mesh(.fastener(narrower))?.valid == true, String(format: "T%.0f", narrower.drive))
             let phHead = Fastener(kind: .phCone, size: 4).setting(.drive, 2)
             check("a Phillips size brings its recess", phHead.drive == 2 && phHead.recess == 5 && mesh(.fastener(phHead))?.valid == true)
+            // Shrinkage: a bolt made larger by as much as the plastic shrinks (0.5%: 1 / 0.995), its size known beforehand.
+            let m8 = Node.fastener(Fastener(kind: .hex, size: 4))
+            let exact = mesh(m8)
+            k.fit.shrink = 0.5
+            let grown = mesh(m8), s = 1 / 0.995
+            let larger = exact.flatMap { e in grown.map { g in
+                simd_reduce_max(simd_abs(g.size - e.size * s)) < 1e-4 && abs(g.volume / (e.volume * s * s * s) - 1) < 1e-3
+            } } == true
+            let known = grown.map { simd_reduce_max(simd_abs($0.size - m8.extent(fit: k.fit)!)) < 0.05 } == true
+            check("shrinkage makes a bolt larger to make up for it", larger && known && grown?.valid == true,
+                  String(format: "%.3f mm tall, exactly %.3f", grown?.size.z ?? 0, exact?.size.z ?? 0))
+            k.fit.shrink = 0
         }
         _ = k.takeProblems()
         var misfit = Fastener(kind: .torx, size: 4)
@@ -1301,7 +1314,7 @@ enum SelfTest {
             let threaded: Bool = { if case .fastener(let f) = lib.body(bolt.id)?.node { return f.size == 5 } else { return false } }()
             check("a bolt's thread changed is built", threaded && !(lib.meshes[bolt.id]?.vertices.isEmpty ?? true))
             // Settings back to their defaults.
-            lib.updateSettings { $0.snap = 5; $0.clearance = 0.4 }
+            lib.updateSettings { $0.snap = 5; $0.clearance = 0.4; $0.shrink = 1 }
             lib.restoreDefaults()
             check("settings back to their defaults", lib.settings == Settings())
             // A new document over unsaved work: Cancel keeps it, Don't Save lets it go.
@@ -1338,8 +1351,11 @@ enum SelfTest {
         try? FileManager.default.createDirectory(at: samplesDir, withIntermediateDirectories: true)
         func block(_ s: Double) -> Node { .primitive(Primitive(kind: .box, size: [s, s, s])) }
         // Standing on the bed at (x, y).
+        // (Bolts and nuts as the app's settings make them, as saving does.)
+        let fit = lib.settings.fit
+        k.queue.sync { k.fit = fit }
         func standing(_ name: String, _ color: SIMD3<UInt8>, _ node: Node, _ x: Double, _ y: Double) -> Solid {
-            let height = node.extent(clearance: k.clearance)?.z ?? 20
+            let height = node.extent(fit: fit)?.z ?? 20
             return Solid(name: name, color: color, node: node, place: Placement(move: SIMD3(x, y, height / 2)))
         }
         let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))

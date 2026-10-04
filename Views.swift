@@ -2013,6 +2013,9 @@ struct SettingsPane: View {
                 SettingLine(title: L("Thread clearance"), detail: L("Thins bolt threads and widens nut threads so printed parts fit · 0.00 is the exact ISO size")) {
                     MMField(value: s.clearance, unit: L("mm"), range: 0...2, width: 58) { v in lib.updateSettings { $0.clearance = v } }
                 }
+                SettingLine(title: L("Material shrinkage"), detail: L("Plastic shrinks as it cools, so bolts and nuts are made this much larger · 0.00 leaves them as drawn")) {
+                    MMField(value: s.shrink, unit: "%", range: 0...5, width: 58) { v in lib.updateSettings { $0.shrink = v } }
+                }
                 SettingsTitle(text: L("Other shortcuts"))
                 ForEach(fixed, id: \.0) { title, keys in
                     HStack {

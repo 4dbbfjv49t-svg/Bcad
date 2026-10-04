@@ -367,12 +367,20 @@ struct Fastener: Codable, Hashable, Sendable {
         }
     }
 
-    // Its bounding size; the kernel centres it on its own origin like a primitive.
-    func extent(clearance: Double) -> SIMD3<Double> {
+    // Its bounding size as built; the kernel centres it on its own origin like a primitive.
+    func extent(fit: Fit) -> SIMD3<Double> {
         var b = c, out = [0.0, 0.0, 0.0]
-        bk_fastener_extent(&b, clearance, &out)
-        return SIMD3(out[0], out[1], out[2])
+        bk_fastener_extent(&b, fit.clearance, &out)
+        return SIMD3(out[0], out[1], out[2]) * fit.scale
     }
+}
+
+// How printed bolts and nuts are made to fit: the gap between their threads (mm), and how much plastic shrinks as it cools
+// (%), which they're made larger by so they cool to their true size.
+struct Fit: Hashable, Sendable {
+    var clearance = 0.2
+    var shrink = 0.5
+    var scale: Double { 1 / (1 - shrink / 100) }
 }
 
 extension Fastener {
@@ -585,10 +593,10 @@ indirect enum Node: Codable, Hashable, Sendable {
     }
 
     // The bounding size of a primitive or a fastener, which sit centred on their own origin; none for a merged shape.
-    func extent(clearance: Double) -> SIMD3<Double>? {
+    func extent(fit: Fit) -> SIMD3<Double>? {
         switch self {
         case .primitive(let p): p.extent
-        case .fastener(let f): f.extent(clearance: clearance)
+        case .fastener(let f): f.extent(fit: fit)
         default: nil
         }
     }
@@ -919,15 +927,18 @@ final class Kernel: @unchecked Sendable {
     let queue = Worker()
     private var cache: [Key: ShapeRef] = [:]
     private(set) var problems: [String] = []
-    var clearance = 0.2
+    var fit = Fit()
 
-    // A shape as built for a clearance (to the thousandth of a millimetre): hashed as it is, nothing encoded.
+    // A shape as built for a fit (its clearance to the thousandth of a millimetre, its shrinkage to the thousandth of a
+    // percent): hashed as it is, nothing encoded.
     private struct Key: Hashable {
         let node: Node
-        let clearance: Double
+        let fit: Fit
     }
 
-    private func key(_ node: Node) -> Key { Key(node: node, clearance: (clearance * 1000).rounded() / 1000) }
+    private func key(_ node: Node) -> Key {
+        Key(node: node, fit: Fit(clearance: (fit.clearance * 1000).rounded() / 1000, shrink: (fit.shrink * 1000).rounded() / 1000))
+    }
 
     func takeProblems() -> [String] { defer { problems = [] }; return problems }
 
@@ -963,7 +974,12 @@ final class Kernel: @unchecked Sendable {
             return made(p.params.withUnsafeBufferPointer { bk_primitive(Int32(p.kind.rawValue), $0.baseAddress) })
         case .fastener(let f):
             var b = f.c
-            return made(bk_fastener(&b, clearance))
+            guard let p = made(bk_fastener(&b, fit.clearance)) else { return nil }
+            let s = fit.scale
+            if s == 1 { return p }
+            // Larger by as much as the plastic will shrink.
+            defer { bk_free(p) }
+            return made([s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0].withUnsafeBufferPointer { bk_transform(p, $0.baseAddress) })
         case .group(let op, let parts):
             // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
@@ -1385,6 +1401,8 @@ struct Settings: Codable, Equatable {
     var dropToBed = true
     var bed = SIMD3<Double>(256, 256, 256)
     var clearance = 0.2
+    // Percent.
+    var shrink = 0.5
     var autoLink = true
     var uniform = false
     // Resizing moves both sides of a size (the middle stays) instead of one (the left, front or bottom stays).
@@ -1404,6 +1422,7 @@ struct Settings: Codable, Equatable {
         dropToBed = (try? c.decode(Bool.self, forKey: .dropToBed)) ?? true
         bed = (try? c.decode(SIMD3<Double>.self, forKey: .bed)) ?? SIMD3(256, 256, 256)
         clearance = min(2, max(0, (try? c.decode(Double.self, forKey: .clearance)) ?? 0.2))
+        shrink = min(5, max(0, (try? c.decode(Double.self, forKey: .shrink)) ?? 0.5))
         autoLink = (try? c.decode(Bool.self, forKey: .autoLink)) ?? true
         uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
         symmetric = (try? c.decode(Bool.self, forKey: .symmetric)) ?? false
@@ -1412,6 +1431,7 @@ struct Settings: Codable, Equatable {
 
     // The print bed's longest side: no size or thread is made longer.
     var longest: Double { max(bed.x, bed.y, bed.z) }
+    var fit: Fit { Fit(clearance: clearance, shrink: shrink) }
 
     func key(_ a: Action) -> String { keys[a.rawValue] ?? Settings.defaultKeys[a.rawValue] ?? "" }
     func isOn(_ a: Action) -> Bool { !off.contains(a.rawValue) }
@@ -1776,7 +1796,7 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var undoStack: [Document] = []
     @ObservationIgnored private var redoStack: [Document] = []
     @ObservationIgnored private var built: [UUID: Node] = [:]
-    @ObservationIgnored private var builtClearance = -1.0
+    @ObservationIgnored private var builtFit: Fit?
     @ObservationIgnored private var pendingBuild = false
     // New shapes being tried before they go into the document.
     @ObservationIgnored private(set) var trying = false
@@ -1971,7 +1991,7 @@ final class Workbench: DesignHost {
         var s = settings
         change(&s)
         guard s != settings else { return }
-        let rebuild = s.clearance != settings.clearance
+        let rebuild = s.fit != settings.fit
         settings = s
         scheduleSave()
         if rebuild { rebuildScene() }
@@ -2074,7 +2094,7 @@ final class Workbench: DesignHost {
     func tryThen(_ nodes: [Node], apply: @escaping () -> Void) {
         guard !trying else { return }
         trying = true
-        let clearance = settings.clearance, note = L("Building…")
+        let fit = settings.fit, note = L("Building…")
         // Only a slow try shows that it's working.
         let shown = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
@@ -2082,7 +2102,7 @@ final class Workbench: DesignHost {
             withAnimation(Neon.spring) { self.busy = note }
         }
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             var problems: [String] = [], ok = true
             for n in nodes {
                 let (m, p) = Kernel.shared.attempt(n)
@@ -2147,7 +2167,7 @@ final class Workbench: DesignHost {
         var place = Placement(move: spawnPoint())
         // A shape whose size is known before it's built (a primitive, a bolt, centred on its own origin) goes straight down
         // onto the bed: nothing waits for its build, and a copy made at once sits where it does.
-        let known = settings.dropToBed ? node.extent(clearance: settings.clearance) : nil
+        let known = settings.dropToBed ? node.extent(fit: settings.fit) : nil
         if let e = known { place.move.z = e.z / 2 }
         let body = Solid(name: name, color: nextColor(), node: node, place: place)
         commit { $0.bodies.append(body) }
@@ -2249,11 +2269,11 @@ final class Workbench: DesignHost {
         guard !boxesAsked.contains(id) else { boxesWanted[id] = stance; return }
         guard let b = body(id) else { return }
         boxesAsked.insert(id)
-        let node = b.node, clearance = settings.clearance
+        let node = b.node, fit = settings.fit
         var still = b.place
         still.move = .zero
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             let box = Kernel.shared.bounds(node, still)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -2275,12 +2295,12 @@ final class Workbench: DesignHost {
         guard let box = worldBounds(b) else { return nil }
         if b.place.turn == SIMD3(0, 0, 0) { return box }
         if let k = turnedBoxes[b.id], k.exact, k.stance.turn == b.place.turn, k.stance.scale == b.place.scale { return box }
-        let node = b.node, clearance = settings.clearance
+        let node = b.node, fit = settings.fit
         var still = b.place
         still.move = .zero
         // (The engine may be busy with a long build: the window doesn't wait on it for more than a moment.)
         let exact = Kernel.shared.queue.sync(within: 1.5) { () -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? in
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             return Kernel.shared.bounds(node, still)
         } ?? nil
         guard let exact else { return box }
@@ -2696,9 +2716,9 @@ final class Workbench: DesignHost {
     // building them says is said when the resize ends, if it still holds.
     // False when the kernel was busy with other work too long to wait for.
     @discardableResult private func buildNow(_ shapes: [(UUID, Node)]) -> Bool {
-        let clearance = settings.clearance
+        let fit = settings.fit
         let made = Kernel.shared.queue.sync(within: 0.1) { () -> [(UUID, Node, Mesh?)] in
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             let out = shapes.map { ($0.0, $0.1, Kernel.shared.mesh($0.1, keep: false)) }
             _ = Kernel.shared.takeProblems()
             return out
@@ -2728,8 +2748,8 @@ final class Workbench: DesignHost {
 
     // How much a base grew along each of its own axes taking new sizes (1 where that can't be told).
     private func grown(_ node: Node, to next: Node) -> SIMD3<Double> {
-        let c = settings.clearance
-        guard let e0 = node.base.extent(clearance: c), let e1 = next.extent(clearance: c), e0.min() > 0 else { return SIMD3(1, 1, 1) }
+        let c = settings.fit
+        guard let e0 = node.base.extent(fit: c), let e1 = next.extent(fit: c), e0.min() > 0 else { return SIMD3(1, 1, 1) }
         return e1 / e0
     }
 
@@ -2755,9 +2775,9 @@ final class Workbench: DesignHost {
         let next = f(b.node.base)
         guard next != b.node.base else { return }
         begin()
-        let c = settings.clearance
+        let c = settings.fit
         var move = b.place.move
-        if !settings.symmetric, let e0 = b.node.base.extent(clearance: c), let e1 = next.extent(clearance: c) {
+        if !settings.symmetric, let e0 = b.node.base.extent(fit: c), let e1 = next.extent(fit: c) {
             move += b.place.rotation * (b.place.scale * (e1 - e0) / 2)
         }
         // A shape still called by its kind follows it (a hexagon prism made 7-sided is a 7-sided prism).
@@ -2773,9 +2793,9 @@ final class Workbench: DesignHost {
 
     // A body's node on a new base, its picks, planes and faces moved by as much as the base grew along each axis.
     private func followed(_ node: Node, to next: Node) -> Node {
-        let c = settings.clearance
+        let c = settings.fit
         let out = node.replacingBase { _ in next }
-        guard let e0 = node.base.extent(clearance: c), let e1 = next.extent(clearance: c), e0.min() > 0 else { return out }
+        guard let e0 = node.base.extent(fit: c), let e1 = next.extent(fit: c), e0.min() > 0 else { return out }
         return out.following(e1 / e0)
     }
 
@@ -2981,10 +3001,10 @@ final class Workbench: DesignHost {
     func workWithAngles() {
         guard let id = editBody, let b = body(id), let first = edgePicks.first, !angleOpening else { return }
         angleOpening = true
-        let node = b.node, picks = edgePicks, points = pickPoints, clearance = settings.clearance
+        let node = b.node, picks = edgePicks, points = pickPoints, fit = settings.fit
         Kernel.shared.queue.async {
             let k = Kernel.shared
-            k.clearance = clearance
+            k.fit = fit
             // Clicks on treated faces: the layers they lead to, each layer's clicked edges together.
             var spots: [Spot] = [], fresh: [Pick] = []
             for pk in picks {
@@ -3267,9 +3287,9 @@ final class Workbench: DesignHost {
     func rebuildScene() {
         if building { pendingBuild = true; return }
         let bodies = doc.bodies
-        let clearance = settings.clearance
+        let fit = settings.fit
         var todo: [(id: UUID, node: Node, name: String)] = []
-        let rebuildAll = clearance != builtClearance
+        let rebuildAll = fit != builtFit
         for b in bodies where rebuildAll || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node, b.name)) }
         let alive = Set(bodies.map(\.id))
         meshes = meshes.filter { alive.contains($0.key) }
@@ -3278,12 +3298,12 @@ final class Workbench: DesignHost {
         sceneVersion += 1
         guard !todo.isEmpty else { applyDrops(); return }
         building = true
-        builtClearance = clearance
+        builtFit = fit
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
         let note = L("Building…"), generation = self.generation
         if slow { busy = note }
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
             _ = Kernel.shared.takeProblems()
             var trouble: (name: String, problems: [String])?
@@ -3540,12 +3560,12 @@ final class Workbench: DesignHost {
             url = u
         }
         guard let url else { done(false); return }
-        let doc = self.doc, clearance = settings.clearance, bed = settings.bed, note = L("Saving…"), generation = self.generation
+        let doc = self.doc, fit = settings.fit, bed = settings.bed, note = L("Saving…"), generation = self.generation
         // What the engine can't build is saved as it's shown.
         let looks = meshes
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             let shown = { (b: Solid) in looks[b.id].flatMap { $0.vertices.isEmpty ? nil : $0.placed(b.place) } }
             var meshes: [(Solid, SavedMesh)] = [], problems: [(String, FileProblem)] = []
             for b in doc.printed(doc.bodies.filter { !$0.hidden }) {
@@ -3600,10 +3620,10 @@ final class Workbench: DesignHost {
 
     // Written on the kernel's thread; `done` learns whether it was.
     func export(_ bodies: [Solid], step: Bool, to url: URL, done: @escaping (Bool) -> Void = { _ in }) {
-        let clearance = settings.clearance, note = L("Exporting…"), printed = doc.printed(bodies)
+        let fit = settings.fit, note = L("Exporting…"), printed = doc.printed(bodies)
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
-            Kernel.shared.clearance = clearance
+            Kernel.shared.fit = fit
             var ok = false
             var problem: (String, FileProblem)?
             if step {
