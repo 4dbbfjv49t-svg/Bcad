@@ -2113,6 +2113,211 @@ int main() {
     for (BKShape *x : {sphere, torus, rs, rt, both2, ro, withVoid, rv, rm}) bk_free(x);
   }
 
+  // MARK: sculpting
+  // Brushes on a body made ready for sculpting: a ray finds its surface; Draw raises by its height (carves inverted), Grab
+  // carries the point under it exactly with the drag and leaves all beyond its radius be, Smooth evens out roughness, the
+  // mirror does the same across x = 0; every stroke undone and done again to the bit; broken meshes refused; quick.
+  {
+    printf("— sculpting\n");
+    using bce::V3;
+    struct Ready {
+      std::vector<float> pos;
+      std::vector<uint32_t> idx;
+    };
+    auto ready = [](const BKShape *x, double detail) {
+      Ready g;
+      BKSculptMesh *r = x ? bk_remesh(x, I, detail) : nullptr;
+      if (r) g.pos.assign(r->positions, r->positions + 3 * r->vertexCount), g.idx.assign(r->indices, r->indices + 3 * r->triangleCount);
+      bk_sculpt_mesh_free(r);
+      return g;
+    };
+    auto make = [](const Ready &g) { return bk_sculpt_new(g.pos.data(), (int)g.pos.size() / 3, g.idx.data(), (int)g.idx.size() / 3); };
+    auto pt = [](const BKSculpt *s, uint32_t i) {
+      const float *q = bk_sculpt_positions(s) + 3 * i;
+      return V3{q[0], q[1], q[2]};
+    };
+    auto nearest = [&](const BKSculpt *s, V3 c) {
+      uint32_t best = 0;
+      double d = INFINITY;
+      for (int i = 0; i < bk_sculpt_vertex_count(s); i++) {
+        double e = bce::norm2(pt(s, (uint32_t)i) - c);
+        if (e < d) d = e, best = (uint32_t)i;
+      }
+      return best;
+    };
+    auto stroke = [](BKSculpt *s, int brush, V3 from, std::vector<V3> to, double radius, double strength, bool mirror = false, bool invert = false) {
+      double a[3] = {from.x, from.y, from.z};
+      bk_sculpt_begin(s, brush, a, radius, strength, mirror, invert);
+      for (V3 q : to) {
+        double b[3] = {q.x, q.y, q.z};
+        bk_sculpt_dab(s, b, 1);
+      }
+      bk_sculpt_end(s);
+      return bk_sculpt_sync(s);
+    };
+    auto snapshot = [](const BKSculpt *s) {
+      int n = 3 * bk_sculpt_vertex_count(s);
+      std::vector<float> v(bk_sculpt_positions(s), bk_sculpt_positions(s) + n);
+      v.insert(v.end(), bk_sculpt_normals(s), bk_sculpt_normals(s) + n);
+      return v;
+    };
+    auto surface = [](const BKSculpt *s, double x, double y) {
+      double o[3] = {x, y, 100}, down[3] = {0, 0, -1}, at[3] = {0, 0, NAN}, n[3];
+      bk_sculpt_ray(s, o, down, at, n);
+      return at[2];
+    };
+
+    // A ray finds the top of a 20 mm box, facing up; one pointing away misses. Draw at the top's middle raises it by a
+    // tenth of the radius times the strength; inverted, carves it back down; nothing beyond the radius moves.
+    double b20[3] = {20, 20, 20}, d30[1] = {30};
+    BKShape *box = bk_primitive(BK_BOX, b20), *ball = bk_primitive(BK_SPHERE, d30);
+    Ready rb = ready(box, 0.5);
+    BKSculpt *sb = make(rb);
+    double o[3] = {0.3, 0.2, 100}, down[3] = {0, 0, -1}, up[3] = {0, 0, 1}, at[3] = {0}, nrm[3] = {0}, at2[3], nrm2[3];
+    int hit = sb ? bk_sculpt_ray(sb, o, down, at, nrm) : 0, missed = sb ? bk_sculpt_ray(sb, o, up, at2, nrm2) : 1;
+    check("sculpting: a ray finds the surface and its normal; one pointing away misses",
+          hit && near(at[0], 0.3, 1e-9) && near(at[2], 10, 0.011) && near(nrm[2], 1, 1e-6) && !missed, fmt("at z %.6f, normal z %.9f", at[2], nrm[2]));
+    bool drew = false, carved = false, kept = true;
+    double rose = 0, sank = 0;
+    if (sb && hit) {
+      uint32_t v = nearest(sb, {at[0], at[1], at[2]});
+      V3 c = pt(sb, v);
+      std::vector<float> before = snapshot(sb);
+      int changed = stroke(sb, BK_BRUSH_DRAW, c, {c}, 3, 0.5);
+      V3 after = pt(sb, v);
+      rose = after.z - c.z;
+      drew = changed > 0 && near(rose, 0.15, 1e-5) && near(after.x, c.x, 1e-6) && near(after.y, c.y, 1e-6);
+      for (int i = 0; i < bk_sculpt_vertex_count(sb); i++) {
+        V3 was{before[3 * i], before[3 * i + 1], before[3 * i + 2]};
+        if (bce::norm(was - c) >= 3 && !(pt(sb, (uint32_t)i) == was)) kept = false;
+      }
+      stroke(sb, BK_BRUSH_DRAW, c, {c}, 3, 0.5, false, true);
+      sank = pt(sb, v).z - after.z;
+      carved = near(sank, -0.15, 0.01);
+    }
+    check("sculpting: Draw raises by its height, inverted carves, nothing beyond its radius moves", drew && carved && kept,
+          fmt("rose %.6f, sank %.6f", rose, sank));
+
+    // Grab on a 30 mm ball: the point under it carried exactly by the drag, one halfway out by the falloff, the rest kept.
+    Ready rs = ready(ball, 0.5);
+    BKSculpt *ss = make(rs);
+    bool grabbed = false, fell = false, still = true, undid = false, redid = false, forgot = false;
+    double moved = 0;
+    if (ss) {
+      uint32_t v = nearest(ss, {0, 0, 15});
+      V3 from = pt(ss, v);
+      // A point about half the radius away.
+      uint32_t h = nearest(ss, {3, 0, std::sqrt(225.0 - 9)});
+      V3 hFrom = pt(ss, h);
+      std::vector<float> before = snapshot(ss);
+      V3 drag{2, 0, 5};
+      stroke(ss, BK_BRUSH_GRAB, from, {from + V3{0, 0, 3}, from + drag}, 6, 0.5);
+      std::vector<float> after = snapshot(ss);
+      moved = bce::norm(pt(ss, v) - (from + drag));
+      grabbed = moved < 1e-5;
+      double t = bce::norm2(hFrom - from) / 36, w = (1 - t) * (1 - t);
+      fell = bce::norm(pt(ss, h) - (hFrom + drag * w)) < 1e-5;
+      for (int i = 0; i < bk_sculpt_vertex_count(ss); i++) {
+        V3 was{before[3 * i], before[3 * i + 1], before[3 * i + 2]};
+        if (bce::norm(was - from) >= 6 && !(pt(ss, (uint32_t)i) == was)) still = false;
+      }
+      // Undone: every point and normal as it was, to the bit; done again: as it was after.
+      int u = bk_sculpt_undo(ss);
+      bk_sculpt_sync(ss);
+      undid = u == 1 && snapshot(ss) == before && bk_sculpt_undo(ss) == 0;
+      int r = bk_sculpt_redo(ss);
+      bk_sculpt_sync(ss);
+      redid = r == 1 && snapshot(ss) == after && bk_sculpt_redo(ss) == 0;
+      // A new stroke after an undo: what was undone can't be done again.
+      bk_sculpt_undo(ss);
+      stroke(ss, BK_BRUSH_INFLATE, from, {from}, 4, 0.5);
+      forgot = bk_sculpt_redo(ss) == 0;
+    }
+    check("sculpting: Grab carries the point exactly by the drag, nearer ones by the falloff, nothing beyond its radius",
+          grabbed && fell && still, fmt("off by %.2g", moved));
+    check("sculpting: a stroke undone and done again to the bit; a new one forgets what was undone", undid && redid && forgot);
+
+    // Smooth: a rough ball (points nudged in and out by 0.09 mm) evened out under the brush, and only there.
+    Ready rough = rs;
+    for (size_t i = 0; i < rough.pos.size() / 3; i++) {
+      double k = 1 + 0.006 * ((int)((uint32_t)(i * 2654435761u) >> 16) % 3 - 1);
+      for (int a = 0; a < 3; a++) rough.pos[3 * i + a] = (float)(rough.pos[3 * i + a] * k);
+    }
+    BKSculpt *sr = make(rough);
+    double was = 0, now = 0;
+    bool elsewhere = true;
+    if (sr) {
+      size_t np = rough.pos.size() / 3;
+      std::vector<std::vector<uint32_t>> nb(np);
+      for (size_t t = 0; t < rough.idx.size(); t += 3)
+        for (int q = 0; q < 3; q++) nb[rough.idx[t + q]].push_back(rough.idx[t + (q + 1) % 3]);
+      auto roughness = [&]() {
+        double sum = 0;
+        int count = 0;
+        for (size_t i = 0; i < np; i++) {
+          V3 q = pt(sr, (uint32_t)i);
+          if (bce::norm(q - V3{0, 0, 15}) > 3) continue;
+          V3 m{0, 0, 0};
+          for (uint32_t j : nb[i]) m += pt(sr, j);
+          sum += bce::norm(m / (double)nb[i].size() - q), count++;
+        }
+        return count ? sum / count : 0;
+      };
+      std::vector<float> before = snapshot(sr);
+      was = roughness();
+      V3 top = pt(sr, nearest(sr, {0, 0, 15}));
+      for (int k = 0; k < 3; k++) stroke(sr, BK_BRUSH_SMOOTH, top, {top}, 5, 1);
+      now = roughness();
+      for (size_t i = 0; i < np; i++)
+        if (before[3 * i + 2] < 5 && !(pt(sr, (uint32_t)i) == V3{before[3 * i], before[3 * i + 1], before[3 * i + 2]})) elsewhere = false;
+    }
+    check("sculpting: Smooth evens out roughness under it, and only there", sr && now < 0.4 * was && elsewhere, fmt("%.4f → %.4f", was, now));
+
+    // The mirror: a dab at x = 6 raises x = −6 as much; without it, x = −6 stays.
+    BKSculpt *sm = make(rs);
+    double left0 = 0, right0 = 0, left1 = 0, right1 = 0, left2 = 0;
+    if (sm) {
+      left0 = surface(sm, -6, 0.2), right0 = surface(sm, 6, 0.2);
+      V3 c{6, 0.2, right0};
+      stroke(sm, BK_BRUSH_DRAW, c, {c}, 3, 0.5, true);
+      left1 = surface(sm, -6, 0.2), right1 = surface(sm, 6, 0.2);
+      stroke(sm, BK_BRUSH_DRAW, c, {c}, 3, 0.5);
+      left2 = surface(sm, -6, 0.2);
+    }
+    check("sculpting: the mirror does the same across x = 0",
+          sm && right1 - right0 > 0.1 && near(left1 - left0, right1 - right0, 0.01) && left2 == left1,
+          fmt("raised %.4f and %.4f", right1 - right0, left1 - left0) + fmt(", then %.2g", left2 - left1));
+
+    // Broken meshes refused.
+    Ready broken = rb;
+    if (!broken.idx.empty()) broken.idx[4] = (uint32_t)(broken.pos.size() / 3);
+    BKSculpt *bad = broken.idx.empty() ? nullptr : make(broken);
+    std::string badWhy = bad ? "" : bk_last_error();
+    check("sculpting: a mesh with a corner that isn't there refused", !bad && badWhy == "sculpt: a triangle's corner is missing", badWhy);
+
+    // Quick: a stroke of 50 dabs (each found by a ray, as the app does) on a ball of more than 50,000 points.
+    Ready fine = ready(ball, 0.35);
+    BKSculpt *sf = make(fine);
+    double each = 0;
+    if (sf) {
+      double a0[3] = {-12, 0, surface(sf, -12, 0)};
+      auto t0 = std::chrono::steady_clock::now();
+      bk_sculpt_begin(sf, BK_BRUSH_DRAW, a0, 5, 0.5, 1, 0);
+      for (int k = 0; k < 50; k++) {
+        double ox[3] = {-12 + 0.5 * k, 0, 100}, a[3], n[3];
+        if (bk_sculpt_ray(sf, ox, down, a, n)) bk_sculpt_dab(sf, a, 1);
+        bk_sculpt_sync(sf);
+      }
+      bk_sculpt_end(sf);
+      each = ms(t0) / 50;
+    }
+    check("sculpting: a dab with the mirror on 50,000 points in under 2 ms", sf && bk_sculpt_vertex_count(sf) > 50000 && (!timed || each < 2),
+          fmt("%.3f ms each on %.0f points", each, sf ? bk_sculpt_vertex_count(sf) : 0));
+
+    for (BKSculpt *x : {sb, ss, sr, sm, sf}) bk_sculpt_free(x);
+    bk_free(box), bk_free(ball);
+  }
+
   // MARK: coverage
   // What the rest leaves out: distances (and the points they're between) on more shapes, sections across a corner, a face,
   // a whole body and a concave edge, edge picks of other shapes, boxes of treated shapes, picks that match nothing, the

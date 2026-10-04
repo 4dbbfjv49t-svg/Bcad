@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <unordered_map>
 
 namespace bce {
@@ -300,6 +302,376 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
     outPts.swap(moved);
   }
   return true;
+}
+
+
+// Sculpting.
+
+Sculptor::Sculptor(std::vector<V3> pts, std::vector<uint32_t> tris) : p(std::move(pts)), tri(std::move(tris)) {
+  size_t np = p.size(), nt = tri.size() / 3;
+  tri.resize(nt * 3);
+  // Per point: its triangles, and its neighbours, each in order.
+  vtStart.assign(np + 1, 0);
+  for (uint32_t v : tri) vtStart[v + 1]++;
+  for (size_t i = 0; i < np; i++) vtStart[i + 1] += vtStart[i];
+  vtList.resize(tri.size());
+  {
+    std::vector<uint32_t> fill(vtStart.begin(), vtStart.end() - 1);
+    for (size_t t = 0; t < nt; t++)
+      for (int q = 0; q < 3; q++) vtList[fill[tri[3 * t + q]]++] = (uint32_t)t;
+  }
+  nbStart.assign(np + 1, 0);
+  std::vector<uint32_t> near;
+  for (size_t i = 0; i < np; i++) {
+    near.clear();
+    for (uint32_t s = vtStart[i]; s < vtStart[i + 1]; s++)
+      for (int q = 0; q < 3; q++)
+        if (tri[3 * vtList[s] + q] != i) near.push_back(tri[3 * vtList[s] + q]);
+    std::sort(near.begin(), near.end());
+    near.erase(std::unique(near.begin(), near.end()), near.end());
+    nbList.insert(nbList.end(), near.begin(), near.end());
+    nbStart[i + 1] = (uint32_t)nbList.size();
+  }
+  n.resize(np);
+  for (size_t i = 0; i < np; i++) n[i] = normalAt((uint32_t)i);
+  if (nt) {
+    order.resize(nt);
+    leafOf.assign(nt, 0);
+    std::vector<V3> mid(nt);
+    for (size_t t = 0; t < nt; t++) order[t] = (uint32_t)t, mid[t] = (p[tri[3 * t]] + p[tri[3 * t + 1]] + p[tri[3 * t + 2]]) / 3;
+    nodes.reserve(nt / 2 + 1), parentOf.reserve(nt / 2 + 1);
+    build(0, (int)nt, mid, -1);
+  }
+  dirtyNode.assign(nodes.size(), 0);
+  seen.assign(np, 0);
+  touchedAt.assign(np, 0);
+  changedFlag.assign(np, 0);
+}
+
+void Sculptor::boxOf(uint32_t t, V3 &lo, V3 &hi) const {
+  V3 a = p[tri[3 * t]], b = p[tri[3 * t + 1]], c = p[tri[3 * t + 2]];
+  lo = vmin(vmin(a, b), c), hi = vmax(vmax(a, b), c);
+}
+
+V3 Sculptor::normalAt(uint32_t i) const {
+  V3 sum{0, 0, 0};
+  for (uint32_t s = vtStart[i]; s < vtStart[i + 1]; s++) {
+    const uint32_t *t = &tri[3 * vtList[s]];
+    sum += cross(p[t[1]] - p[t[0]], p[t[2]] - p[t[0]]);
+  }
+  return norm2(sum) > 0 ? unit(sum) : V3{0, 0, 0};
+}
+
+// Halved by the triangles' middles along the box's longest way (the same halves however they're sorted), down to four.
+int Sculptor::build(int first, int count, const std::vector<V3> &mid, int parent) {
+  int id = (int)nodes.size();
+  nodes.push_back({});
+  parentOf.push_back(parent);
+  const double big = std::numeric_limits<double>::infinity();
+  V3 lo{big, big, big}, hi{-big, -big, -big}, mlo = lo, mhi = hi;
+  for (int k = first; k < first + count; k++) {
+    V3 a, b;
+    boxOf(order[k], a, b);
+    lo = vmin(lo, a), hi = vmax(hi, b);
+    mlo = vmin(mlo, mid[order[k]]), mhi = vmax(mhi, mid[order[k]]);
+  }
+  nodes[id].lo = lo, nodes[id].hi = hi;
+  if (count <= 4) {
+    nodes[id].first = first, nodes[id].count = count;
+    for (int k = first; k < first + count; k++) leafOf[order[k]] = (uint32_t)id;
+    return id;
+  }
+  V3 span = mhi - mlo;
+  int axis = span.x >= span.y && span.x >= span.z ? 0 : span.y >= span.z ? 1 : 2;
+  int half = count / 2;
+  std::nth_element(order.begin() + first, order.begin() + first + half, order.begin() + first + count, [&](uint32_t a, uint32_t b) {
+    double x = mid[a][axis], y = mid[b][axis];
+    return x < y || (x == y && a < b);
+  });
+  int left = build(first, half, mid, id);
+  int right = build(first + half, count - half, mid, id);
+  nodes[id].left = left, nodes[id].right = right;
+  return id;
+}
+
+bool Sculptor::ray(V3 o, V3 d, V3 &at, V3 &normal) const {
+  if (nodes.empty() || !(norm2(d) > 0)) return false;
+  double best = std::numeric_limits<double>::infinity(), bu = 0, bv = 0;
+  int64_t hit = -1;
+  int stack[128], top = 0;
+  stack[top++] = 0;
+  while (top) {
+    const TreeNode &nd = nodes[stack[--top]];
+    double t0 = 0, t1 = best;
+    bool miss = false;
+    for (int a = 0; a < 3 && !miss; a++) {
+      if (d[a] == 0) {
+        miss = o[a] < nd.lo[a] || o[a] > nd.hi[a];
+        continue;
+      }
+      double ta = (nd.lo[a] - o[a]) / d[a], tb = (nd.hi[a] - o[a]) / d[a];
+      if (ta > tb) std::swap(ta, tb);
+      t0 = std::max(t0, ta), t1 = std::min(t1, tb);
+      miss = t0 > t1;
+    }
+    if (miss) continue;
+    if (nd.left >= 0) {
+      stack[top++] = nd.right, stack[top++] = nd.left;
+      continue;
+    }
+    for (int k = nd.first; k < nd.first + nd.count; k++) {
+      uint32_t t = order[k];
+      V3 A = p[tri[3 * t]], e1 = p[tri[3 * t + 1]] - A, e2 = p[tri[3 * t + 2]] - A;
+      V3 pv = cross(d, e2);
+      double det = dot(e1, pv);
+      if (det == 0) continue;
+      V3 tv = o - A, qv = cross(tv, e1);
+      double u = dot(tv, pv) / det, v = dot(d, qv) / det, s = dot(e2, qv) / det;
+      if (!(u >= 0 && v >= 0 && u + v <= 1 && s >= 0)) continue;
+      if (s < best || (s == best && (int64_t)t < hit)) best = s, hit = t, bu = u, bv = v;
+    }
+  }
+  if (hit < 0) return false;
+  const uint32_t *t = &tri[3 * hit];
+  at = o + d * best;
+  V3 m = n[t[0]] * (1 - bu - bv) + n[t[1]] * bu + n[t[2]] * bv;
+  normal = norm2(m) > 0 ? unit(m) : unit(cross(p[t[1]] - p[t[0]], p[t[2]] - p[t[0]]));
+  return true;
+}
+
+void Sculptor::within(V3 c, double r, std::vector<uint32_t> &out, std::vector<double> &weight) const {
+  out.clear(), weight.clear();
+  if (nodes.empty() || !(r > 0)) return;
+  if (++seenStamp == 0) std::fill(seen.begin(), seen.end(), 0), seenStamp = 1;
+  double r2 = r * r;
+  int stack[128], top = 0;
+  stack[top++] = 0;
+  while (top) {
+    const TreeNode &nd = nodes[stack[--top]];
+    double d2 = 0;
+    for (int a = 0; a < 3; a++) {
+      double e = std::max({nd.lo[a] - c[a], 0.0, c[a] - nd.hi[a]});
+      d2 += e * e;
+    }
+    if (d2 >= r2) continue;
+    if (nd.left >= 0) {
+      stack[top++] = nd.right, stack[top++] = nd.left;
+      continue;
+    }
+    for (int k = nd.first; k < nd.first + nd.count; k++)
+      for (int q = 0; q < 3; q++) {
+        uint32_t v = tri[3 * order[k] + q];
+        if (seen[v] == seenStamp) continue;
+        seen[v] = seenStamp;
+        if (norm2(p[v] - c) < r2) out.push_back(v);
+      }
+  }
+  std::sort(out.begin(), out.end());
+  weight.resize(out.size());
+  for (size_t k = 0; k < out.size(); k++) {
+    double f = 1 - norm2(p[out[k]] - c) / r2;
+    weight[k] = f * f;
+  }
+}
+
+void Sculptor::begin(int b, V3 at, double r, double s, bool mir, bool inv) {
+  if (stroking) end();
+  stroking = true, dabbed = false;
+  brush = b >= Grab && b <= Crease ? b : Draw;
+  radius = r > 1e-9 ? r : 1e-9, strength = std::min(1.0, std::max(0.0, s));
+  mirror = mir, invert = inv;
+  start = last = at;
+  if (++strokeId == 0) std::fill(touchedAt.begin(), touchedAt.end(), 0), strokeId = 1;
+  step = Step();
+  grabbed.clear(), grabWeight[0].clear(), grabWeight[1].clear(), grabFrom.clear();
+  if (brush != Grab) return;
+  within(at, radius, idx[0], wt[0]);
+  if (mirror) within(V3{-at.x, at.y, at.z}, radius, idx[1], wt[1]);
+  else idx[1].clear(), wt[1].clear();
+  size_t a = 0, c = 0;
+  while (a < idx[0].size() || c < idx[1].size()) {
+    bool fromA = c == idx[1].size() || (a < idx[0].size() && idx[0][a] <= idx[1][c]);
+    bool fromC = a == idx[0].size() || (c < idx[1].size() && idx[1][c] <= idx[0][a]);
+    grabbed.push_back(fromA ? idx[0][a] : idx[1][c]);
+    grabWeight[0].push_back(fromA ? wt[0][a++] : 0.0);
+    grabWeight[1].push_back(fromC ? wt[1][c++] : 0.0);
+    grabFrom.push_back(p[grabbed.back()]);
+  }
+}
+
+void Sculptor::offsets(V3 c, double pressure, std::vector<uint32_t> &which, std::vector<double> &w, std::vector<V3> &by) const {
+  within(c, radius, which, w);
+  by.assign(which.size(), V3{0, 0, 0});
+  if (which.empty()) return;
+  double s = strength * pressure * (invert ? -1 : 1);
+  // The surface's average way out under the brush, and its middle.
+  V3 out{0, 0, 0}, mid{0, 0, 0};
+  double total = 0;
+  for (size_t k = 0; k < which.size(); k++) out += n[which[k]] * w[k], mid += p[which[k]] * w[k], total += w[k];
+  out = norm2(out) > 0 ? unit(out) : V3{0, 0, 0};
+  if (total > 0) mid = mid / total;
+  for (size_t k = 0; k < which.size(); k++) {
+    uint32_t i = which[k];
+    V3 q = p[i];
+    V3 in = c - q;
+    in = in - out * dot(in, out);  // toward the brush's middle, along the surface
+    switch (brush) {
+      case Draw: by[k] = out * (s * radius * 0.1 * w[k]); break;
+      case Inflate: by[k] = n[i] * (s * radius * 0.1 * w[k]); break;
+      case Smooth: {
+        uint32_t a = nbStart[i], e = nbStart[i + 1];
+        if (a == e) break;
+        V3 m{0, 0, 0};
+        for (uint32_t j = a; j < e; j++) m += p[nbList[j]];
+        by[k] = (m / (double)(e - a) - q) * std::min(1.0, std::fabs(s) * w[k]);
+        break;
+      }
+      case Flatten: by[k] = out * (-dot(q - mid, out) * std::max(-1.0, std::min(1.0, s * w[k]))); break;
+      case Pinch: by[k] = in * (s * 0.3 * w[k]); break;
+      case Crease: by[k] = out * (-s * radius * 0.08 * w[k]) + in * (std::fabs(s) * 0.3 * w[k]); break;
+    }
+  }
+}
+
+// One dab: what it does at c and (with the mirror) across x = 0, both from the points as they are, together.
+void Sculptor::dabAt(V3 c, double pressure) {
+  offsets(c, pressure, idx[0], wt[0], off[0]);
+  if (mirror) offsets(V3{-c.x, c.y, c.z}, pressure, idx[1], wt[1], off[1]);
+  else idx[1].clear(), off[1].clear();
+  sum.clear(), offSum.clear();
+  size_t a = 0, b = 0;
+  while (a < idx[0].size() || b < idx[1].size()) {
+    if (b == idx[1].size() || (a < idx[0].size() && idx[0][a] < idx[1][b])) sum.push_back(idx[0][a]), offSum.push_back(off[0][a++]);
+    else if (a == idx[0].size() || idx[1][b] < idx[0][a]) sum.push_back(idx[1][b]), offSum.push_back(off[1][b++]);
+    else sum.push_back(idx[0][a]), offSum.push_back(off[0][a++] + off[1][b++]);
+  }
+  for (size_t k = 0; k < sum.size(); k++) record(sum[k]), p[sum[k]] += offSum[k];
+  moved(sum);
+}
+
+void Sculptor::dab(V3 at, double pressure) {
+  if (!stroking) return;
+  pressure = std::min(1.0, std::max(0.0, pressure));
+  if (brush == Grab) {
+    V3 d = at - start, md{-d.x, d.y, d.z};
+    for (size_t k = 0; k < grabbed.size(); k++) record(grabbed[k]), p[grabbed[k]] = grabFrom[k] + d * grabWeight[0][k] + md * grabWeight[1][k];
+    moved(grabbed);
+    last = at;
+    return;
+  }
+  if (!dabbed) {
+    dabAt(at, pressure);
+    last = at, dabbed = true;
+    return;
+  }
+  // Every fifth of the radius along the way.
+  double gap = norm(at - last), spacing = 0.2 * radius;
+  if (!(gap >= spacing)) return;
+  int steps = (int)std::min(1000.0, std::floor(gap / spacing));
+  V3 way = (at - last) / gap;
+  for (int s = 1; s <= steps; s++) dabAt(last + way * (s * spacing), pressure);
+  last = last + way * (steps * spacing);
+}
+
+void Sculptor::record(uint32_t i) {
+  if (touchedAt[i] == strokeId) return;
+  touchedAt[i] = strokeId;
+  step.idx.push_back(i), step.before.push_back(p[i]);
+}
+
+void Sculptor::end() {
+  if (!stroking) return;
+  stroking = false;
+  std::vector<uint32_t> by(step.idx.size());
+  for (size_t k = 0; k < by.size(); k++) by[k] = (uint32_t)k;
+  std::sort(by.begin(), by.end(), [&](uint32_t a, uint32_t b) { return step.idx[a] < step.idx[b]; });
+  Step s;
+  for (uint32_t k : by) {
+    uint32_t i = step.idx[k];
+    if (p[i] == step.before[k]) continue;
+    s.idx.push_back(i), s.before.push_back(step.before[k]), s.after.push_back(p[i]);
+  }
+  step = Step();
+  if (!s.idx.empty()) keep(std::move(s));
+}
+
+// Kept to undo: the last 100 strokes, or fewer when they've moved more than 4 million points between them.
+void Sculptor::keep(Step s) {
+  for (const auto &u : undone) kept -= u.idx.size();
+  undone.clear();
+  kept += s.idx.size();
+  done.push_back(std::move(s));
+  size_t drop = 0;
+  while (done.size() - drop > 1 && (done.size() - drop > 100 || kept > 4000000)) kept -= done[drop++].idx.size();
+  done.erase(done.begin(), done.begin() + drop);
+}
+
+bool Sculptor::undo() {
+  if (stroking) end();
+  if (done.empty()) return false;
+  undone.push_back(std::move(done.back()));
+  done.pop_back();
+  restore(undone.back(), true);
+  return true;
+}
+
+bool Sculptor::redo() {
+  if (stroking) end();
+  if (undone.empty()) return false;
+  done.push_back(std::move(undone.back()));
+  undone.pop_back();
+  restore(done.back(), false);
+  return true;
+}
+
+void Sculptor::restore(const Step &s, bool back) {
+  for (size_t k = 0; k < s.idx.size(); k++) p[s.idx[k]] = back ? s.before[k] : s.after[k];
+  moved(s.idx);
+}
+
+void Sculptor::moved(const std::vector<uint32_t> &which) {
+  if (++seenStamp == 0) std::fill(seen.begin(), seen.end(), 0), seenStamp = 1;
+  around.clear();
+  for (uint32_t i : which) {
+    if (seen[i] != seenStamp) seen[i] = seenStamp, around.push_back(i);
+    for (uint32_t s = vtStart[i]; s < vtStart[i + 1]; s++) {
+      uint32_t t = vtList[s];
+      for (int x = (int)leafOf[t]; x >= 0 && !dirtyNode[x]; x = parentOf[x]) dirtyNode[x] = 1, dirtyList.push_back((uint32_t)x);
+      for (int q = 0; q < 3; q++) {
+        uint32_t v = tri[3 * t + q];
+        if (seen[v] != seenStamp) seen[v] = seenStamp, around.push_back(v);
+      }
+    }
+  }
+  // Boxes made again from the leaves up (a node's children come after it).
+  std::sort(dirtyList.begin(), dirtyList.end(), std::greater<uint32_t>());
+  for (uint32_t x : dirtyList) {
+    TreeNode &nd = nodes[x];
+    dirtyNode[x] = 0;
+    if (nd.left >= 0) {
+      nd.lo = vmin(nodes[nd.left].lo, nodes[nd.right].lo), nd.hi = vmax(nodes[nd.left].hi, nodes[nd.right].hi);
+      continue;
+    }
+    boxOf(order[nd.first], nd.lo, nd.hi);
+    for (int k = nd.first + 1; k < nd.first + nd.count; k++) {
+      V3 a, b;
+      boxOf(order[k], a, b);
+      nd.lo = vmin(nd.lo, a), nd.hi = vmax(nd.hi, b);
+    }
+  }
+  dirtyList.clear();
+  for (uint32_t v : around) {
+    n[v] = normalAt(v);
+    if (!changedFlag[v]) changedFlag[v] = 1, changed.push_back(v);
+  }
+}
+
+std::vector<uint32_t> Sculptor::takeChanged() {
+  std::vector<uint32_t> out;
+  out.swap(changed);
+  std::sort(out.begin(), out.end());
+  for (uint32_t v : out) changedFlag[v] = 0;
+  return out;
 }
 
 }  // namespace bce

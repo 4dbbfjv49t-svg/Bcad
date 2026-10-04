@@ -519,7 +519,7 @@ struct ModeBar: View {
         case .measure:
             lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
                 : lib.measureB == nil ? L("Click the second point") : L("Click to measure again · Esc clears")
-        case .sculpt: L("Remesh makes it again of even triangles the detail size apart · Done keeps it")
+        case .sculpt: L("Drag on the shape to sculpt · Shift smooths · ⌥ turns the brush around · [ ] size · drag beside it to turn the view")
         default: L("Drag the arrow to move the plane · drag a ring to tilt it")
         }
     }
@@ -589,22 +589,40 @@ struct ModeBar: View {
             .disabled(lib.editBody == nil)
     }
 
-    // The detail to make it again at, Remesh, how many triangles it has, Done.
+    // The brushes and the mirror; the brush's size and strength, the detail to make it again at, Remesh, how many
+    // triangles it has, Done.
     @ViewBuilder private var sculpt: some View {
-        Text(L("Detail")).foregroundStyle(Ink.text.opacity(0.55))
-        MMField(value: lib.sculptDetail, unit: L("mm"), range: 0.05...20, width: 58) { lib.sculptDetail = $0 }
-        Button(L("Remesh")) { lib.remeshSculpt() }
-            .buttonStyle(PillStyle(tint: lib.accent2))
-            .frame(width: 90)
-            .disabled(lib.sculptBusy || lib.sculptNow == nil)
-        if let s = lib.sculptNow {
-            Text(L("{n} triangles", ["n": s.data.triangleCount])).foregroundStyle(Ink.text.opacity(0.55)).monospacedDigit()
-                .contentTransition(.numericText())
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 4) {
+                ForEach(SculptBrush.allCases, id: \.self) { b in
+                    Chip(text: b.label, chosen: lib.sculptBrush == b, tint: lib.accent2) { lib.sculptBrush = b }
+                        .help(L(b.hint))
+                }
+                Chip(text: L("Mirror X"), chosen: lib.sculptMirror, tint: Axis.color(0)) { lib.sculptMirror.toggle() }
+                    .help(L("Shapes both sides of the body alike, across its middle"))
+                    .padding(.leading, 6)
+            }
+            HStack(spacing: 10) {
+                Text(L("Radius")).foregroundStyle(Ink.text.opacity(0.55))
+                MMField(value: lib.sculptRadius, unit: L("mm"), range: 0.05...500, width: 58) { lib.sculptRadius = $0 }
+                Text(L("Strength")).foregroundStyle(Ink.text.opacity(0.55))
+                MMField(value: lib.sculptStrength * 100, unit: "%", range: 1...100, width: 52) { lib.sculptStrength = $0 / 100 }
+                Text(L("Detail")).foregroundStyle(Ink.text.opacity(0.55))
+                MMField(value: lib.sculptDetail, unit: L("mm"), range: 0.05...20, width: 58) { lib.sculptDetail = $0 }
+                Button(L("Remesh")) { lib.remeshSculpt() }
+                    .buttonStyle(PillStyle(tint: lib.accent2))
+                    .frame(width: 90)
+                    .disabled(lib.sculptBusy || lib.sculpt == nil)
+                if let s = lib.sculpt {
+                    Text(L("{n} triangles", ["n": s.triangleCount])).foregroundStyle(Ink.text.opacity(0.55)).monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+                Button(L("Done")) { lib.commitSculpt() }
+                    .buttonStyle(PillStyle(tint: lib.accent))
+                    .frame(width: 90)
+                    .disabled(lib.sculptBusy || lib.sculpt == nil)
+            }
         }
-        Button(L("Done")) { lib.commitSculpt() }
-            .buttonStyle(PillStyle(tint: lib.accent))
-            .frame(width: 90)
-            .disabled(lib.sculptBusy || lib.sculptNow == nil)
     }
 
     @ViewBuilder private var split: some View {

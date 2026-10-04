@@ -1920,13 +1920,21 @@ final class Workbench: DesignHost {
     var hollowThickness = 2.0
     var focusWall: Int?
     var thread = Fastener(kind: .hex, size: 4)
-    // Sculpt: the body being shaped and its mesh as it is now (the document has it only on Done; shown in the body's
-    // place meanwhile), the detail Remesh makes it again at, and whether that's under way.
+    // Sculpt: the body being shaped and the engine's live mesh of it (strokes change it at once; the document has it only
+    // on Done, and it's shown in the body's place meanwhile), the sessions a Remesh replaced and those an undo of one
+    // put aside, the brush and its sizes, the detail Remesh makes it again at, and whether that's under way.
     var sculptBody: UUID?
-    var sculptNow: Sculpt?
+    var sculpt: SculptSession?
+    @ObservationIgnored private var sculptPast: [SculptSession] = []
+    @ObservationIgnored private var sculptAhead: [SculptSession] = []
+    var sculptStrokes = 0
     var sculptDetail = 1.0
     var sculptBusy = false
-    @ObservationIgnored var sculptShown: Mesh?
+    var sculptBrush = SculptBrush.draw
+    var sculptRadius = 3.0
+    var sculptStrength = 0.5
+    var sculptMirror = false
+    var sculptRing: SculptRing?
     @ObservationIgnored private var sculptToken = 0
     var splitAxis = 2
     // The ruler: its ends, the end the pointer is on, and the shortest distance between surfaces when an end is one.
@@ -2285,12 +2293,14 @@ final class Workbench: DesignHost {
     }
 
     func undo() {
+        if mode == .sculpt { sculptUndo(); return }
         guard let d = undoStack.popLast() else { return }
         redoStack.append(doc)
         restore(d)
     }
 
     func redo() {
+        if mode == .sculpt { sculptRedo(); return }
         guard let d = redoStack.popLast() else { return }
         undoStack.append(doc)
         restore(d)
@@ -3054,35 +3064,43 @@ final class Workbench: DesignHost {
     func enterSculpt() {
         guard selection.count == 1, let b = primary else { flash(L("Select a shape to sculpt")); return }
         if case .sculpt(let s) = b.node {
-            openSculpt(b.id, s.stretched(b.place.scale))
+            let ready = s.stretched(b.place.scale)
+            made(b.id, nil, scale: SIMD3(1, 1, 1), detail: s.detail, from: ready.data) { [weak self] n in self?.openSculpt(b.id, n) }
             return
         }
         let size = meshes[b.id].map { simd_reduce_max($0.size * simd_abs(b.place.scale)) } ?? 20
         let detail = Workbench.round2(min(5, max(0.05, size / 60)))
-        made(b.id, b.node, scale: b.place.scale, detail: detail) { [weak self] s in
-            self?.openSculpt(b.id, s)
+        made(b.id, b.node, scale: b.place.scale, detail: detail) { [weak self] n in
+            self?.openSculpt(b.id, n)
             self?.flash(L("{body} is now a mesh to shape: its exact sizes and roundings become part of its surface", ["body": b.name]))
         }
     }
 
-    // Made again evenly at the detail asked.
+    // Made again evenly at the detail asked (⌘Z takes it back to how it was).
     func remeshSculpt() {
-        guard let id = sculptBody, let s = sculptNow else { return }
-        made(id, .sculpt(s), scale: SIMD3(1, 1, 1), detail: sculptDetail) { [weak self] s in self?.show(s) }
+        guard let id = sculptBody, let s = sculpt else { return }
+        let node = Node.sculpt(Sculpt(data: s.data(), detail: s.detail))
+        made(id, node, scale: SIMD3(1, 1, 1), detail: sculptDetail) { [weak self] n in
+            guard let self else { return }
+            self.sculptPast.append(s)
+            if self.sculptPast.count > 3 { self.sculptPast.removeFirst() }
+            self.sculptAhead = []
+            self.useSculpt(n)
+        }
     }
 
     // The body takes the sculpted mesh (its stretch now in it): one step to undo.
     func commitSculpt() {
-        guard let id = sculptBody, let s = sculptNow, let b = body(id) else { leaveSculpt(); return }
-        let node = Node.sculpt(s)
+        guard let id = sculptBody, let s = sculpt, !sculptBusy, let b = body(id) else { leaveSculpt(); return }
+        let node = Node.sculpt(Sculpt(data: s.data(), detail: s.detail))
         if node == b.node && b.place.scale == SIMD3(1, 1, 1) { leaveSculpt(); return }
         begin()
         mutate(id) {
             $0.node = node
             $0.place.scale = SIMD3(1, 1, 1)
         }
-        // (Shown as it was while sculpting: the same mesh, built already.)
-        if let m = sculptShown { meshes[id] = m }
+        // (Shown as it was while sculpting until the kernel's own mesh of it is built.)
+        meshes[id] = s.mesh()
         leaveSculpt()
         rebuildScene()
     }
@@ -3091,46 +3109,41 @@ final class Workbench: DesignHost {
         sculptToken += 1
         withAnimation(Neon.spring) {
             sculptBody = nil
-            sculptNow = nil
             sculptBusy = false
             if mode == .sculpt { mode = .select }
         }
-        sculptShown = nil
+        sculpt = nil
+        sculptPast = []
+        sculptAhead = []
+        sculptRing = nil
         sceneVersion += 1
     }
 
-    private func openSculpt(_ id: UUID, _ s: Sculpt) {
+    private func openSculpt(_ id: UUID, _ s: SculptSession) {
         withAnimation(Neon.spring) {
             sculptBody = id
-            sculptDetail = s.detail
             mode = .sculpt
             edgePicks = []
             clearMeasure()
         }
-        if sculptNow == s, sculptShown != nil { return }
-        sculptNow = s
-        // (Its mesh is built on the kernel's thread, then shown.)
-        let token = sculptToken
-        Kernel.shared.queue.async {
-            let m = Kernel.shared.mesh(.sculpt(s))
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard token == self.sculptToken, self.sculptNow == s else { return }
-                    self.sculptShown = m
-                    self.sceneVersion += 1
-                }
-            }
-        }
+        sculptPast = []
+        sculptAhead = []
+        // A brush a tenth of the body across, at least four triangles wide.
+        sculptRadius = Workbench.round2(max(4 * s.detail, s.size / 10))
+        useSculpt(s)
     }
 
-    private func show(_ s: Sculpt) {
-        sculptNow = s
+    private func useSculpt(_ s: SculptSession) {
+        sculpt = s
         sculptDetail = s.detail
+        sculptRing = nil
+        sceneVersion += 1
     }
 
-    // Makes `node` ready to sculpt at `detail`, its stretch taken in, on the kernel's thread; then `done` with the mesh
-    // (already built to show), unless the mode was left meanwhile.
-    private func made(_ id: UUID, _ node: Node, scale: SIMD3<Double>, detail: Double, done: @escaping (Sculpt) -> Void) {
+    // Makes `node` (or a sculpted body's own mesh, `from`) ready to sculpt at `detail`, its stretch taken in, on the
+    // kernel's thread; then `done` with it, unless the mode was left meanwhile.
+    private func made(_ id: UUID, _ node: Node?, scale: SIMD3<Double>, detail: Double, from: SculptData? = nil,
+                      done: @escaping (SculptSession) -> Void) {
         guard !sculptBusy else { return }
         sculptBusy = true
         let fit = settings.fit, note = L("Getting ready to sculpt…"), token = sculptToken
@@ -3138,24 +3151,84 @@ final class Workbench: DesignHost {
         Kernel.shared.queue.async {
             Kernel.shared.fit = fit
             _ = Kernel.shared.takeProblems()
-            let s = Kernel.shared.remesh(node, scale: scale, detail: detail).map { Sculpt(data: $0, detail: detail) }
-            let m = s.flatMap { Kernel.shared.mesh(.sculpt($0)) }
-            let problems = Kernel.shared.takeProblems()
+            let data = from ?? node.flatMap { Kernel.shared.remesh($0, scale: scale, detail: detail) }
+            let s = data.flatMap { SculptSession($0, detail: detail) }
+            var problems = Kernel.shared.takeProblems()
+            if data != nil && s == nil { problems.append(String(cString: bk_last_error())) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.sculptBusy = false
                     self.ended(note)
                     guard token == self.sculptToken, self.body(id) != nil else { return }
-                    guard let s, let m else {
+                    guard let s else {
                         self.report(problems.isEmpty ? ["failed"] : problems)
                         return
                     }
-                    self.sculptShown = m
                     done(s)
-                    self.sceneVersion += 1
                 }
             }
         }
+    }
+
+    // Where the body being sculpted is: its placement without its stretch (that's in its mesh while it's shaped).
+    var sculptPlace: Placement? {
+        guard let id = sculptBody, var p = body(id)?.place else { return nil }
+        p.scale = SIMD3(1, 1, 1)
+        return p
+    }
+
+    // A stroke: begun where the pointer met the body (its own coordinates), dabbed along the way, ended. Shift smooths
+    // whatever the brush; ⌥ inverts it. The brush it took (nil when there's nothing to sculpt).
+    @discardableResult
+    func sculptBegin(at p: SIMD3<Double>, smooth: Bool, invert: Bool, pressure: Double = 1) -> SculptBrush? {
+        guard let s = sculpt, !sculptBusy else { return nil }
+        let brush = smooth ? .smooth : sculptBrush
+        // A new stroke after undoing a Remesh: that Remesh can't be done again.
+        sculptAhead = []
+        s.begin(brush, at: p, radius: sculptRadius, strength: sculptStrength, mirror: sculptMirror, invert: invert)
+        s.dab(p, pressure: pressure)
+        sceneVersion += 1
+        return brush
+    }
+
+    func sculptDab(at p: SIMD3<Double>, pressure: Double = 1) {
+        sculpt?.dab(p, pressure: pressure)
+        sceneVersion += 1
+    }
+
+    func sculptEnd() {
+        sculpt?.end()
+        sculptStrokes += 1
+        sceneVersion += 1
+    }
+
+    // ⌘Z while sculpting: the last stroke, then the last Remesh.
+    func sculptUndo() {
+        guard let s = sculpt, !sculptBusy else { return }
+        if s.undo() {
+            sculptStrokes += 1
+            sceneVersion += 1
+        } else if let before = sculptPast.popLast() {
+            sculptAhead.append(s)
+            useSculpt(before)
+        }
+    }
+
+    func sculptRedo() {
+        guard let s = sculpt, !sculptBusy else { return }
+        if s.redo() {
+            sculptStrokes += 1
+            sceneVersion += 1
+        } else if let after = sculptAhead.popLast() {
+            sculptPast.append(s)
+            useSculpt(after)
+        }
+    }
+
+    // [ and ]: the brush smaller or larger.
+    func sculptResize(_ up: Bool) {
+        sculptRadius = Workbench.round2(min(500, max(0.05, sculptRadius * (up ? 1.15 : 1 / 1.15))))
+        sceneVersion += 1
     }
 
     // A detail to two significant digits (0.33, 1.2, 4).
@@ -3670,6 +3743,8 @@ final class Workbench: DesignHost {
             nudge(name, big: shift); return true
         case "KeyX" where mode == .split, "KeyZ" where mode == .split:
             withAnimation(Neon.spring) { splitAxis = name == "KeyX" ? 0 : 2 }; return true
+        case "BracketLeft" where mode == .sculpt, "BracketRight" where mode == .sculpt:
+            sculptResize(name == "BracketRight"); return true
         case "KeyA" where mode == .angles && angleEdit == nil:
             if let b = editBody ?? selection.last { editBody = b; edgePicks = [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)] }
             return true
@@ -3795,8 +3870,10 @@ final class Workbench: DesignHost {
         focusWall = nil
         sculptToken += 1
         sculptBody = nil
-        sculptNow = nil
-        sculptShown = nil
+        sculpt = nil
+        sculptPast = []
+        sculptAhead = []
+        sculptRing = nil
         sculptBusy = false
         hover = Hover()
         selection = []

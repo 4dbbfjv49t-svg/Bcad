@@ -144,6 +144,76 @@ void bk_sculpt_mesh_free(BKSculptMesh *m) {
   delete m;
 }
 
+struct BKSculpt {
+  Sculptor sculptor;
+  std::vector<float> positions, normals;
+  std::vector<uint32_t> changed;
+  BKSculpt(std::vector<V3> p, std::vector<uint32_t> t) : sculptor(std::move(p), std::move(t)) {
+    positions.resize(3 * sculptor.points().size()), normals.resize(positions.size());
+    for (uint32_t i = 0; i < sculptor.points().size(); i++) put(i);
+  }
+  void put(uint32_t i) {
+    V3 a = sculptor.points()[i], b = sculptor.normals()[i];
+    float *q = &positions[3 * i], *m = &normals[3 * i];
+    q[0] = (float)a.x, q[1] = (float)a.y, q[2] = (float)a.z;
+    m[0] = (float)b.x, m[1] = (float)b.y, m[2] = (float)b.z;
+  }
+};
+
+BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) {
+  if (!positions || !indices || vertexCount <= 0 || triangleCount <= 0) return lastError = "sculpt: no points or triangles", nullptr;
+  std::vector<V3> p((size_t)vertexCount);
+  for (size_t i = 0; i < p.size(); i++) {
+    p[i] = {positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]};
+    if (!std::isfinite(p[i].x) || !std::isfinite(p[i].y) || !std::isfinite(p[i].z)) return lastError = "sculpt: points must be numbers", nullptr;
+  }
+  std::vector<uint32_t> t(indices, indices + 3 * (size_t)triangleCount);
+  for (uint32_t v : t)
+    if (v >= (uint32_t)vertexCount) return lastError = "sculpt: a triangle's corner is missing", nullptr;
+  return new BKSculpt(std::move(p), std::move(t));
+}
+
+void bk_sculpt_free(BKSculpt *s) { delete s; }
+
+int bk_sculpt_ray(const BKSculpt *s, const double *origin, const double *direction, double *at, double *normal) {
+  if (!s || !origin || !direction || !finite(origin, 3) || !finite(direction, 3)) return 0;
+  V3 a, n;
+  if (!s->sculptor.ray({origin[0], origin[1], origin[2]}, {direction[0], direction[1], direction[2]}, a, n)) return 0;
+  if (at) at[0] = a.x, at[1] = a.y, at[2] = a.z;
+  if (normal) normal[0] = n.x, normal[1] = n.y, normal[2] = n.z;
+  return 1;
+}
+
+void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert) {
+  if (!s || !at || !finite(at, 3) || !std::isfinite(radius) || !std::isfinite(strength)) return;
+  s->sculptor.begin(brush, {at[0], at[1], at[2]}, radius, strength, mirror != 0, invert != 0);
+}
+
+void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure) {
+  if (!s || !at || !finite(at, 3) || !std::isfinite(pressure)) return;
+  s->sculptor.dab({at[0], at[1], at[2]}, pressure);
+}
+
+void bk_sculpt_end(BKSculpt *s) {
+  if (s) s->sculptor.end();
+}
+int bk_sculpt_undo(BKSculpt *s) { return s && s->sculptor.undo() ? 1 : 0; }
+int bk_sculpt_redo(BKSculpt *s) { return s && s->sculptor.redo() ? 1 : 0; }
+
+int bk_sculpt_sync(BKSculpt *s) {
+  if (!s) return 0;
+  s->changed = s->sculptor.takeChanged();
+  for (uint32_t i : s->changed) s->put(i);
+  return (int)s->changed.size();
+}
+
+const uint32_t *bk_sculpt_changed(const BKSculpt *s) { return s ? s->changed.data() : nullptr; }
+int bk_sculpt_vertex_count(const BKSculpt *s) { return s ? (int)s->sculptor.points().size() : 0; }
+int bk_sculpt_triangle_count(const BKSculpt *s) { return s ? (int)s->sculptor.triangles().size() / 3 : 0; }
+const float *bk_sculpt_positions(const BKSculpt *s) { return s ? s->positions.data() : nullptr; }
+const float *bk_sculpt_normals(const BKSculpt *s) { return s ? s->normals.data() : nullptr; }
+const uint32_t *bk_sculpt_indices(const BKSculpt *s) { return s ? s->sculptor.triangles().data() : nullptr; }
+
 BKMesh *bk_mesh(const BKShape *s, double deflection) {
   if (!s) return nullptr;
   BKMesh *m = new BKMesh();

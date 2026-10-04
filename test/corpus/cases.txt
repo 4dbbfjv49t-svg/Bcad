@@ -441,3 +441,15 @@ r_two_meshes|P 3 20 ; M 0.05 ; P 3 20 ; T 1 0 0 10 0 1 0 0 0 0 1 0 ; M 0.05 ; B 
 r_sphere_less_box|P 3 30 ; R 0.5 ; P 0 10 10 40 ; B 1 ;||made 11215.67 2.243133
 r_bolt|N 1 4 30 0.2 ; R 0.3 ;||made 1933.572 0.3867143
 r_torus_hollow|P 5 0 40 10 ; R 0.5 ;|H 2 0 0|made 4720.102 0.9440204
+
+# Sculpted (D detail brush o w radius strength mirror invert g: remeshed, then one stroke of a brush from where a ray meets
+# it): each brush, arms pulled out of a block with the mirror, a sculpt merged onto a base and hollowed.
+d_draw_ball|P 3 30 ; D 0.5 1 -4 0 100 0 0 -1 4 0.5 0 0 8 0 0 ;||made 14131.28 2.826256
+d_grab_arms|P 0 20 20 30 ; D 0.5 0 100 0 5 -1 0 0 6 0.5 1 0 10 0 0 ;||made 12745.3 2.549061
+d_inflate_torus|P 5 0 40 10 ; D 0.5 2 15 0 100 0 0 -1 4 0.8 0 0 0 6 0 ;||made 7412.262 1.482452
+d_smooth_box|P 0 20 20 20 ; D 0.5 3 9 9 100 0 0 -1 5 1 0 0 0 0 0 ;||made 7992.192 1.598438
+d_flatten_ball|P 3 30 ; D 0.5 4 0 0 100 0 0 -1 6 1 0 0 2 0 0 ;||made 14098.75 2.819751
+d_pinch_box|P 0 20 20 20 ; D 0.5 5 -6 0 100 0 0 -1 3 0.6 1 0 6 0 0 ;||made 7992.569 1.598514
+d_crease_ridge|P 3 30 ; D 0.4 6 -6 0 100 0 0 -1 3 0.7 0 1 12 0 0 ;||made 14122.58 2.824516
+d_grab_on_base|P 0 20 20 30 ; D 0.5 0 100 0 5 -1 0 0 6 0.5 1 0 10 0 0 ; P 0 40 40 4 ; T 1 0 0 0 0 1 0 0 0 0 1 -16 ; B 0 ;||made 18747.89 3.749578
+d_carved_hollow|P 3 30 ; D 0.5 1 0 0 100 0 0 -1 5 0.8 0 1 0 0 0 ;|H 2 0 0|made 4921.117 0.9842233

@@ -1344,24 +1344,30 @@ enum SelfTest {
                   "\(stlSize) bytes · \(stepText.utf8.count) bytes")
         }
 
-        // Sculpt: a stretched box made ready to sculpt (its stretch taken into its mesh), made again coarser, Done (one step
-        // to undo, the body now a mesh of about the box's volume), saved and opened again the same (as a version 2 file);
-        // Esc leaves a body as it was.
+        // Sculpt: a stretched box made ready to sculpt (its stretch taken into its mesh) and made again coarser; strokes
+        // through the pointer on the 3D view (Draw raises the top, Grab with the mirror pulls up both ends alike, a drag
+        // beside the body turns the view instead), each taken back with ⌘Z and done again with ⇧⌘Z, and the Remesh too;
+        // Done (one step to undo, the body now that mesh, its scale taken in), saved and opened again the same (as a
+        // version 2 file); Esc after a stroke leaves a body as it was.
         do {
             func waitFor(_ until: () -> Bool) {
                 let t = Date()
                 while !until() && Date().timeIntervalSince(t) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
             }
-            func extent(_ s: Sculpt?) -> SIMD3<Double> {
-                guard let p = s?.data.positions, !p.isEmpty else { return .zero }
+            func extent(_ s: SculptSession?) -> SIMD3<Double> {
+                guard let s, s.vertexCount > 0 else { return .zero }
                 var lo = SIMD3<Double>(repeating: .infinity)
                 var hi = -lo
-                for i in stride(from: 0, to: p.count, by: 3) {
-                    let q = SIMD3(Double(p[i]), Double(p[i + 1]), Double(p[i + 2]))
+                for i in 0..<s.vertexCount {
+                    let q = SIMD3(Double(s.positions[3 * i]), Double(s.positions[3 * i + 1]), Double(s.positions[3 * i + 2]))
                     lo = simd_min(lo, q)
                     hi = simd_max(hi, q)
                 }
                 return hi - lo
+            }
+            // The height of the sculpted surface above (x, y) in the body's own coordinates.
+            func top(_ x: Double, _ y: Double) -> Double {
+                lib.sculpt?.ray(SIMD3(x, y, 100), SIMD3(0, 0, -1))?.at.z ?? .nan
             }
             let clayBox = Node.primitive(Primitive(kind: .box, size: [20, 20, 20]))
             var stretched = Placement(move: SIMD3(0, 0, 10))
@@ -1370,23 +1376,89 @@ enum SelfTest {
             use([clay])
             lib.selection = [clay.id]
             lib.perform(.sculpt)
-            waitFor { lib.sculptNow != nil && lib.sculptShown != nil || !lib.sculptBusy && lib.mode != .sculpt }
-            let first = lib.sculptNow, size = extent(first)
-            check("Sculpt makes a body ready to shape, its stretch taken in", lib.mode == .sculpt && (first?.data.triangleCount ?? 0) > 5000 &&
+            waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            let first = lib.sculpt, size = extent(first)
+            check("Sculpt makes a body ready to shape, its stretch taken in", lib.mode == .sculpt && (first?.triangleCount ?? 0) > 5000 &&
                   simd_reduce_max(simd_abs(size - SIMD3(30, 20, 20))) < 0.6 && lib.sculptDetail == 0.5,
-                  "\(first?.data.triangleCount ?? 0) triangles, \(size), detail \(lib.sculptDetail)")
+                  "\(first?.triangleCount ?? 0) triangles, \(size), detail \(lib.sculptDetail)")
             lib.sculptDetail = 1
             lib.remeshSculpt()
             waitFor { !lib.sculptBusy }
-            let coarser = lib.sculptNow
-            check("Remesh makes it again at another detail", (coarser?.data.triangleCount ?? .max) < (first?.data.triangleCount ?? 0) / 2 && coarser?.detail == 1,
-                  "\(coarser?.data.triangleCount ?? 0) triangles")
+            let coarser = lib.sculpt
+            check("Remesh makes it again at another detail", (coarser?.triangleCount ?? .max) < (first?.triangleCount ?? 0) / 2 && coarser?.detail == 1,
+                  "\(coarser?.triangleCount ?? 0) triangles")
+            lib.undo()
+            let remeshUndone = lib.sculpt === first && lib.sculptDetail == 0.5
+            lib.redo()
+            check("⌘Z while sculpting takes back a Remesh, ⇧⌘Z does it again", remeshUndone && lib.sculpt === coarser && lib.mode == .sculpt)
+
+            // Seen from above at a slant, the body's top (z = 20 in the world) in the middle of the view.
+            lib.camera = Camera()
+            lib.camera.target = SIMD3(0, 0, 10)
+            lib.camera.distance = 110
+            lib.camera.pitch = 1.0
+            let flat = top(0, 0)
+            lib.sculptBrush = .draw
+            lib.sculptRadius = 4
+            lib.sculptStrength = 0.5
+            lib.sculptMirror = false
+            let strokes = lib.sculptStrokes
+            if let a = view.project(SIMD3(-4, 0, 20)), let b = view.project(SIMD3(4, 0, 20)) {
+                view.mouseMoved(with: event(.mouseMoved, a, []))
+                let ringShown = lib.sculptRing != nil
+                drag(a, b)
+                let raised = top(0, 0)
+                check("Draw through the pointer raises the top where it went (the brush's ring on the surface)",
+                      ringShown && lib.sculptStrokes == strokes + 1 && raised > flat + 0.1 && raised < flat + 2, "\(flat) → \(raised)")
+                lib.undo()
+                let undone = top(0, 0)
+                lib.redo()
+                check("⌘Z takes back a stroke exactly, ⇧⌘Z does it again", abs(undone - flat) < 1e-4 && abs(top(0, 0) - raised) < 1e-4,
+                      "\(undone), \(top(0, 0))")
+            } else {
+                check("the sculpted body is in view", false)
+            }
+            // Grab with the mirror, seen from the front: the front pulled up 6 mm near one end, and near the other alike.
+            func point(_ i: Int) -> SIMD3<Double> {
+                guard let s = lib.sculpt else { return .zero }
+                return SIMD3(Double(s.positions[3 * i]), Double(s.positions[3 * i + 1]), Double(s.positions[3 * i + 2]))
+            }
+            func nearest(_ q: SIMD3<Double>) -> Int {
+                (0..<(lib.sculpt?.vertexCount ?? 0)).min { simd_length(point($0) - q) < simd_length(point($1) - q) } ?? 0
+            }
+            lib.camera.pitch = 0
+            lib.camera.yaw = 0
+            lib.sculptBrush = .grab
+            lib.sculptRadius = 5
+            lib.sculptMirror = true
+            let right = nearest(SIMD3(12, -10, 0)), left = nearest(SIMD3(-12, -10, 0))
+            let was = (point(right), point(left))
+            if let a = view.project(SIMD3(12, -10, 10)), let b = view.project(SIMD3(12, -10, 16)) {
+                drag(a, b)
+                let up = (point(right).z - was.0.z, point(left).z - was.1.z)
+                check("Grab with the mirror pulls the surface along with the pointer, on both sides alike", up.0 > 4 && up.0 < 6.5 && abs(up.0 - up.1) < 0.5,
+                      "\(up)")
+            } else {
+                check("the sculpted body's front is in view", false)
+            }
+            // Beside the body a drag turns the view and sculpts nothing; [ and ] change the brush's size.
+            let turned = lib.camera.yaw, made = lib.sculptStrokes
+            drag(CGPoint(x: 20, y: 20), CGPoint(x: 80, y: 20))
+            let r0 = lib.sculptRadius
+            lib.sculptResize(true)
+            check("beside the body a drag turns the view; ] makes the brush larger", lib.camera.yaw != turned && lib.sculptStrokes == made &&
+                  abs(lib.sculptRadius - Workbench.round2(r0 * 1.15)) < 1e-9, "radius \(r0) → \(lib.sculptRadius)")
+            lib.sculptMirror = false
+            lib.sculptBrush = .draw
+
+            let shaped = lib.sculpt?.data()
             lib.commitSculpt()
             settle()
-            let isSculpt: Bool = { if case .sculpt = lib.body(clay.id)?.node { return true } else { return false } }()
+            var isShaped = false
+            if case .sculpt(let sc)? = lib.body(clay.id)?.node, let shaped { isShaped = sc.data.fingerprint == shaped.fingerprint }
             let volume = lib.meshes[clay.id]?.volume ?? 0
-            check("Done: the body is a mesh of about the box's volume, its scale taken in", isSculpt && lib.mode == .select &&
-                  lib.body(clay.id)?.place.scale == SIMD3(1, 1, 1) && abs(volume - 12000) < 0.03 * 12000, "volume \(volume)")
+            check("Done: the body is the shaped mesh, its scale taken in", isShaped && lib.mode == .select &&
+                  lib.body(clay.id)?.place.scale == SIMD3(1, 1, 1) && volume > 11500 && volume < 13000, "volume \(volume)")
             let sculpted = lib.doc
             lib.undo()
             settle()
@@ -1398,17 +1470,31 @@ enum SelfTest {
             let reread = saveAs(sculptFile) ? try? ThreeMF.read(sculptFile) : nil
             check("a sculpted body is saved and opened again the same", reread?.doc == sculpted && reread?.doc.version == 2,
                   "version \(reread?.doc.version ?? 0)")
-            // Esc: nothing changes.
-            let plainAgain = Solid(name: "Untouched", color: Palette.colors[2], node: clayBox, place: Placement(move: SIMD3(40, 0, 10)))
+            // A sculpted body opened again for sculpting: as it was, not made again.
+            lib.selection = [clay.id]
+            lib.perform(.sculpt)
+            waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            let again = lib.sculpt?.data()
+            check("a sculpted body opens as it is", again?.fingerprint == shaped?.fingerprint && lib.sculptDetail == 1)
+            lib.cancelMode()
+            settle()
+            // Esc after a stroke: nothing changes.
+            let plainAgain = Solid(name: "Untouched", color: Palette.colors[2], node: clayBox, place: Placement(move: SIMD3(0, 0, 10)))
             use([plainAgain])
             let untouched = lib.doc
             lib.selection = [plainAgain.id]
             lib.perform(.sculpt)
-            waitFor { lib.sculptNow != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
             let opened = lib.mode == .sculpt
+            lib.camera = Camera()
+            lib.camera.target = SIMD3(0, 0, 10)
+            lib.camera.distance = 110
+            lib.camera.pitch = 1.0
+            if let a = view.project(SIMD3(-3, 0, 20)), let b = view.project(SIMD3(3, 0, 20)) { drag(a, b) }
+            let stroked = lib.sculptStrokes > made
             lib.cancelMode()
             settle()
-            check("Esc leaves Sculpt with the body as it was", opened && lib.mode == .select && lib.doc == untouched && lib.sculptNow == nil)
+            check("Esc after a stroke leaves Sculpt with the body as it was", opened && stroked && lib.mode == .select && lib.doc == untouched && lib.sculpt == nil)
         }
 
         // Print samples for test/printcheck.py (and to open in slicers by hand): each saved as the app saves it and written as
@@ -1426,8 +1512,25 @@ enum SelfTest {
             return Solid(name: name, color: color, node: node, place: Placement(move: SIMD3(x, y, height / 2)))
         }
         let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))
-        // A sphere stretched along x made ready to sculpt (as Sculpt makes it): a mesh body, standing 20 mm tall.
-        let egg = k.queue.sync { k.remesh(.primitive(.make(.sphere)), scale: SIMD3(1.4, 1, 1), detail: 0.6) }.map { Node.sculpt(Sculpt(data: $0, detail: 0.6)) } ?? block(10)
+        // A sphere stretched along x made ready to sculpt (as Sculpt makes it) and shaped by hand: a nose pulled out of its
+        // front, a groove creased into both its sides with the mirror; a mesh body standing 20 mm tall.
+        let egg: Node = {
+            guard let d = k.queue.sync({ k.remesh(.primitive(.make(.sphere)), scale: SIMD3(1.4, 1, 1), detail: 0.6) }),
+                  let s = SculptSession(d, detail: 0.6) else { return block(10) }
+            if let front = s.ray(SIMD3(0, -50, 0), SIMD3(0, 1, 0)) {
+                s.begin(.grab, at: front.at, radius: 4, strength: 0.5, mirror: false, invert: false)
+                for k in 1...4 { s.dab(front.at + SIMD3(0, -1.5 * Double(k), 0), pressure: 1) }
+                s.end()
+            }
+            if let side = s.ray(SIMD3(50, -4, 0), SIMD3(-1, 0, 0)) {
+                s.begin(.crease, at: side.at, radius: 2.5, strength: 0.7, mirror: true, invert: false)
+                for k in 0...8 {
+                    if let q = s.ray(SIMD3(50, -4 + Double(k), 0), SIMD3(-1, 0, 0)) { s.dab(q.at, pressure: 1) }
+                }
+                s.end()
+            }
+            return .sculpt(Sculpt(data: s.data(), detail: 0.6))
+        }()
         let samples: [(name: String, bodies: [Solid], stlWatertight: Bool)] = [
             ("colours", [standing("Red box", SIMD3(230, 40, 40), block(20), -40, 0),
                          standing("Blue cylinder", SIMD3(40, 80, 230), .primitive(.make(.cylinder)), 0, 0),

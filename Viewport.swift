@@ -250,6 +250,100 @@ final class Renderer: NSObject, MTKViewDelegate {
         return g
     }
 
+    // The live mesh of the body being sculpted, in two sets of buffers taken in turn: the points changed since a set was
+    // last written go into the one the GPU isn't reading, and that one is drawn (the other catches up on its next turn).
+    private final class SculptGPU {
+        let owner: ObjectIdentifier
+        let pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer
+        let count: Int
+        var applied = [-1, -1]  // how far into the session's changes each set is (-1: nothing in it yet)
+        var current = 0
+        let reading = Readers()
+
+        init(owner: ObjectIdentifier, pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer, count: Int) {
+            self.owner = owner
+            self.pos = pos
+            self.nrm = nrm
+            self.idx = idx
+            self.count = count
+        }
+    }
+
+    // Frames the GPU is still drawing from each set.
+    final class Readers: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = [0, 0]
+        func add(_ k: Int, _ d: Int) {
+            lock.lock()
+            n[k] += d
+            lock.unlock()
+        }
+        func busy(_ k: Int) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return n[k] > 0
+        }
+    }
+
+    private var sculptGPU: SculptGPU?
+
+    private func sculptBody(_ s: SculptSession, _ cmd: MTLCommandBuffer) -> GPUBody? {
+        if sculptGPU?.owner != ObjectIdentifier(s) {
+            sculptGPU = nil
+            let n = s.vertexCount * 16
+            guard n > 0, s.triangleCount > 0,
+                  let p0 = device.makeBuffer(length: n, options: .storageModeShared), let p1 = device.makeBuffer(length: n, options: .storageModeShared),
+                  let n0 = device.makeBuffer(length: n, options: .storageModeShared), let n1 = device.makeBuffer(length: n, options: .storageModeShared),
+                  let ib = device.makeBuffer(bytes: s.indices, length: s.triangleCount * 12, options: .storageModeShared) else { return nil }
+            sculptGPU = SculptGPU(owner: ObjectIdentifier(s), pos: [p0, p1], nrm: [n0, n1], idx: ib, count: 3 * s.triangleCount)
+        }
+        guard let g = sculptGPU else { return nil }
+        let next = 1 - g.current
+        if g.applied[g.current] != s.logEnd && !g.reading.busy(next) {
+            write(s, into: g, next)
+            g.current = next
+        }
+        let k = g.current
+        if g.applied[k] != s.logEnd {
+            // The other set was still being drawn from: another frame in a moment shows the rest.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.012) { [weak self] in MainActor.assumeIsolated { self?.view?.redraw() } }
+        }
+        g.reading.add(k, 1)
+        let r = g.reading
+        cmd.addCompletedHandler { _ in r.add(k, -1) }
+        return GPUBody(stamp: 0, dark: Skin.shared.dark, pos: g.pos[k], nrm: g.nrm[k], idx: g.idx, count: g.count, edges: nil, edgeCount: 0)
+    }
+
+    private func write(_ s: SculptSession, into g: SculptGPU, _ k: Int) {
+        let pos = g.pos[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: s.vertexCount)
+        let nrm = g.nrm[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: s.vertexCount)
+        let p = s.positions, n = s.normals
+        func put(_ i: Int) {
+            pos[i] = SIMD4(p[3 * i], p[3 * i + 1], p[3 * i + 2], 0)
+            nrm[i] = SIMD4(n[3 * i], n[3 * i + 1], n[3 * i + 2], 0)
+        }
+        if g.applied[k] >= 0, let changed = s.changes(since: g.applied[k]), changed.count < s.vertexCount {
+            for i in changed { put(Int(i)) }
+        } else {
+            for i in 0..<s.vertexCount { put(i) }
+        }
+        g.applied[k] = s.logEnd
+    }
+
+    // The brush where the pointer is on the surface, and (with the mirror on) where it works across it.
+    private func drawBrush(_ enc: MTLRenderCommandEncoder, _ r: SculptRing, _ place: Placement, accent: SIMD4<Float>) {
+        var lines: [LineV] = []
+        func ring(_ at: SIMD3<Double>, _ n: SIMD3<Double>, _ alpha: Float) {
+            let up = length(n) > 0.5 ? normalize(n) : SIMD3<Double>(0, 0, 1)
+            let pts = circle(around: up, at, lib.sculptRadius).map { SIMD3<Float>($0) }
+            Renderer.polyline(pts, width: 2, color: SIMD4(accent.x, accent.y, accent.z, alpha), into: &lines)
+            Renderer.segment(SIMD3<Float>(at), SIMD3<Float>(at + up * lib.sculptRadius * 0.25), width: 2, color: SIMD4(accent.x, accent.y, accent.z, alpha), into: &lines)
+        }
+        ring(r.at, r.normal, 0.95)
+        if lib.sculptMirror { ring(SIMD3(-r.at.x, r.at.y, r.at.z), SIMD3(-r.normal.x, r.normal.y, r.normal.z), 0.45) }
+        drawLines(enc, lines, model: simd_float4x4(place.matrix), depth: depthOff)
+    }
+
     // Neutral line colour of the current theme.
     static var ink: SIMD3<Float> { Skin.shared.dark ? SIMD3(1, 1, 1) : SIMD3(0.08, 0.09, 0.13) }
 
@@ -316,11 +410,21 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         let bed = lib.settings.bed
         for b in lib.doc.bodies where !b.hidden {
-            // The body being sculpted shows its mesh as it is now (its stretch already in it).
+            // The body being sculpted is drawn from the engine's live mesh of it (its stretch already in it).
             var place = b.place
-            let sculpting = lib.mode == .sculpt && lib.sculptBody == b.id ? lib.sculptShown : nil
-            if sculpting != nil { place.scale = SIMD3(1, 1, 1) }
-            guard let m = sculpting ?? lib.meshes[b.id], let g = upload(b.id, m) else { continue }
+            let live = lib.mode == .sculpt && lib.sculptBody == b.id ? lib.sculpt : nil
+            let mesh: Mesh?
+            let g: GPUBody
+            if let s = live {
+                guard let sg = sculptBody(s, cmd) else { continue }
+                place.scale = SIMD3(1, 1, 1)
+                mesh = nil
+                g = sg
+            } else {
+                guard let m = lib.meshes[b.id], let u = upload(b.id, m) else { continue }
+                mesh = m
+                g = u
+            }
             let model = simd_float4x4(place.matrix)
             let n3 = simd_float3x3(SIMD3(model.columns.0.x, model.columns.0.y, model.columns.0.z),
                                    SIMD3(model.columns.1.x, model.columns.1.y, model.columns.1.z),
@@ -356,15 +460,16 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setVertexBytes(&mm, length: 64, index: 2)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: g.edgeCount)
             }
-            if lib.mode == .angles {
+            if lib.mode == .angles, let m = mesh {
                 if lib.editBody == b.id {
                     let faces = lib.edgePicks.filter { $0.kind == Int32(BK_PICK_FACE) }.compactMap { Picking.face(m, $0) }
                     tint(enc, m, g, model, nm, [(faces, SIMD4(accent2.x, accent2.y, accent2.z, 0.35))])
                 }
                 drawRoundMarks(enc, b, m, model, accent: accent, accent2: accent2)
             }
-            if lib.mode == .hollow, lib.editBody == b.id { drawHollowMarks(enc, m, g, model, nm, accent2: accent2) }
+            if lib.mode == .hollow, lib.editBody == b.id, let m = mesh { drawHollowMarks(enc, m, g, model, nm, accent2: accent2) }
         }
+        if lib.mode == .sculpt, let r = lib.sculptRing, let place = lib.sculptPlace { drawBrush(enc, r, place, accent: accent2) }
 
         if lib.mode == .split, let plane = lib.splitPlane { drawPlane(enc, plane, accent: accent, hatch: accent2) }
         if lib.mode == .select, !lib.selection.isEmpty { drawGizmo(enc) }
@@ -795,8 +900,11 @@ final class CadView: MTKView {
     var renderer: Renderer!
     var dragAxis: Int?
     var splitHandle: Int?   // 0, 1: tilt rings · 2: the move arrow
-    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), split, tilt(Int) }
+    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), split, tilt(Int), sculpt }
     private var drag: Drag = .none
+    // The brush of the stroke under way, and where it began (the body's own coordinates).
+    private var strokeBrush: SculptBrush?
+    private var strokeFrom = SIMD3<Double>(0, 0, 0)
     private var downAt = CGPoint.zero
     private var last = CGPoint.zero
     private var moved = false
@@ -908,6 +1016,19 @@ final class CadView: MTKView {
     }
 
     struct Hit { var body: UUID; var face: Int; var local: SIMD3<Double>; var world: SIMD3<Double>; var distance: Double }
+
+    // The pointer's ray in the sculpted body's own coordinates, and where it meets the body there.
+    private func sculptRay(_ p: CGPoint) -> (SIMD3<Double>, SIMD3<Double>)? {
+        guard let place = lib.sculptPlace else { return nil }
+        let (o, d) = ray(p)
+        let inv = place.matrix.inverse
+        return ((inv * SIMD4(o, 1)).xyz, (inv * SIMD4(d, 0)).xyz)
+    }
+
+    private func sculptHit(_ p: CGPoint) -> SculptRing? {
+        guard let s = lib.sculpt, let (o, d) = sculptRay(p) else { return nil }
+        return s.ray(o, d)
+    }
 
     func hitBody(_ p: CGPoint) -> Hit? {
         let (o, d) = ray(p)
@@ -1098,6 +1219,13 @@ final class CadView: MTKView {
 
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
+        if lib.mode == .sculpt {
+            // The brush follows the pointer over the body.
+            let r = lib.sculptBusy ? nil : sculptHit(p)
+            if r != lib.sculptRing { lib.sculptRing = r }
+            if lib.hover != Hover() { lib.hover = Hover() }
+            return
+        }
         var hv: Hover
         if lib.mode == .measure {
             let end = measureSnap(p, free: e.modifierFlags.contains(.option))
@@ -1114,6 +1242,7 @@ final class CadView: MTKView {
 
     override func mouseExited(with event: NSEvent) {
         if lib.hover != Hover() { lib.hover = Hover() }
+        if case .sculpt = drag {} else if lib.sculptRing != nil { lib.sculptRing = nil }
         if lib.measureHover != nil { lib.measureHover = nil }
     }
 
@@ -1174,8 +1303,15 @@ final class CadView: MTKView {
             drag = .none
             return
         case .sculpt:
-            // (Brushes come with Phase 2: for now a drag turns or pans the view.)
-            drag = shift ? .pan : .orbit
+            // On the body: a stroke of the brush (Shift smooths, ⌥ turns it around); off it, the view turns (Shift: pans).
+            if let hit = sculptHit(p), let brush = lib.sculptBegin(at: hit.at, smooth: shift, invert: e.modifierFlags.contains(.option)) {
+                strokeBrush = brush
+                strokeFrom = hit.at
+                lib.sculptRing = hit
+                drag = .sculpt
+            } else {
+                drag = shift ? .pan : .orbit
+            }
             return
         case .select, .thread:
             break
@@ -1278,6 +1414,22 @@ final class CadView: MTKView {
             startOffset += along(plane.normal, dx, dy)
             let v = free ? startOffset : (startOffset / lib.settings.snap).rounded() * lib.settings.snap
             lib.splitOffset = (v * 100).rounded() / 100
+        case .sculpt:
+            guard let (o, d) = sculptRay(p) else { return }
+            if strokeBrush == .grab {
+                // Grabbed: carried in the plane through where it was taken that faces the view.
+                guard let place = lib.sculptPlace else { return }
+                let ahead = SIMD3<Double>(normalize(lib.camera.target - lib.camera.eye))
+                let f = (place.matrix.inverse * SIMD4(ahead, 0)).xyz
+                let across = dot(d, f)
+                guard abs(across) > 1e-9 else { return }
+                let at = o + d * (dot(strokeFrom - o, f) / across)
+                lib.sculptDab(at: at)
+                lib.sculptRing = SculptRing(at: at, normal: lib.sculptRing?.normal ?? -f)
+            } else if let hit = lib.sculpt?.ray(o, d) {
+                lib.sculptDab(at: hit.at)
+                lib.sculptRing = hit
+            }
         case .tilt(let k):
             guard let c = project(startPlane) else { return }
             let a0 = atan2(Double(downAt.y - c.y), Double(downAt.x - c.x)), a1 = atan2(Double(p.y - c.y), Double(p.x - c.x))
@@ -1320,6 +1472,9 @@ final class CadView: MTKView {
             if !moved { lib.undoLastIfUnchanged() } else { lib.finishScale() }
         case .ring, .body, .axis:
             if !moved { lib.undoLastIfUnchanged() } else { lib.finishTransform() }
+        case .sculpt:
+            lib.sculptEnd()
+            strokeBrush = nil
         default: break
         }
         drag = .none
