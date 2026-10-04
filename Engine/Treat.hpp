@@ -95,6 +95,8 @@ struct Hollowing {
   std::vector<double> open, walls, wallThickness;
   bool viaSharp = false;
   Shape sharp;
+  // Hollowed on a grid (hollowByGrid): for a body thinner than its walls in places, where they can't be offset all round.
+  bool grid = false;
 };
 
 // The shape (as placed) hollowed, at a chord error of d; false when the walls don't fit (`missing` the picks that match

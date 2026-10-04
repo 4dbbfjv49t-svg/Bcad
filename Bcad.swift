@@ -527,6 +527,15 @@ indirect enum Node: Codable, Hashable, Sendable {
         }
     }
 
+    // How many triangles the sculpted bodies in it have between them (a STEP file holds each as a face of its own).
+    var sculptTriangles: Int {
+        switch self {
+        case .sculpt(let s): s.data.triangleCount
+        case .group(_, let parts): parts.reduce(0) { $0 + $1.node.sculptTriangles }
+        default: inner?.sculptTriangles ?? 0
+        }
+    }
+
     var inner: Node? {
         switch self {
         case .split(let n, _, _), .round(let n, _, _), .hollow(let n, _, _, _), .bevel(let n, _, _, _), .cove(let n, _, _): n
@@ -3986,6 +3995,11 @@ final class Workbench: DesignHost {
     func export(step: Bool) {
         let bodies = (selection.isEmpty ? doc.bodies : selected).filter { !$0.hidden }
         guard !bodies.isEmpty else { flash(L("Nothing to export")); return }
+        // Past a few hundred thousand sculpted triangles (a face each), a STEP file is more than CAD programs open.
+        if step && bodies.reduce(0, { $0 + $1.node.sculptTriangles }) > 300_000 {
+            flash(L("Sculpted shapes this detailed make too large a STEP file — export STL or 3MF instead"))
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: step ? "step" : "stl") ?? .data]
         panel.nameFieldStringValue = title + (step ? ".step" : ".stl")
@@ -3996,6 +4010,7 @@ final class Workbench: DesignHost {
     // Written on the kernel's thread; `done` learns whether it was.
     func export(_ bodies: [Solid], step: Bool, to url: URL, done: @escaping (Bool) -> Void = { _ in }) {
         let fit = settings.fit, note = L("Exporting…"), printed = doc.printed(bodies)
+        let large = step && bodies.reduce(0, { $0 + $1.node.sculptTriangles }) > 20_000
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.fit = fit
@@ -4019,7 +4034,8 @@ final class Workbench: DesignHost {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
-                    self.flash(written ? L("Exported {name}", ["name": url.lastPathComponent])
+                    self.flash(written ? (large ? L("Exported {name} · sculpted shapes make large STEP files: STL or 3MF suit them better", ["name": url.lastPathComponent])
+                                                : L("Exported {name}", ["name": url.lastPathComponent]))
                                : found.map { L("Not exported: {problem}", ["problem": $0.1.text($0.0)]) } ?? L("Export failed"))
                     done(written)
                 }

@@ -145,79 +145,44 @@ struct Cube {
   }
 };
 
-}  // namespace
-
-bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double detail, std::vector<V3> &outPts, std::vector<uint32_t> &outTris,
-            std::string &why, size_t most) {
-  outPts.clear(), outTris.clear();
-  if (!(detail > 0) || !std::isfinite(detail)) return why = "the detail must be a size", false;
-  V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
-  for (uint32_t i : tris) lo = vmin(lo, pts[i]), hi = vmax(hi, pts[i]);
-  if (tris.empty() || !std::isfinite(lo.x + lo.y + lo.z + hi.x + hi.y + hi.z)) return why = "nothing to remesh", false;
-  // The grid: a step of the detail, over the mesh's box and a step and a half round it (so its edge is all outside).
-  Grid g;
-  g.h = detail;
-  double cells = 1;
-  for (int a = 0; a < 3; a++) {
-    g.o[a] = lo[a] - 1.5 * detail;
-    double n = std::ceil((hi[a] - lo[a]) / detail) + 4;
-    cells *= n;
-    if (n > 2e6) return why = "too fine for its size", false;
-    g.n[a] = (int)n;
-  }
-  if (cells > 4e8) return why = "too fine for its size", false;
-  Lines lines[3];
-  lines[0] = cast(pts, tris, g, 0);
-  // Inside or not at each grid point, by the lines along x.
-  size_t N = (size_t)cells;
-  std::vector<uint64_t> in((N + 63) / 64, 0);
-  auto inside = [&](int i, int j, int k) {
-    size_t id = g.index(i, j, k);
-    return (in[id >> 6] >> (id & 63) & 1) != 0;
-  };
+// Inside or not at each grid point, by the lines along x (bit per point, in the grid's order): how many are.
+size_t label(const Grid &g, const Lines &L, std::vector<uint64_t> &in) {
+  in.assign(((size_t)g.n[0] * g.n[1] * g.n[2] + 63) / 64, 0);
   size_t inner = 0;
-  {
-    const Lines &L = lines[0];
-    for (int k = 0; k < g.n[2]; k++)
-      for (int j = 0; j < g.n[1]; j++) {
-        size_t line = L.line(j, k, g);
-        uint32_t p = L.start[line], end = L.start[line + 1];
-        int w = 0;
-        for (int i = 0; i < g.n[0]; i++) {
-          double x = g.at(0, i);
-          while (p < end && L.list[p].at < x) w = L.wind[p++];
-          if (w > 0) {
-            size_t id = g.index(i, j, k);
-            in[id >> 6] |= 1ull << (id & 63), inner++;
-          }
+  for (int k = 0; k < g.n[2]; k++)
+    for (int j = 0; j < g.n[1]; j++) {
+      size_t line = L.line(j, k, g);
+      uint32_t p = L.start[line], end = L.start[line + 1];
+      int w = 0;
+      for (int i = 0; i < g.n[0]; i++) {
+        double x = g.at(0, i);
+        while (p < end && L.list[p].at < x) w = L.wind[p++];
+        if (w > 0) {
+          size_t id = g.index(i, j, k);
+          in[id >> 6] |= 1ull << (id & 63), inner++;
         }
       }
-  }
-  if (!inner) return why = "nothing inside", false;
-  // The cubes the surface passes through (some corners in, some out): about four triangles each.
+    }
+  return inner;
+}
+
+// Marching cubes over grid points labelled inside or not (inside(i, j, k)), a surface of triangles facing out of the
+// inside, its points where fraction(i, j, k, axis, farIn) puts them along each grid edge it crosses (from the edge's
+// lower end, as a part of the step). On each face of a cube, the surface cuts off each run of inside corners (taken
+// counter-clockwise seen from outside the cube) by a side from where it goes in to where it comes out; inside corners
+// diagonal on a face stay apart. A face's choice is the same seen from both cubes, so the pieces meet, and each crossing
+// point (one per grid edge) is where one side ends and the next begins: they close into loops, each a polygon of the
+// surface (always closed).
+template <class Inside, class Fraction>
+void march(const Grid &g, Inside inside, Fraction fraction, size_t reserve, std::vector<V3> &outPts, std::vector<uint32_t> &outTris) {
+  static const Cube cube;
   auto corners = [&](int i, int j, int k) {
     int m = 0;
     for (int c = 0; c < 8; c++) m |= (int)inside(i + (c & 1), j + (c >> 1 & 1), k + (c >> 2 & 1)) << c;
     return m;
   };
-  size_t mixed = 0;
-  for (int k = 0; k + 1 < g.n[2]; k++)
-    for (int j = 0; j + 1 < g.n[1]; j++)
-      for (int i = 0; i + 1 < g.n[0]; i++) {
-        int m = corners(i, j, k);
-        mixed += m != 0 && m != 255;
-      }
-  if (4 * mixed > most) return why = "too fine: about " + std::to_string(4 * mixed) + " triangles", false;
-  lines[1] = cast(pts, tris, g, 1);
-  lines[2] = cast(pts, tris, g, 2);
-
-  // Marching cubes. On each face of a cube, the surface cuts off each run of inside corners (taken counter-clockwise seen
-  // from outside the cube) by a side from where it goes in to where it comes out; inside corners diagonal on a face stay
-  // apart. A face's choice is the same seen from both cubes, so the pieces meet, and each crossing point (one per grid
-  // edge) is where one side ends and the next begins: they close into loops, each a polygon of the surface.
-  static const Cube cube;
   std::unordered_map<uint64_t, uint32_t> pointOf;  // per grid edge crossed (its axis and lower end), its point
-  pointOf.reserve(4 * mixed);
+  pointOf.reserve(reserve);
   auto point = [&](int i, int j, int k, int e) {
     int a = cube.edgeAxis[e], c = cube.edgeLow[e];
     int at[3] = {i + (c & 1), j + (c >> 1 & 1), k + (c >> 2 & 1)};
@@ -226,7 +191,7 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
     if (found != pointOf.end()) return found->second;
     int up[3] = {at[0], at[1], at[2]};
     up[a]++;
-    double f = crossingOn(lines[a], g, at[0], at[1], at[2], inside(up[0], up[1], up[2]));
+    double f = fraction(at[0], at[1], at[2], a, inside(up[0], up[1], up[2]));
     V3 q{g.at(0, at[0]), g.at(1, at[1]), g.at(2, at[2])};
     q[a] += f * g.h;
     uint32_t id = (uint32_t)outPts.size();
@@ -271,8 +236,10 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
           for (int q = 0; q < n; q++) outTris.insert(outTris.end(), {centre, loop[q], loop[(q + 1) % n]});
         }
       }
+}
 
-  // Evened out: each point moved halfway to the middle of its neighbours, along the surface (not across it), twice.
+// Evened out: each point moved halfway to the middle of its neighbours, along the surface (not across it), `passes` times.
+void relax(std::vector<V3> &outPts, const std::vector<uint32_t> &outTris, int passes) {
   size_t np = outPts.size();
   std::vector<uint32_t> start(np + 1, 0), nb;
   for (size_t t = 0; t < outTris.size(); t += 3)
@@ -286,7 +253,7 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
       for (int q = 0; q < 3; q++) nb[fill[outTris[t + q]]++] = outTris[t + (q + 1) % 3];
   }
   std::vector<V3> moved(np), normal(np);
-  for (int pass = 0; pass < 2; pass++) {
+  for (int pass = 0; pass < passes; pass++) {
     std::fill(normal.begin(), normal.end(), V3{0, 0, 0});
     for (size_t t = 0; t < outTris.size(); t += 3) {
       V3 w = cross(outPts[outTris[t + 1]] - outPts[outTris[t]], outPts[outTris[t + 2]] - outPts[outTris[t]]);
@@ -301,6 +268,268 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
     }
     outPts.swap(moved);
   }
+}
+
+// The nearest point of triangle abc to q (Ericson's regions: a corner, a side or the inside).
+V3 nearestOnTriangle(V3 q, V3 a, V3 b, V3 c) {
+  V3 ab = b - a, ac = c - a, aq = q - a;
+  double d1 = dot(ab, aq), d2 = dot(ac, aq);
+  if (d1 <= 0 && d2 <= 0) return a;
+  V3 bq = q - b;
+  double d3 = dot(ab, bq), d4 = dot(ac, bq);
+  if (d3 >= 0 && d4 <= d3) return b;
+  double vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return a + ab * (d1 / (d1 - d3));
+  V3 cq = q - c;
+  double d5 = dot(ab, cq), d6 = dot(ac, cq);
+  if (d6 >= 0 && d5 <= d6) return c;
+  double vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return a + ac * (d2 / (d2 - d6));
+  double va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+  double den = 1 / (va + vb + vc);
+  return a + ab * (vb * den) + ac * (vc * den);
+}
+
+}  // namespace
+
+bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double detail, std::vector<V3> &outPts, std::vector<uint32_t> &outTris,
+            std::string &why, size_t most) {
+  outPts.clear(), outTris.clear();
+  if (!(detail > 0) || !std::isfinite(detail)) return why = "the detail must be a size", false;
+  V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+  for (uint32_t i : tris) lo = vmin(lo, pts[i]), hi = vmax(hi, pts[i]);
+  if (tris.empty() || !std::isfinite(lo.x + lo.y + lo.z + hi.x + hi.y + hi.z)) return why = "nothing to remesh", false;
+  // The grid: a step of the detail, over the mesh's box and a step and a half round it (so its edge is all outside).
+  Grid g;
+  g.h = detail;
+  double cells = 1;
+  for (int a = 0; a < 3; a++) {
+    g.o[a] = lo[a] - 1.5 * detail;
+    double n = std::ceil((hi[a] - lo[a]) / detail) + 4;
+    cells *= n;
+    if (n > 2e6) return why = "too fine for its size", false;
+    g.n[a] = (int)n;
+  }
+  if (cells > 4e8) return why = "too fine for its size", false;
+  Lines lines[3];
+  lines[0] = cast(pts, tris, g, 0);
+  std::vector<uint64_t> in;
+  size_t inner = label(g, lines[0], in);
+  if (!inner) return why = "nothing inside", false;
+  auto inside = [&](int i, int j, int k) {
+    size_t id = g.index(i, j, k);
+    return (in[id >> 6] >> (id & 63) & 1) != 0;
+  };
+  // The cubes the surface passes through (some corners in, some out): about four triangles each.
+  size_t mixed = 0;
+  for (int k = 0; k + 1 < g.n[2]; k++)
+    for (int j = 0; j + 1 < g.n[1]; j++)
+      for (int i = 0; i + 1 < g.n[0]; i++) {
+        int m = 0;
+        for (int c = 0; c < 8; c++) m |= (int)inside(i + (c & 1), j + (c >> 1 & 1), k + (c >> 2 & 1)) << c;
+        mixed += m != 0 && m != 255;
+      }
+  if (4 * mixed > most) return why = "too fine: about " + std::to_string(4 * mixed) + " triangles", false;
+  lines[1] = cast(pts, tris, g, 1);
+  lines[2] = cast(pts, tris, g, 2);
+  // The surface where the grid's lines cross the mesh's.
+  march(g, inside, [&](int i, int j, int k, int a, bool farIn) { return crossingOn(lines[a], g, i, j, k, farIn); }, 4 * mixed, outPts, outTris);
+  relax(outPts, outTris, 2);
+  return true;
+}
+
+namespace {
+
+// Whether segment pq passes through triangle abc: each end strictly on its own side of the triangle's plane, and the
+// line within the triangle (on a side or a corner too: there the triangle beside it is passed through as well).
+bool through(V3 p, V3 q, V3 a, V3 b, V3 c) {
+  int sp = orient3d(a, b, c, p), sq = orient3d(a, b, c, q);
+  if (!sp || !sq || sp == sq) return false;
+  int s1 = orient3d(p, q, a, b), s2 = orient3d(p, q, b, c), s3 = orient3d(p, q, c, a);
+  return (s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0);
+}
+
+// Whether two triangles in one plane (that across axis `drop`) overlap more than along a side or at a corner: no side of
+// either has all of the other on its outside (or on it).
+bool overlapFlat(const V3 *t, const V3 *u, int drop) {
+  int x = (drop + 1) % 3, y = (drop + 2) % 3;
+  auto apart = [&](const V3 *a, const V3 *b) {
+    int o = orient2d(a[0][x], a[0][y], a[1][x], a[1][y], a[2][x], a[2][y]);
+    if (!o) return true;
+    for (int e = 0; e < 3; e++) {
+      const V3 &p = a[e], &q = a[(e + 1) % 3];
+      bool out = true;
+      for (int k = 0; k < 3 && out; k++) out = orient2d(p[x], p[y], q[x], q[y], b[k][x], b[k][y]) * o <= 0;
+      if (out) return true;
+    }
+    return false;
+  };
+  return !apart(t, u) && !apart(u, t);
+}
+
+}  // namespace
+
+bool selfCrossing(const std::vector<V3> &P, const std::vector<uint32_t> &T) {
+  size_t nt = T.size() / 3;
+  if (nt < 2) return false;
+  // A box tree over the triangles (halved by their middles, down to four).
+  struct Box {
+    V3 lo, hi;
+  };
+  std::vector<Box> box(nt);
+  std::vector<V3> mid(nt);
+  for (size_t t = 0; t < nt; t++) {
+    V3 a = P[T[3 * t]], b = P[T[3 * t + 1]], c = P[T[3 * t + 2]];
+    box[t] = {vmin(vmin(a, b), c), vmax(vmax(a, b), c)};
+    mid[t] = (a + b + c) / 3;
+  }
+  struct Node {
+    Box b;
+    int left = -1, right = -1, first = 0, count = 0;
+  };
+  std::vector<Node> nodes;
+  std::vector<uint32_t> order(nt);
+  for (size_t t = 0; t < nt; t++) order[t] = (uint32_t)t;
+  std::function<int(int, int)> build = [&](int first, int count) {
+    int id = (int)nodes.size();
+    nodes.push_back({});
+    Box b = box[order[first]];
+    V3 mlo = mid[order[first]], mhi = mlo;
+    for (int k = first; k < first + count; k++) {
+      b.lo = vmin(b.lo, box[order[k]].lo), b.hi = vmax(b.hi, box[order[k]].hi);
+      mlo = vmin(mlo, mid[order[k]]), mhi = vmax(mhi, mid[order[k]]);
+    }
+    nodes[id].b = b;
+    if (count <= 4) {
+      nodes[id].first = first, nodes[id].count = count;
+      return id;
+    }
+    V3 span = mhi - mlo;
+    int axis = span.x >= span.y && span.x >= span.z ? 0 : span.y >= span.z ? 1 : 2;
+    int half = count / 2;
+    std::nth_element(order.begin() + first, order.begin() + first + half, order.begin() + first + count, [&](uint32_t x, uint32_t y) {
+      return mid[x][axis] < mid[y][axis] || (mid[x][axis] == mid[y][axis] && x < y);
+    });
+    int l = build(first, half), r = build(first + half, count - half);
+    nodes[id].left = l, nodes[id].right = r;
+    return id;
+  };
+  build(0, (int)nt);
+  auto overlap = [](const Box &x, const Box &y) {
+    return x.lo.x <= y.hi.x && y.lo.x <= x.hi.x && x.lo.y <= y.hi.y && y.lo.y <= x.hi.y && x.lo.z <= y.hi.z && y.lo.z <= x.hi.z;
+  };
+  std::vector<int> stack;
+  for (size_t t = 0; t < nt; t++) {
+    const uint32_t *x = &T[3 * t];
+    V3 a = P[x[0]], b = P[x[1]], c = P[x[2]];
+    stack.assign(1, 0);
+    while (!stack.empty()) {
+      const Node &nd = nodes[stack.back()];
+      stack.pop_back();
+      if (!overlap(nd.b, box[t])) continue;
+      if (nd.left >= 0) {
+        stack.push_back(nd.left), stack.push_back(nd.right);
+        continue;
+      }
+      for (int k = nd.first; k < nd.first + nd.count; k++) {
+        uint32_t u = order[k];
+        if (u <= t || !overlap(box[u], box[t])) continue;
+        const uint32_t *y = &T[3 * u];
+        // (Triangles meeting at a corner or a side are neighbours, not a crossing.)
+        bool shared = false;
+        for (int i = 0; i < 3; i++)
+          for (int j = 0; j < 3; j++) shared = shared || x[i] == y[j];
+        if (shared) continue;
+        V3 d = P[y[0]], e = P[y[1]], f = P[y[2]];
+        if (through(d, e, a, b, c) || through(e, f, a, b, c) || through(f, d, a, b, c) || through(a, b, d, e, f) || through(b, c, d, e, f) ||
+            through(c, a, d, e, f))
+          return true;
+        // In one plane: overlapping (as pieces laid over each other are).
+        if (!orient3d(a, b, c, d) && !orient3d(a, b, c, e) && !orient3d(a, b, c, f)) {
+          V3 nrm = cross(b - a, c - a);
+          int drop = std::fabs(nrm.x) >= std::fabs(nrm.y) && std::fabs(nrm.x) >= std::fabs(nrm.z) ? 0 : std::fabs(nrm.y) >= std::fabs(nrm.z) ? 1 : 2;
+          const V3 t3[3] = {a, b, c}, u3[3] = {d, e, f};
+          if (overlapFlat(t3, u3, drop)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double t, std::vector<V3> &outPts,
+                  std::vector<uint32_t> &outTris, std::string &why) {
+  outPts.clear(), outTris.clear();
+  if (!(t > 0) || !std::isfinite(t)) return why = "the walls must be a size", false;
+  V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+  for (uint32_t i : tris) lo = vmin(lo, pts[i]), hi = vmax(hi, pts[i]);
+  if (tris.empty() || !std::isfinite(lo.x + lo.y + lo.z + hi.x + hi.y + hi.z)) return why = "nothing to hollow", false;
+  // A grid half the wall apart (coarser where that would take more than 20 million points), over the box and a step
+  // round it.
+  V3 span = hi - lo;
+  double h = std::max(t / 2, std::cbrt((span.x + t) * (span.y + t) * (span.z + t) / 2e7));
+  Grid g;
+  g.h = h;
+  for (int a = 0; a < 3; a++) g.o[a] = lo[a] - h, g.n[a] = (int)std::ceil(span[a] / h) + 3;
+  size_t N = (size_t)g.n[0] * g.n[1] * g.n[2];
+  std::vector<uint64_t> in;
+  if (!label(g, cast(pts, tris, g, 0), in)) return why = "nothing inside", false;
+  auto inside = [&](int i, int j, int k) {
+    size_t id = g.index(i, j, k);
+    return (in[id >> 6] >> (id & 63) & 1) != 0;
+  };
+  // How far each point inside lies from the surface, wherever that's less than the wall and a step (further: the void).
+  // (The void's surface is put a little further in than the wall, so that between the grid's points, where it's only
+  // as true as a straight line between them, the wall is still never thinner than asked.)
+  double wall = t + 0.15 * h, reach = wall + h;
+  std::vector<float> dist(N, INFINITY);
+  for (size_t q = 0; q + 2 < tris.size(); q += 3) {
+    V3 a = pts[tris[q]], b = pts[tris[q + 1]], c = pts[tris[q + 2]];
+    V3 bl = vmin(vmin(a, b), c), bh = vmax(vmax(a, b), c);
+    int r0[3], r1[3];
+    for (int x = 0; x < 3; x++) {
+      r0[x] = std::max(0, (int)std::floor((bl[x] - reach - g.o[x]) / h));
+      r1[x] = std::min(g.n[x] - 1, (int)std::ceil((bh[x] + reach - g.o[x]) / h));
+    }
+    for (int k = r0[2]; k <= r1[2]; k++)
+      for (int j = r0[1]; j <= r1[1]; j++)
+        for (int i = r0[0]; i <= r1[0]; i++) {
+          if (!inside(i, j, k)) continue;
+          V3 p{g.at(0, i), g.at(1, j), g.at(2, k)};
+          double d = norm(p - nearestOnTriangle(p, a, b, c));
+          float &at = dist[g.index(i, j, k)];
+          if (d < at) at = (float)d;
+        }
+  }
+  // The void: inside, and further than the wall from the surface; its surface where that distance is the wall's.
+  std::vector<uint64_t> hollow(in.size(), 0);
+  size_t voided = 0;
+  for (size_t id = 0; id < N; id++)
+    if ((in[id >> 6] >> (id & 63) & 1) && dist[id] > wall) hollow[id >> 6] |= 1ull << (id & 63), voided++;
+  if (!voided) return why = "the walls fill it", false;
+  auto empty = [&](int i, int j, int k) {
+    size_t id = g.index(i, j, k);
+    return (hollow[id >> 6] >> (id & 63) & 1) != 0;
+  };
+  // (Outside counts as on the surface; further than the wall and a step, as just that.)
+  auto beyond = [&](int i, int j, int k) {
+    size_t id = g.index(i, j, k);
+    if (!(in[id >> 6] >> (id & 63) & 1)) return -wall;
+    return std::min((double)dist[id], reach) - wall;
+  };
+  march(g, empty,
+        [&](int i, int j, int k, int a, bool) {
+          int up[3] = {i, j, k};
+          up[a]++;
+          double f0 = beyond(i, j, k), f1 = beyond(up[0], up[1], up[2]);
+          double f = f0 != f1 ? f0 / (f0 - f1) : 0.5;
+          return std::min(0.98, std::max(0.02, f));
+        },
+        4 * voided, outPts, outTris);
+  relax(outPts, outTris, 2);
+  // Facing into the void (away from the walls round it).
+  for (size_t q = 0; q + 2 < outTris.size(); q += 3) std::swap(outTris[q + 1], outTris[q + 2]);
   return true;
 }
 

@@ -1,5 +1,6 @@
 // Bcad's geometry engine: the primitives, exactly (bounding boxes and volumes from formulas), and their meshes.
 #include "Engine/Model.hpp"
+#include "Engine/Sculpt.hpp"
 
 #include "Engine/Print.hpp"
 #include "Engine/Radial.hpp"
@@ -741,6 +742,13 @@ std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<u
   s.centroids();
   double v = s.meshVolume();
   if (!(v > 0)) return why = "inside out", nullptr;
+  // Passing through itself (a sculpt pulled through itself, pieces overlapping): the solid it encloses, its outer skin.
+  if (selfCrossing(s.p, s.tri)) {
+    Solid r = resolved(s);
+    double rv = r.meshVolume();
+    if (r.tri.empty() || !(rv > 0)) return why = "it passes through itself", nullptr;
+    s = std::move(r), v = rv;
+  }
   auto m = std::make_shared<Model>();
   m->kind = Model::Mesh, m->volume = v;
   m->mesh = std::make_shared<const Solid>(std::move(s));

@@ -1480,6 +1480,7 @@ enum SelfTest {
             if case .sculpt(let sc)? = lib.body(clay.id)?.node, let shaped { isShaped = sc.data.fingerprint == shaped.fingerprint }
             let volume = lib.meshes[clay.id]?.volume ?? 0
             check("Done: the body is the shaped mesh, its scale taken in", isShaped && lib.mode == .select &&
+                  lib.body(clay.id)?.node.sculptTriangles == shaped?.triangleCount &&
                   lib.body(clay.id)?.place.scale == SIMD3(1, 1, 1) && volume > 11500 && volume < 13000, "volume \(volume)")
             let sculpted = lib.doc
             lib.undo()
@@ -1566,7 +1567,12 @@ enum SelfTest {
             ("tiny", [standing("1 mm cube", Palette.colors[5], block(1), -2, 0), standing("1 mm pin", Palette.colors[6], .primitive(Primitive(kind: .cylinder, size: [1, 1])), 2, 0)], true),
             ("big", [standing("250 mm ring", Palette.colors[7], .primitive(Primitive(kind: .ring, size: [250, 240, 5])), 0, 0)], true),
             ("odd-name", [standing("Tom & \"Jerry\" <1> 'x' 🙂", mixed, block(10), 0, 0)], true),
-            ("sculpted", [standing("Sculpted egg", Palette.colors[1], egg, 0, 0)], true),
+            ("sculpted", [standing("Sculpted egg", Palette.colors[1], egg, 0, 0),
+                          // Hollowed (1.5 mm walls) and merged onto a round base, as a figurine stands.
+                          Solid(name: "Hollow egg on a base", color: Palette.colors[2], node: .group(op: Int32(BK_UNION), parts: [
+                              Part(node: .hollow(of: egg, open: [], walls: [], thickness: 1.5), place: Placement(move: SIMD3(0, 0, 11))),
+                              Part(node: .primitive(Primitive(kind: .cylinder, size: [24, 4])), place: Placement())
+                          ]), place: Placement(move: SIMD3(40, 0, 2)))], true),
         ]
         var expected: [[String: Any]] = []
         for sample in samples {

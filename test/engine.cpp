@@ -8,6 +8,7 @@
 #include "Engine/Implicit.hpp"
 #include "Engine/Math.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Sculpt.hpp"
 #include "Engine/Print.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
@@ -1966,7 +1967,8 @@ int main() {
     check("mesh bodies: printed and written to STEP", pm && pm->valid && near(pm->volume, own, 1e-6 * own) && written == 1,
           pm && !pm->valid ? bk_last_error() : "");
     bk_print_mesh_free(pm);
-    // Two cubes apart in one mesh: two pieces. Overlapping: one solid, of their union's volume, once resolved.
+    // Two cubes apart in one mesh: two pieces. Overlapping (a mesh passing through itself): one solid at once, of their
+    // union's volume, and so again when resolved.
     auto pair = [&](double dx) {
       Welded w = wc;
       size_t n = w.pos.size() / 3;
@@ -1981,8 +1983,8 @@ int main() {
     for (size_t i = 0; i < ov.pos.size(); i += 3) pts.push_back({ov.pos[i], ov.pos[i + 1], ov.pos[i + 2]});
     auto overlapping = bce::meshModel(pts, ov.idx, why);
     bce::Solid whole = overlapping ? bce::resolved(*overlapping->mesh) : bce::Solid();
-    check("mesh bodies: pieces apart count as two; overlapping ones resolve to their union",
-          apart && bk_piece_count(apart) == 2 && near(vol(apart), 2000, 1e-9) && overlapping && near(overlapping->volume, 2000, 1e-9) &&
+    check("mesh bodies: pieces apart count as two; overlapping ones are their union",
+          apart && bk_piece_count(apart) == 2 && near(vol(apart), 2000, 1e-9) && overlapping && near(overlapping->volume, 1500, 1e-9) &&
               near(whole.meshVolume(), 1500, 1e-9) && bce::pieces(whole) == 1,
           fmt("%.0f pieces, resolved %.9f", apart ? bk_piece_count(apart) : -1, whole.meshVolume()));
     // Anything not a closed solid refused, and said why.
@@ -2159,6 +2161,12 @@ int main() {
       int n = 3 * bk_sculpt_vertex_count(s);
       std::vector<float> v(bk_sculpt_positions(s), bk_sculpt_positions(s) + n);
       v.insert(v.end(), bk_sculpt_normals(s), bk_sculpt_normals(s) + n);
+      return v;
+    };
+    auto vol = [](const BKShape *x) {
+      BKMesh *m = x ? bk_mesh(x, 0.05) : nullptr;
+      double v = m ? m->volume : 0;
+      bk_mesh_free(m);
       return v;
     };
     auto surface = [](const BKSculpt *s, double x, double y) {
@@ -2343,6 +2351,85 @@ int main() {
     }
     check("sculpting: a dab with the mirror on 50,000 points in under 2 ms", sf && bk_sculpt_vertex_count(sf) > 50000 && (!timed || each < 2),
           fmt("%.3f ms each on %.0f points", each, sf ? bk_sculpt_vertex_count(sf) : 0));
+
+    // Pulled through itself (the top grabbed down through the bottom): found crossing, and made one solid (its outer
+    // skin) as a body, which then crosses nothing. A smooth ball found not crossing, quickly.
+    BKSculpt *sx = make(rb);
+    bool crossedRaw = false, cleanAfter = false, printable = false;
+    double through = 0;
+    if (sx) {
+      V3 c = pt(sx, nearest(sx, {0, 0, 10}));
+      stroke(sx, BK_BRUSH_GRAB, c, {c + V3{0, 0, -12}, c + V3{0, 0, -24}}, 3, 0.5);
+      std::vector<V3> P;
+      for (int i = 0; i < bk_sculpt_vertex_count(sx); i++) P.push_back(pt(sx, (uint32_t)i));
+      std::vector<uint32_t> T(bk_sculpt_indices(sx), bk_sculpt_indices(sx) + 3 * bk_sculpt_triangle_count(sx));
+      crossedRaw = bce::selfCrossing(P, T);
+      std::string why;
+      auto m = bce::meshModel(P, T, why);
+      cleanAfter = m && !bce::selfCrossing(m->mesh->p, m->mesh->tri);
+      BKShape *x = bk_mesh_shape(bk_sculpt_positions(sx), bk_sculpt_vertex_count(sx), bk_sculpt_indices(sx), bk_sculpt_triangle_count(sx));
+      BKPrintMesh *pm = x ? bk_print_mesh(x) : nullptr;
+      printable = pm && pm->valid;
+      through = m ? m->volume : 0;
+      bk_print_mesh_free(pm);
+      bk_free(x);
+    }
+    check("sculpting: a body pulled through itself is found crossing, and made one solid that crosses nothing", crossedRaw && cleanAfter && printable,
+          fmt("volume %.1f", through));
+    bk_sculpt_free(sx);
+    Ready big = ready(ball, 0.25);
+    std::vector<V3> BP;
+    for (size_t i = 0; i < big.pos.size(); i += 3) BP.push_back({big.pos[i], big.pos[i + 1], big.pos[i + 2]});
+    auto t2 = std::chrono::steady_clock::now();
+    bool ballCrossed = bce::selfCrossing(BP, big.idx);
+    double crossMs = ms(t2);
+    check("sculpting: a remeshed ball crosses nothing, found quickly", !ballCrossed && big.idx.size() > 450000 && (!timed || crossMs < 600),
+          fmt("%.0f triangles in %.0f ms", big.idx.size() / 3, crossMs));
+
+    // A body thinner than its walls in places (arms pulled out of a block): hollowed on a grid, every wall at least about
+    // as thick as asked, the arms solid where they're thinner than two walls.
+    double block[3] = {20, 20, 30};
+    BKShape *tall = bk_primitive(BK_BOX, block);
+    Ready rt = ready(tall, 0.5);
+    BKSculpt *sa = make(rt);
+    double thinnest = 0, hv = 0;
+    bool gridMade = false;
+    if (sa) {
+      double o[3] = {100, 0, 5}, w[3] = {-1, 0, 0}, h[3], hn[3];
+      if (bk_sculpt_ray(sa, o, w, h, hn)) {
+        V3 c{h[0], h[1], h[2]};
+        stroke(sa, BK_BRUSH_GRAB, c, {c + V3{12, 0, 0}, c + V3{25, 0, 0}}, 4, 0.5, true);
+      }
+      BKShape *arms = bk_mesh_shape(bk_sculpt_positions(sa), bk_sculpt_vertex_count(sa), bk_sculpt_indices(sa), bk_sculpt_triangle_count(sa));
+      BKShape *hollow = arms ? bk_hollow(arms, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 1.2, nullptr) : nullptr;
+      hv = hollow ? vol(hollow) : 0;
+      std::vector<V3> P, vp;
+      for (int i = 0; i < bk_sculpt_vertex_count(sa); i++) P.push_back(pt(sa, (uint32_t)i));
+      std::vector<uint32_t> T(bk_sculpt_indices(sa), bk_sculpt_indices(sa) + 3 * bk_sculpt_triangle_count(sa)), vt;
+      std::string why;
+      gridMade = hollow && bce::hollowByGrid(P, T, 1.2, vp, vt, why);
+      thinnest = INFINITY;
+      for (size_t i = 0; gridMade && i < vp.size(); i += 7)
+        for (size_t q = 0; q < T.size(); q += 3) {
+          V3 a = P[T[q]], b = P[T[q + 1]], c = P[T[q + 2]], p = vp[i];
+          // The nearest point of the triangle: inside it, or else on its nearest side.
+          V3 n = bce::cross(b - a, c - a);
+          double nn = bce::dot(n, n);
+          V3 f = p - n * (bce::dot(p - a, n) / nn);
+          bool in = bce::dot(bce::cross(b - a, f - a), n) >= 0 && bce::dot(bce::cross(c - b, f - b), n) >= 0 && bce::dot(bce::cross(a - c, f - c), n) >= 0;
+          double d = in ? bce::norm(p - f) : INFINITY;
+          for (auto [u, v] : {std::pair<V3, V3>{a, b}, {b, c}, {c, a}}) {
+            double k = std::clamp(bce::dot(p - u, v - u) / bce::dot(v - u, v - u), 0.0, 1.0);
+            d = std::min(d, bce::norm(p - (u + (v - u) * k)));
+          }
+          thinnest = std::min(thinnest, d);
+        }
+      bk_free(hollow), bk_free(arms);
+    }
+    check("hollowing: a body thinner than twice its walls in places is hollowed on a grid, its walls as thick as asked",
+          gridMade && hv > 0 && thinnest >= 1.2, fmt("volume %.1f, thinnest wall %.3f", hv, thinnest));
+    bk_sculpt_free(sa);
+    bk_free(tall);
 
     for (BKSculpt *x : {sb, ss, sr, sm, sf}) bk_sculpt_free(x);
     bk_free(box), bk_free(ball);

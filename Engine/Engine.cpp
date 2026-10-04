@@ -434,6 +434,13 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
     via.viaSharp = true, via.sharp = sharp[k]->shape;
     if ((ok = hollowed(s->shape, via, d, made))) h = via;
   }
+  // Walls that can't be offset all round (a body thinner than twice them in places, as a sculpted one often is): the void
+  // found on a grid instead, where no face is to be opened or have a wall of its own.
+  if (!ok && h.open.empty() && h.walls.empty()) {
+    Hollowing via = h;
+    via.grid = true;
+    if ((ok = hollowed(s->shape, via, d, made))) h = via;
+  }
   if (missing) *missing = miss;
   if (!ok) {
     lastError = "hollow: the walls don't fit this shape";

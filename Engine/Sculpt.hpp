@@ -14,6 +14,15 @@ namespace bce {
 bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double detail, std::vector<V3> &outPts, std::vector<uint32_t> &outTris,
             std::string &why, size_t most = 1500000);
 
+// Whether a mesh passes through itself: two of its triangles that share no corner crossing (touching doesn't count).
+bool selfCrossing(const std::vector<V3> &pts, const std::vector<uint32_t> &tris);
+
+// The void that hollows a closed mesh with walls `t` thick: every point inside it further than t from its surface, as a
+// closed mesh facing into the void (a part of the body thinner than twice the walls stays solid). Found on a grid half
+// the walls apart, so its surface is as true as that. False with `why` when the walls would fill the body.
+bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double t, std::vector<V3> &outPts,
+                  std::vector<uint32_t> &outTris, std::string &why);
+
 // A body being sculpted: its mesh (points shared, closed) shaped by strokes of a brush, each stroke undone and done again
 // as one. Brushes (as BK_BRUSH_…): grab (the points under it at the start carried along by the drag), draw (raised along
 // the surface's average way out there; carved when inverted), inflate (each point along its own normal), smooth (each

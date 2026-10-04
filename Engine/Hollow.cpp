@@ -4,6 +4,7 @@
 // shrunk alike (a face hidden inside the merge moved out, into the next part's void), what's taken away grown, a cut's
 // face moved in; roundings narrower by the walls, bevels moved in, inward roundings wider round the same edges.
 #include "Engine/Model.hpp"
+#include "Engine/Sculpt.hpp"
 #include "Engine/Treat.hpp"
 #include "Engine/Weld.hpp"
 
@@ -1256,8 +1257,36 @@ bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *mis
   return true;
 }
 
+// Hollowed on a grid: the body's own surface as it is, and inside it the void further than the walls from that (a face
+// of its own, facing in).
+static bool gridHollowed(const Shape &s, const Hollowing &h, double d, Solid &out) {
+  Solid whole;
+  mesh(s, d, whole);
+  std::vector<V3> vp;
+  std::vector<uint32_t> vt;
+  std::string why;
+  if (whole.tri.empty() || !hollowByGrid(whole.p, whole.tri, std::max(h.thickness, 0.01), vp, vt, why)) return false;
+  out = std::move(whole);
+  uint32_t base = (uint32_t)out.p.size(), face = (uint32_t)out.faces.size();
+  std::vector<V3> nn(vp.size(), V3{0, 0, 0});
+  for (size_t q = 0; q + 2 < vt.size(); q += 3) {
+    V3 w = cross(vp[vt[q + 1]] - vp[vt[q]], vp[vt[q + 2]] - vp[vt[q]]);
+    for (int k = 0; k < 3; k++) nn[vt[q + k]] += w;
+  }
+  for (size_t i = 0; i < vp.size(); i++) out.vertex(vp[i], norm(nn[i]) > 0 ? unit(nn[i]) : V3{0, 0, 1});
+  out.faces.push_back({});
+  out.faces.back().normal = {0, 0, 1};
+  out.faces.back().geom.exact = false;
+  for (size_t q = 0; q + 2 < vt.size(); q += 3) out.triangle(base + vt[q], base + vt[q + 1], base + vt[q + 2], (int)face);
+  if (!out.gap.empty()) out.gap.resize(out.tri.size() / 3 * 6, 0.0);
+  out.sound.clear(), out.grid = 0;
+  out.centroids();
+  return true;
+}
+
 static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing) {
   if (missing) *missing = 0;
+  if (h.grid) return gridHollowed(s, h, d, out);
   Solid whole;
   mesh(s, d, whole);
   if (whole.tri.empty()) return false;
