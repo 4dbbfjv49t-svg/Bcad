@@ -55,6 +55,18 @@ jobs:
           ./test/selftest.sh 2>&1 | tee "$RUNNER_TEMP/results/selftest.log"
           echo "self-test took $(( $(date +%s) - start )) s"
 
+      - name: Print files as slicers read them
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q lib3mf trimesh numpy
+          "$RUNNER_TEMP/venv/bin/python" test/printcheck.py "$TMPDIR/bcad-selftest/print-samples"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: print-samples
+          path: ${{ runner.temp }}/tmp/bcad-selftest/print-samples
+
       - name: Build app
         run: |
           start=$(date +%s)
@@ -139,6 +151,23 @@ jobs:
           path: |
             ${{ runner.temp }}/results
             ${{ runner.temp }}/tmp/bcad-selftest
+
+  # Real slicers open the print samples (Bambu Studio, PrusaSlicer, Cura's engine): not yet gating.
+  slicers:
+    needs: mac
+    runs-on: macos-26
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: print-samples
+          path: samples
+      - name: Slicers open the samples
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./test/slicers.sh samples
 
   linux:
     runs-on: ubuntu-latest

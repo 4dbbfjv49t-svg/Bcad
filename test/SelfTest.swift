@@ -385,7 +385,7 @@ enum SelfTest {
         var odd = Document()
         odd.bodies = [Solid(name: "Odd", color: Palette.colors[0], node: .primitive(Primitive(kind: .box, size: [20])))]
         let oddURL = dir.appendingPathComponent("odd.3mf")
-        try? ThreeMF.write(oddURL, meshes: [], doc: odd)
+        try? ThreeMF.write(oddURL, meshes: [], doc: odd, bed: bed)
         check("3mf with wrong sizes refused", (try? ThreeMF.read(oddURL)) == nil)
         // A packed entry with nothing in it is refused rather than unpacked, and a shape scaled to nothing isn't read in.
         var unpacked = [UInt8](Zip.write([("a", Data(repeating: 65, count: 1000))]))
@@ -1215,6 +1215,49 @@ enum SelfTest {
         lib.open(nothingURL)
         settle()
         check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
+
+        // Print samples for test/printcheck.py (and to open in slicers by hand): each saved as the app saves it and written as
+        // an STL as it exports one; expect.json says what each holds.
+        let samplesDir = dir.appendingPathComponent("print-samples")
+        try? FileManager.default.removeItem(at: samplesDir)
+        try? FileManager.default.createDirectory(at: samplesDir, withIntermediateDirectories: true)
+        func cube(_ s: Double) -> Node { .primitive(Primitive(kind: .box, size: [s, s, s])) }
+        // Standing on the bed at (x, y).
+        func standing(_ name: String, _ color: SIMD3<UInt8>, _ node: Node, _ x: Double, _ y: Double) -> Solid {
+            let height = node.extent(clearance: k.clearance)?.z ?? 20
+            return Solid(name: name, color: color, node: node, place: Placement(move: SIMD3(x, y, height / 2)))
+        }
+        let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))
+        let samples: [(name: String, bodies: [Solid], stlWatertight: Bool)] = [
+            ("colours", [standing("Red box", SIMD3(230, 40, 40), cube(20), -40, 0),
+                         standing("Blue cylinder", SIMD3(40, 80, 230), .primitive(.make(.cylinder)), 0, 0),
+                         standing("Green ball", SIMD3(40, 200, 80), .primitive(.make(.sphere)), 40, 0)], true),
+            ("touching", [Solid(name: "Two cubes on an edge", color: Palette.colors[0], node: .group(op: Int32(BK_UNION), parts: [
+                Part(node: cube(10), place: Placement()), Part(node: cube(10), place: Placement(move: SIMD3(10, 10, 0)))
+            ]), place: Placement(move: SIMD3(0, 0, 5)))], false),
+            ("hollow", [standing("Hollow box", Palette.colors[1], .hollow(of: cube(20), open: [], walls: [], thickness: 2), 0, 0)], true),
+            ("bolt-and-nut", [standing("M8 bolt", Palette.colors[2], bolt, -15, 0), standing("M8 nut", Palette.colors[3], nut, 15, 0)], true),
+            ("rounded", [standing("Rounded box", Palette.colors[4], .round(of: cube(20), picks: [Pick(kind: Int32(BK_PICK_BODY), a: .zero, b: .zero)], radius: 3), 0, 0)], true),
+            ("tiny", [standing("1 mm cube", Palette.colors[5], cube(1), -2, 0), standing("1 mm pin", Palette.colors[6], .primitive(Primitive(kind: .cylinder, size: [1, 1])), 2, 0)], true),
+            ("big", [standing("250 mm ring", Palette.colors[7], .primitive(Primitive(kind: .ring, size: [250, 240, 5])), 0, 0)], true),
+            ("odd-name", [standing("Tom & \"Jerry\" <1> 'x' 🙂", mixed, cube(10), 0, 0)], true),
+        ]
+        var expected: [[String: Any]] = []
+        for sample in samples {
+            lib.doc = Document(bodies: sample.bodies)
+            lib.note = nil
+            let made = k.queue.sync { sample.bodies.map { k.printMesh($0) } }
+            let savedSample = saveAs(samplesDir.appendingPathComponent(sample.name + ".3mf"))
+            try? STL.write(samplesDir.appendingPathComponent(sample.name + ".stl"), meshes: made.compactMap { $0?.mesh })
+            check("print sample \(sample.name) saved as sound solids", savedSample && made.allSatisfy { $0 != nil && $0?.problem == nil }
+                  && !(lib.note ?? "").contains("Check before printing"), lib.note ?? "")
+            expected.append(["name": sample.name, "stlWatertight": sample.stlWatertight,
+                             "objects": zip(sample.bodies, made).map { b, m in ["name": b.name, "color": ThreeMF.hex(b.color), "volume": m?.mesh.volume ?? 0] as [String: Any] }])
+        }
+        let bedSize = lib.settings.bed
+        if let json = try? JSONSerialization.data(withJSONObject: ["bed": [bedSize.x, bedSize.y, bedSize.z], "samples": expected] as [String: Any], options: [.prettyPrinted, .sortedKeys]) {
+            try? json.write(to: samplesDir.appendingPathComponent("expect.json"))
+        }
 
         // The workbench's build must end before the process does (the app leaves at once as it quits).
         k.queue.sync {}
