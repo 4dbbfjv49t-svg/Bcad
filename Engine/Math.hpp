@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "Trig.hpp"
+
 namespace bce {
 
 struct V3 {

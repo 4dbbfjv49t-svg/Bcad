@@ -248,7 +248,7 @@ V3 project(const Set &s, const Tree &t, V3 x) {
   }
   auto onto = [&](V3 x) {
     V3 y = s.toLocal.point(x);
-    double rho = std::hypot(y.x, y.y), c = rho > 0 ? y.x / rho : 1, sn = rho > 0 ? y.y / rho : 0, r, z;
+    double rho = trig::hypot(y.x, y.y), c = rho > 0 ? y.x / rho : 1, sn = rho > 0 ? y.y / rho : 0, r, z;
     if (s.exact == Set::Circle) {
       r = s.r, z = s.z;
     } else if (s.exact == Set::Turned) {

@@ -79,8 +79,8 @@ struct Section2 {
 
 // An arc run's start angle and its turn (signed) round its middle to the next point q, the way through its `mid`.
 void arcTurn(const Section2::Run &r, V3 q, double &a0, double &turn) {
-  a0 = std::atan2(r.p.y - r.centre.y, r.p.x - r.centre.x);
-  double a1 = std::atan2(q.y - r.centre.y, q.x - r.centre.x), am = std::atan2(r.mid.y - r.centre.y, r.mid.x - r.centre.x);
+  a0 = trig::atan2(r.p.y - r.centre.y, r.p.x - r.centre.x);
+  double a1 = trig::atan2(q.y - r.centre.y, q.x - r.centre.x), am = trig::atan2(r.mid.y - r.centre.y, r.mid.x - r.centre.x);
   turn = std::remainder(a1 - a0, 2 * pi);
   double half = std::remainder(am - a0, 2 * pi);
   if (turn > 0 ? !(half > 0 && half < turn) : !(half < 0 && half > turn)) turn += turn > 0 ? -2 * pi : 2 * pi;
@@ -88,7 +88,7 @@ void arcTurn(const Section2::Run &r, V3 q, double &a0, double &turn) {
 
 // Chords an arc takes for a chord error of d (and at least one per 20°).
 int chordsFor(double turn, double r, double d) {
-  int k = std::max(1, (int)std::ceil(std::fabs(turn) / (2 * std::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
+  int k = std::max(1, (int)std::ceil(std::fabs(turn) / (2 * trig::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
   return std::min(std::max(k, (int)std::ceil(std::fabs(turn) / 0.35 - 1e-9)), 64);
 }
 
@@ -113,7 +113,7 @@ std::vector<V3> pointsOf(const Section2 &s, const std::vector<int> &chords, std:
     // Turned by an odd part of a step, so no corner lands on a face through the edge (a side lying in a face's plane).
     for (int j = 0; j < chords[0]; j++) {
       double a = 2 * pi * (j + 0.381966) / chords[0];
-      out.push_back(s.centre + p2(std::cos(a), std::sin(a)) * s.radius);
+      out.push_back(s.centre + p2(trig::cos(a), trig::sin(a)) * s.radius);
       if (runOf) runOf->push_back(0);
     }
     return out;
@@ -128,7 +128,7 @@ std::vector<V3> pointsOf(const Section2 &s, const std::vector<int> &chords, std:
     arcTurn(r, s.runs[(i + 1) % n].p, a0, turn);
     for (int j = 1; j < chords[i]; j++) {
       double a = a0 + turn * j / chords[i];
-      out.push_back(r.centre + p2(std::cos(a), std::sin(a)) * r.radius);
+      out.push_back(r.centre + p2(trig::cos(a), trig::sin(a)) * r.radius);
       if (runOf) runOf->push_back((int)i);
     }
   }
@@ -150,7 +150,7 @@ void ccw(Section2 &s) {
 // material to db.
 double cornerAngle(V3 da, V3 na, V3 db) {
   double u = dot(db, da), v = dot(db, na);
-  double phi = std::atan2(-v, u);
+  double phi = trig::atan2(-v, u);
   return phi <= 0 ? phi + 2 * pi : phi;
 }
 
@@ -169,8 +169,8 @@ Touch touchAt(V3 e, V3 da, V3 na, V3 db, double r) {
   V3 dB = unit(p2(dot(db, da), dot(db, na)));
   double phi = cornerAngle(p2(1, 0), p2(0, 1), dB);
   bool convex = phi < pi;
-  double half = (convex ? phi : 2 * pi - phi) / 2, t = r / std::tan(half);
-  V3 c = unit(p2(1, 0) + dB) * (r / std::sin(half));
+  double half = (convex ? phi : 2 * pi - phi) / 2, t = r / trig::tan(half);
+  V3 c = unit(p2(1, 0) + dB) * (r / trig::sin(half));
   return {e + da * t, e + db * t, e + da * c.x + na * c.y, convex};
 }
 
@@ -223,7 +223,7 @@ Cut2 cutOf(const FaceGeom &g, V3 E, V3 U, V3 N, V3 dir2, V3 n2) {
   c.dir = dir2, c.n = n2;
   if (g.flat || g.kind != FaceGeom::Turned || !g.exact || !g.elem.arc) return c;
   V3 L = g.place.inverse().point(E);
-  double lr = std::hypot(L.x, L.y);
+  double lr = trig::hypot(L.x, L.y);
   if (lr < 1e-12) return c;
   V3 Q = g.place.point(V3{L.x / lr * g.elem.cr, L.y / lr * g.elem.cr, g.elem.cz});
   c.circle = true, c.q = p2(dot(Q - E, U), dot(Q - E, N)), c.rad = g.elem.rad * norm(g.place.vector({1, 0, 0}));
@@ -243,7 +243,7 @@ Cut2 bendOf(const FaceGeom &g, V3 E, V3 U, V3 N, V3 dir2, V3 n2, V3 out) {
   V3 a = unit(g.place.vector({0, 0, 1})), o = g.place.point({0, 0, 0});
   // On the face itself (E, a mesh point, lies a chord's sag inside a convex one).
   V3 L = g.place.inverse().point(E);
-  double lr = std::hypot(L.x, L.y), pr, pz;
+  double lr = trig::hypot(L.x, L.y), pr, pz;
   if (lr < 1e-12) return c;
   double t = g.elem.nearest(lr, L.z), nr, nz;
   g.elem.at(t, pr, pz);
@@ -343,7 +343,7 @@ bool rollAt(const Cut2 &A, const Cut2 &B, double r, V3 &C, V3 &TA, V3 &TB, V3 &n
 double alongCut(const Cut2 &F, V3 T) {
   if (!F.circle) return norm(T);
   V3 a = unit(p2(0, 0) - F.q), b = unit(T - F.q);
-  return F.rad * std::acos(std::clamp(dot(a, b), -1.0, 1.0));
+  return F.rad * trig::acos(std::clamp(dot(a, b), -1.0, 1.0));
 }
 
 // Rounding the corner at the origin where a face is curved in the cut: the circle as rollAt finds it, the rest as
@@ -469,10 +469,10 @@ std::vector<int> capOf(const std::vector<V3> &pts) {
 
 // The arc of a circle (2D) from p to q the way that passes nearest `near`, as a turned outline's piece.
 Elem arcThrough(V3 c, double r, V3 p, V3 q, V3 near) {
-  double a0 = std::atan2(p.y - c.y, p.x - c.x), a1 = std::atan2(q.y - c.y, q.x - c.x), d = a1 - a0;
+  double a0 = trig::atan2(p.y - c.y, p.x - c.x), a1 = trig::atan2(q.y - c.y, q.x - c.x), d = a1 - a0;
   while (d > pi) d -= 2 * pi;
   while (d < -pi) d += 2 * pi;
-  double mid = a0 + d / 2, want = std::atan2(near.y - c.y, near.x - c.x);
+  double mid = a0 + d / 2, want = trig::atan2(near.y - c.y, near.x - c.x);
   double off = std::fabs(std::remainder(mid - want, 2 * pi)), other = std::fabs(std::remainder(mid + pi - want, 2 * pi));
   if (other < off) d += d > 0 ? -2 * pi : 2 * pi;
   Elem e = Elem::arcOf(c.x, c.y, r, a0, a0 + d);
@@ -723,7 +723,7 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
   double best = INFINITY;
   for (size_t q = 0; q < loops.size(); q++)
     for (size_t j = 0; j < loops[q].size(); j++) {
-      double d = std::hypot(loops[q][j].first, loops[q][j].second);
+      double d = trig::hypot(loops[q][j].first, loops[q][j].second);
       if (d < best) best = d, loop = &loops[q], sides = q < faceOf.size() ? &faceOf[q] : nullptr, k = j;
     }
   if (!loop || loop->size() < 3) return out;
@@ -747,7 +747,7 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
       double l = norm(d);
       if (l > 1e-12) {
         V3 h = d / l;
-        double turn = have ? std::acos(std::clamp(dot(heading, h), -1.0, 1.0)) : 0;
+        double turn = have ? trig::acos(std::clamp(dot(heading, h), -1.0, 1.0)) : 0;
         // Onto another face: on only where they meet smoothly (a rounding going on from it: its mesh's first chord turns
         // by as much as half a step round it).
         if (face >= 0 && f != face) {
@@ -813,7 +813,7 @@ Runs runsAt(const Solid &s, const Crease &c, size_t i, const std::vector<Crease>
       if (norm(o.pts[q] - end) < best) best = norm(o.pts[q] - end), j = q;
     double phi = o.angleAt(j) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
     V3 along = o.pts[std::min(j + 1, o.pts.size() - 1)] - o.pts[j > 0 ? j - 1 : 0], world = X * dir.x + Y * dir.y;
-    double sine = norm(along) > 0 ? norm(cross(unit(along), unit(world))) : 1, per = 1 / std::tan(half);
+    double sine = norm(along) > 0 ? norm(cross(unit(along), unit(world))) : 1, per = 1 / trig::tan(half);
     if (radius > 0 && face >= 0 && (o.fa[j] == face || o.fb[j] == face)) {
       V3 U = o.ia[j], N = unit(o.na[j] - U * dot(o.na[j], U));
       V3 db = unit(p2(dot(o.ib[j], U), dot(o.ib[j], N))), nb = unit(p2(dot(o.nb[j], U), dot(o.nb[j], N)));
@@ -1017,11 +1017,11 @@ struct Builder {
 std::vector<V3> loopAt(const Line &L, V3 q, double r, double m) {
   V3 TA = q + L.na * r, TB = q + L.nb * r;
   std::vector<V3> loop{TA, q + L.na * (r + m), q + (L.na + L.nb) * ((r + m) / (1 + dot(L.na, L.nb))), q + L.nb * (r + m), TB};
-  double alpha = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
+  double alpha = trig::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
   V3 w = unit(L.na - L.nb * dot(L.na, L.nb));
   for (int j = 1; j < L.arcs; j++) {
     double a = alpha * j / L.arcs;
-    loop.push_back(q + (L.nb * std::cos(a) + w * std::sin(a)) * r);
+    loop.push_back(q + (L.nb * trig::cos(a) + w * trig::sin(a)) * r);
   }
   return loop;
 }
@@ -1030,9 +1030,9 @@ std::vector<V3> loopAt(const Line &L, V3 q, double r, double m) {
 V3 axisAt(const Line &L, double s, double r) { return L.E0 + L.T * s - (L.na + L.nb) * (r / (1 + dot(L.na, L.nb))); }
 
 V3 slerp(V3 a, V3 b, double t) {
-  double th = std::acos(std::clamp(dot(a, b), -1.0, 1.0));
+  double th = trig::acos(std::clamp(dot(a, b), -1.0, 1.0));
   if (th < 1e-9) return unit(a * (1 - t) + b * t);
-  return unit(a * (std::sin((1 - t) * th) / std::sin(th)) + b * (std::sin(t * th) / std::sin(th)));
+  return unit(a * (trig::sin((1 - t) * th) / trig::sin(th)) + b * (trig::sin(t * th) / trig::sin(th)));
 }
 
 // The ball's patch at a corner: its outline (the lines' arcs one after another) filled in rings towards its middle.
@@ -1043,8 +1043,8 @@ void ballPatch(Builder &B, const Ball &ball, const std::vector<V3> &outline, dou
   B.faces[f].centre = ball.C;
   V3 mid = unit(ball.V - ball.C);
   double widest = 0;
-  for (V3 p : outline) widest = std::max(widest, std::acos(std::clamp(dot(unit(p - ball.C), mid), -1.0, 1.0)));
-  int rings = std::max(1, (int)std::ceil(widest / (2 * std::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
+  for (V3 p : outline) widest = std::max(widest, trig::acos(std::clamp(dot(unit(p - ball.C), mid), -1.0, 1.0)));
+  int rings = std::max(1, (int)std::ceil(widest / (2 * trig::acos(std::clamp(1 - d / r, -1.0, 1.0))) - 1e-9));
   rings = std::min(rings, 32);
   size_t n = outline.size();
   std::vector<std::vector<V3>> ring(rings + 1);
@@ -1058,7 +1058,7 @@ void ballPatch(Builder &B, const Ball &ball, const std::vector<V3> &outline, dou
     // The ball's sector over this triangle less the triangle's pyramid from the middle.
     V3 x = a - ball.C, y = b - ball.C, z = c - ball.C;
     double det = dot(x, cross(y, z)), den = r * r * r + dot(x, y) * r + dot(y, z) * r + dot(z, x) * r;
-    double omega = 2 * std::atan2(std::fabs(det), den);
+    double omega = 2 * trig::atan2(std::fabs(det), den);
     miss += r * r * r * std::fabs(omega) / 3 - std::fabs(det) / 6;
   };
   for (size_t j = 0; j < n; j++) {
@@ -1140,8 +1140,8 @@ std::vector<Solid> lineTools(const Solid &s, const std::vector<Line> &lines, con
         int f = j < 4 ? faceOf[j] : arc;
         B.quad(ends[0][j], ends[0][n], ends[1][n], ends[1][j], f);
       }
-      double a = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
-      B.faces[arc].miss += L.arcs * r * r / 2 * (a - std::sin(a)) * between;
+      double a = trig::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
+      B.faces[arc].miss += L.arcs * r * r / 2 * (a - trig::sin(a)) * between;
       for (int e = 0; e < 2; e++) {
         if (L.ball[e] >= 0) continue;
         // A free end's cap: a fan from its outer corner.
@@ -1218,7 +1218,7 @@ Solid prismTool(const Section2 &sec, const std::vector<V3> &at, V3 U, V3 N, V3 T
     faceOf[i] = B.face(1, cyl);
     B.faces[faceOf[i]].axisPoint = c3, B.faces[faceOf[i]].axis = T;
     double a = std::fabs(turn) / chords[i];
-    B.faces[faceOf[i]].miss = chords[i] * r * r / 2 * (a - std::sin(a)) * length;
+    B.faces[faceOf[i]].miss = chords[i] * r * r / 2 * (a - trig::sin(a)) * length;
   }
   for (size_t i = 0; i + 1 < n; i++)
     for (size_t j = 0; j < k; j++) {
@@ -1262,8 +1262,8 @@ Solid turnTool(const Section2 &sec, const std::vector<V3> &E, const std::vector<
   double sweep = 0, sines = 0;
   for (size_t i = 0; i + 1 < n; i++) {
     V3 a = unit((E[i] - centre) - axis * dot(E[i] - centre, axis)), b = unit((E[i + 1] - centre) - axis * dot(E[i + 1] - centre, axis));
-    double step = std::atan2(norm(cross(a, b)), dot(a, b));
-    sweep += step, sines += std::sin(step);
+    double step = trig::atan2(norm(cross(a, b)), dot(a, b));
+    sweep += step, sines += trig::sin(step);
   }
   Solid out;
   std::vector<int> faceOf(runs, -1);
@@ -1352,9 +1352,9 @@ Section2 asRuns(const Section2 &s, double d) {
   out.fill = s.fill;
   for (int h = 0; h < 2; h++) {
     Section2::Run r;
-    r.p = s.centre + p2(std::cos(a0 + pi * h), std::sin(a0 + pi * h)) * s.radius;
+    r.p = s.centre + p2(trig::cos(a0 + pi * h), trig::sin(a0 + pi * h)) * s.radius;
     r.arc = true, r.centre = s.centre, r.radius = s.radius;
-    r.mid = s.centre + p2(std::cos(a0 + pi * h + pi / 2), std::sin(a0 + pi * h + pi / 2)) * s.radius;
+    r.mid = s.centre + p2(trig::cos(a0 + pi * h + pi / 2), trig::sin(a0 + pi * h + pi / 2)) * s.radius;
     out.runs.push_back(r);
   }
   return out;
@@ -1392,10 +1392,10 @@ Section2 clipped(const Section2 &s, V3 g, double h, bool &cutAway) {
     }
     double a0, turn;
     arcTurn(r, q, a0, turn);
-    double A = side(r.centre), gl = norm(g), gamma = std::atan2(g.y, g.x);
+    double A = side(r.centre), gl = norm(g), gamma = trig::atan2(g.y, g.x);
     std::vector<double> at{0, 1};
     if (std::fabs(A) < r.radius * gl) {
-      double off = std::acos(-A / (r.radius * gl));
+      double off = trig::acos(-A / (r.radius * gl));
       for (double a : {gamma + off, gamma - off}) {
         double dlt = std::remainder(a - a0, 2 * pi);
         if (turn > 0 && dlt < 0) dlt += 2 * pi;
@@ -1405,7 +1405,7 @@ Section2 clipped(const Section2 &s, V3 g, double h, bool &cutAway) {
       }
     }
     std::sort(at.begin(), at.end());
-    auto pointAt = [&](double f) { return f <= 0 ? p : f >= 1 ? q : r.centre + p2(std::cos(a0 + turn * f), std::sin(a0 + turn * f)) * r.radius; };
+    auto pointAt = [&](double f) { return f <= 0 ? p : f >= 1 ? q : r.centre + p2(trig::cos(a0 + turn * f), trig::sin(a0 + turn * f)) * r.radius; };
     for (size_t k = 0; k + 1 < at.size(); k++) {
       double mid = (at[k] + at[k + 1]) / 2;
       if (side(pointAt(mid)) < 0) continue;
@@ -1444,7 +1444,7 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
     mid = mid / (double)pts.size();
     V3 n = s.faces[f].geom.pn, e1 = unit(pts[0] - mid), e2 = cross(n, e1);
     std::sort(pts.begin(), pts.end(), [&](V3 a, V3 b) {
-      double ta = std::atan2(dot(a - mid, e2), dot(a - mid, e1)), tb = std::atan2(dot(b - mid, e2), dot(b - mid, e1));
+      double ta = trig::atan2(dot(a - mid, e2), dot(a - mid, e1)), tb = trig::atan2(dot(b - mid, e2), dot(b - mid, e1));
       return ta != tb ? ta < tb : a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
     });
     int face = B.face(0, s.faces[f].geom);
@@ -1471,8 +1471,8 @@ bool roundedWhole(const Solid &s, const std::vector<Line> &lines, const std::vec
     int arc = B.face(1, cyl);
     B.faces[arc].axisPoint = q, B.faces[arc].axis = L.T;
     for (size_t j = 0; j + 1 < ends[0].size(); j++) B.quad(ends[0][j], ends[0][j + 1], ends[1][j + 1], ends[1][j], arc);
-    double a = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
-    B.faces[arc].miss = L.arcs * r * r / 2 * (a - std::sin(a)) * between;
+    double a = trig::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0)) / L.arcs;
+    B.faces[arc].miss = L.arcs * r * r / 2 * (a - trig::sin(a)) * between;
   }
   for (const auto &ball : balls) {
     std::vector<V3> outline;
@@ -1842,7 +1842,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       for (size_t k = 1; k < c.pts.size(); k++)
         if (norm(c.pts[k] - at) < norm(c.pts[j] - at)) j = k;
       double phi = c.angleAt(j) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
-      setback[e] = t.kind == Treatment::Round ? 1 / std::tan(half) : 1;
+      setback[e] = t.kind == Treatment::Round ? 1 / trig::tan(half) : 1;
     }
     for (size_t k = 0; k < c.pts.size(); k++)
       for (int f : {c.fa[k], c.fb[k]})
@@ -1859,7 +1859,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     double phi = c.angleAt(mid) * pi / 180, half = std::max((phi < pi ? phi : 2 * pi - phi) / 2, 1e-3);
     if (t.kind == Treatment::Round) {
       // Along a face shared with another rounding, the two reaches together (r·cot of each half angle) fill it at most.
-      double own = 1 / std::tan(half);
+      double own = 1 / trig::tan(half);
       double ra = r.a / (own + (r.aShared ? r.aOther : 0)), rb = r.b / (own + (r.bShared ? r.bOther : 0));
       // A face too narrow for it, open past its end and no other rounding's: the rounding runs on past it (spills over),
       // taking all of it, and ends on the next face as that face cuts across its circle. One side at most, at an outside
@@ -1868,7 +1868,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       if ((ra < t.radius) != (rb < t.radius)) {
         // Its circle in the end-on frame (u into face A, v A's normal; B's way in at the corner's angle): in the material
         // at an outside corner, in the air at an inside one.
-        V3 C = p2(t.radius / std::tan(half), phi < pi ? -t.radius : t.radius);
+        V3 C = p2(t.radius / trig::tan(half), phi < pi ? -t.radius : t.radius);
         auto crosses = [&](V3 at, V3 way) {
           V3 w = C - at;
           return std::fabs(w.x * way.y - w.y * way.x) < t.radius * (1 - 1e-6);
@@ -1996,8 +1996,8 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
       Line L;
       L.c = &c, L.E0 = c.pts.front(), L.E1 = c.pts.back(), L.T = T, L.fa = c.fa[0], L.fb = c.fb[0];
       L.na = s.faces[L.fa].geom.pn, L.nb = s.faces[L.fb].geom.pn;
-      double alpha = std::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
-      L.arcs = std::max(1, (int)std::ceil(alpha / (2 * std::acos(std::clamp(1 - d / t.radius, -1.0, 1.0))) - 1e-9));
+      double alpha = trig::acos(std::clamp(dot(L.na, L.nb), -1.0, 1.0));
+      L.arcs = std::max(1, (int)std::ceil(alpha / (2 * trig::acos(std::clamp(1 - d / t.radius, -1.0, 1.0))) - 1e-9));
       L.arcs = std::min(std::max(L.arcs, (int)std::ceil(alpha / 0.35 - 1e-9)), 64);
       lines.push_back(L);
       isLine[i] = 1;
@@ -2548,7 +2548,7 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
             V3 e2 = cross(axis, e1);
             std::vector<double> angle;
             for (V3 q : on) {
-              double a = std::atan2(dot(q, e2), dot(q, e1));
+              double a = trig::atan2(dot(q, e2), dot(q, e1));
               angle.push_back(a < -1e-9 ? a + 2 * pi : std::max(a, 0.0));
             }
             std::sort(angle.begin(), angle.end());

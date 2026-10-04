@@ -120,7 +120,7 @@ bool flatInset(const Model &m, const Affine &W, const std::vector<double> &move,
     centre = centre / (double)on.size();
     V3 e1 = unit(pts[on[0]] - centre), e2 = cross(n[f], e1);
     std::sort(on.begin(), on.end(), [&](int a, int b) {
-      double ta = std::atan2(dot(pts[a] - centre, e2), dot(pts[a] - centre, e1)), tb = std::atan2(dot(pts[b] - centre, e2), dot(pts[b] - centre, e1));
+      double ta = trig::atan2(dot(pts[a] - centre, e2), dot(pts[a] - centre, e1)), tb = trig::atan2(dot(pts[b] - centre, e2), dot(pts[b] - centre, e1));
       return ta < tb || (ta == tb && a < b);
     });
     loops.push_back(on);
@@ -229,7 +229,7 @@ bool outlineInset(const std::vector<Elem> &prof, const std::vector<double> &move
     }
     const Elem &m = moved[k];
     if (!(m.rad > 0)) return false;
-    double a0 = std::atan2(from.y - m.cz, from.x - m.cr), a1 = std::atan2(to.y - m.cz, to.x - m.cr), turn = e.a1 - e.a0;
+    double a0 = trig::atan2(from.y - m.cz, from.x - m.cr), a1 = trig::atan2(to.y - m.cz, to.x - m.cr), turn = e.a1 - e.a0;
     double t = std::remainder(a1 - a0, 2 * pi);
     if (turn > 0 && t <= 0) t += 2 * pi;
     if (turn < 0 && t >= 0) t -= 2 * pi;
@@ -264,7 +264,7 @@ struct Seg {
     if (t <= 0) return a;
     if (t >= 1) return b;
     double g = a0 + (a1 - a0) * t;
-    return p2(cr + rad * std::cos(g), cz + rad * std::sin(g));
+    return p2(cr + rad * trig::cos(g), cz + rad * trig::sin(g));
   }
   // Left of the way it runs (inside, for an outline running counter-clockwise).
   V3 left(double t) const {
@@ -290,7 +290,7 @@ Seg lineSeg(V3 a, V3 b) {
 // The angle a piece turns through seen from p (a closed outline's winding is their sum over 2π).
 double turn(const Seg &s, V3 p) {
   V3 u = s.a - p, v = s.b - p;
-  double th = std::atan2(cross2(u, v), dot(u, v));
+  double th = trig::atan2(cross2(u, v), dot(u, v));
   if (!s.arc) return th;
   // Between the chord and the arc: the arc goes the other way round p.
   V3 c = p2(s.cr, s.cz), mid = s.at(0.5);
@@ -315,7 +315,7 @@ void crossings(const Seg &p, const Seg &q, double eps, std::vector<double> &tp, 
       return t >= -1e-9 && t <= 1 + 1e-9 && std::fabs(cross2(d, x - s.a)) <= eps * std::sqrt(l2);
     }
     if (std::fabs(norm(x - p2(s.cr, s.cz)) - s.rad) > eps) return false;
-    double g = std::atan2(x.y - s.cz, x.x - s.cr), lo = std::min(s.a0, s.a1), hi = std::max(s.a0, s.a1);
+    double g = trig::atan2(x.y - s.cz, x.x - s.cr), lo = std::min(s.a0, s.a1), hi = std::max(s.a0, s.a1);
     while (g < lo - 1e-9) g += 2 * pi;
     while (g > hi + 1e-9) g -= 2 * pi;
     if (g < lo - 1e-9 || g > hi + 1e-9) return false;
@@ -492,7 +492,7 @@ bool ovalVoid(V3 C, V3 X, V3 Y, V3 Z, double bottom, double side, double top, do
   std::vector<V3> ring(n), nrm(n);
   double polyArea = 0, perimeter = 0;
   for (int j = 0; j < n; j++) {
-    double th = 2 * pi * j / n, c = std::cos(th), sn = std::sin(th);
+    double th = 2 * pi * j / n, c = trig::cos(th), sn = trig::sin(th);
     V3 nn = unit(p2(b * c, a * sn));
     ring[j] = p2(a * c, b * sn) - nn * side, nrm[j] = nn;
   }
@@ -500,7 +500,7 @@ bool ovalVoid(V3 C, V3 X, V3 Y, V3 Z, double bottom, double side, double top, do
   // The oval's length round, closely (its arc summed finely).
   for (int k = 0, m = 4096; k < m; k++) {
     double th = 2 * pi * (k + 0.5) / m;
-    perimeter += std::hypot(a * std::sin(th), b * std::cos(th)) * 2 * pi / m;
+    perimeter += trig::hypot(a * trig::sin(th), b * trig::cos(th)) * 2 * pi / m;
   }
   double exact = pi * a * b - side * perimeter + pi * side * side;
   auto at = [&](V3 q, double z) { return C + ex * q.x + ey * q.y + ez * z; };
@@ -562,7 +562,7 @@ bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool
     double world = moveOf(r, placed.faces[face++].geom, sign, flip, inBool), most = 0, nr, nz;
     for (double at : {0.0, 0.5, 1.0}) {
       prof[k].normalAt(at, nr, nz);
-      most = std::max(most, std::hypot(nr / std::max(across, 1e-12), nz / std::max(sz, 1e-12)));
+      most = std::max(most, trig::hypot(nr / std::max(across, 1e-12), nz / std::max(sz, 1e-12)));
     }
     move[k] = world * most;
   }
@@ -781,7 +781,7 @@ struct Normals {
   V3 profileNormal(int f, V3 p) const {
     const FaceGeom &g = s.faces[f].geom;
     V3 q = back[f].point(p);
-    double r = std::hypot(q.x, q.y), nr, nz;
+    double r = trig::hypot(q.x, q.y), nr, nz;
     g.elem.normalAt(g.elem.nearest(r, q.z), nr, nz);
     V3 local = r > 1e-12 ? V3{nr * q.x / r, nr * q.y / r, nz} : V3{0, 0, nz >= 0 ? 1.0 : -1.0};
     return g.place.normal(local);
@@ -876,7 +876,7 @@ bool slabsOf(const Solid &S, const std::vector<double> &depth, double size, bool
     return v[0] == side ? v[1] : v[0];
   };
   // Patches: triangles of faces with the same wall meeting smoothly (normals within a degree at both ends of the side).
-  const double smooth = std::cos(pi / 180);
+  const double smooth = trig::cos(pi / 180);
   std::vector<uint32_t> up(nt);
   for (size_t t = 0; t < nt; t++) up[t] = (uint32_t)t;
   auto find = [&](uint32_t x) {
@@ -947,7 +947,7 @@ bool slabsOf(const Solid &S, const std::vector<double> &depth, double size, bool
       for (uint32_t t : tris)
         for (int k = 0; k < 3; k++) {
           uint32_t i = local[w.tri[3 * t + k]];
-          if (dot(cn[3 * t + k], nv[i]) < std::cos(pi / 360)) near[i] = 1;
+          if (dot(cn[3 * t + k], nv[i]) < trig::cos(pi / 360)) near[i] = 1;
         }
       std::vector<std::pair<uint32_t, uint32_t>> links;
       for (uint32_t t : tris)

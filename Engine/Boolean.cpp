@@ -516,7 +516,7 @@ double winding(const Welded &w, V3 q) {
     V3 a = w.pts[w.tri[k]] - q, b = w.pts[w.tri[k + 1]] - q, c = w.pts[w.tri[k + 2]] - q;
     double la = norm(a), lb = norm(b), lc = norm(c);
     double det = dot(a, cross(b, c)), div = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
-    sum += 2 * std::atan2(det, div);
+    sum += 2 * trig::atan2(det, div);
   }
   return sum / (4 * M_PI);
 }

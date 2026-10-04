@@ -57,7 +57,7 @@ BKShape *bk_transform(const BKShape *s, const double *m) {
   // for, so circles stay circles: moved no more than those digits are off.
   if (!a.similarity()) {
     V3 c[3] = {a.column(0), a.column(1), a.column(2)};
-    double s = std::cbrt(std::fabs(a.det()));
+    double s = trig::cbrt(std::fabs(a.det()));
     bool near = true;
     for (int i = 0; i < 3; i++) {
       near = near && std::fabs(norm(c[i]) - s) <= 1e-5 * s;

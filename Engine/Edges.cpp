@@ -59,7 +59,7 @@ struct Index {
     const FaceGeom &g = face.geom;
     if (g.kind == FaceGeom::Turned && g.exact) {
       V3 q = g.place.inverse().point(exact);
-      double r = std::hypot(q.x, q.y), nr, nz;
+      double r = trig::hypot(q.x, q.y), nr, nz;
       g.elem.normalAt(g.elem.nearest(r, q.z), nr, nz);
       V3 local = r > 1e-12 ? V3{nr * q.x / r, nr * q.y / r, nz} : V3{0, 0, nz >= 0 ? 1.0 : -1.0};
       V3 w = g.place.normal(local);
@@ -82,7 +82,7 @@ struct Index {
     // Slow where they meet at a shallow angle (each round takes off the cosine squared of it): rounds enough for that.
     for (int k = 0; k < 400; k++) {
       V3 L = back.point(q);
-      double r = std::hypot(L.x, L.y), er, ez;
+      double r = trig::hypot(L.x, L.y), er, ez;
       if (r < 1e-12) return p;
       turned->elem.at(turned->elem.nearest(r, L.z), er, ez);
       V3 on = turned->place.point(V3{L.x / r * er, L.y / r * er, ez});
@@ -117,7 +117,7 @@ double lengthOf(const std::vector<V3> &pts) {
 
 // The material angle from face A's into-direction and normal and face B's into-direction (as OpenCascade's kernel counts it).
 double materialAngle(V3 ia, V3 na, V3 ib) {
-  double deg = std::atan2(dot(ib, na), -dot(ib, ia)) * 180 / M_PI - 180;
+  double deg = trig::atan2(dot(ib, na), -dot(ib, ia)) * 180 / M_PI - 180;
   return deg <= 0 ? deg + 360 : deg;
 }
 
@@ -366,7 +366,7 @@ std::vector<Crease> creasesOf(const Solid &s, const int *kinds, const double *pi
   // way, beside one of its faces — or beside none, its faces going on smoothly from the edge's (where two roundings
   // meet at a corner, the line between them goes on from the sharp edge that ends there).
   Ends ends = endsOf(s, usable);
-  const double smooth = std::cos(3 * M_PI / 180), alike = std::cos(1.5 * M_PI / 180), along = std::cos(20 * M_PI / 180);
+  const double smooth = trig::cos(3 * M_PI / 180), alike = trig::cos(1.5 * M_PI / 180), along = trig::cos(20 * M_PI / 180);
   auto carriesOn = [&](const Solid::Edge &a, const Solid::Edge &b, V3 at) {
     if (a.f0 < 0 || a.f1 < 0 || b.f0 < 0 || b.f1 < 0) return false;
     V3 n0 = ix.normal(a.f0, at), n1 = ix.normal(a.f1, at), m0 = ix.normal(b.f0, at), m1 = ix.normal(b.f1, at);

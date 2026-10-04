@@ -164,7 +164,7 @@ double winding(const Solid &s, V3 q) {
     V3 a = s.p[s.tri[k]] - q, b = s.p[s.tri[k + 1]] - q, c = s.p[s.tri[k + 2]] - q;
     double la = norm(a), lb = norm(b), lc = norm(c);
     double det = dot(a, cross(b, c)), div = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
-    sum += 2 * std::atan2(det, div);
+    sum += 2 * trig::atan2(det, div);
   }
   return sum / (4 * M_PI);
 }
@@ -290,7 +290,7 @@ void spanBoth(FaceGeom &g, const FaceGeom &o) {
     // Angles measured from the middle of g's arc, the way it runs.
     double dir = e.a1 >= e.a0 ? 1 : -1, mid = 0.5 * (e.a0 + e.a1), lo = (e.a0 - mid) * dir, hi = (e.a1 - mid) * dir;
     for (V3 p : at) {
-      double t = std::atan2(p.z - e.cz, std::hypot(p.x, p.y) - e.cr) - mid;
+      double t = trig::atan2(p.z - e.cz, trig::hypot(p.x, p.y) - e.cr) - mid;
       t = std::remainder(t * dir, 2 * pi);
       lo = std::min(lo, t), hi = std::max(hi, t);
     }
@@ -347,15 +347,15 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
       double t = (z - el.z0) / (el.z1 - el.z0);
       if (t < -1e-9 || t > 1 + 1e-9) return false;
       r = el.r0 + std::clamp(t, 0.0, 1.0) * (el.r1 - el.r0);
-      lean = std::hypot(el.r1 - el.r0, el.z1 - el.z0) / std::fabs(el.z1 - el.z0);
+      lean = trig::hypot(el.r1 - el.r0, el.z1 - el.z0) / std::fabs(el.z1 - el.z0);
     } else {
       double rho = 0;
-      for (V3 v : q) rho += std::hypot(v.x, v.y);
+      for (V3 v : q) rho += trig::hypot(v.x, v.y);
       rho /= q.size();
-      double a = std::asin(std::clamp((z - el.cz) / el.rad, -1.0, 1.0));
-      double r1 = el.cr + el.rad * std::cos(a), r2 = el.cr - el.rad * std::cos(a);
+      double a = trig::asin(std::clamp((z - el.cz) / el.rad, -1.0, 1.0));
+      double r1 = el.cr + el.rad * trig::cos(a), r2 = el.cr - el.rad * trig::cos(a);
       r = std::fabs(r1 - rho) <= std::fabs(r2 - rho) ? r1 : r2;
-      lean = 1 / std::max(std::cos(a), 1e-9);
+      lean = 1 / std::max(trig::cos(a), 1e-9);
     }
   } else {
     // A sphere: any flat line on it is a circle.
@@ -385,7 +385,7 @@ bool circleOn(const FaceGeom &g, const std::vector<V3> &pts, double deflection, 
     if (r <= tol || rho > r + tol || rho < r - 2 * lean * deflection / scale - tol) return false;
     if (i == 0) continue;
     V3 u = q[i - 1] - mid, v = q[i] - mid;
-    double d = std::atan2(dot(v, e2), dot(v, e1)) - std::atan2(dot(u, e2), dot(u, e1));
+    double d = trig::atan2(dot(v, e2), dot(v, e1)) - trig::atan2(dot(u, e2), dot(u, e1));
     turn += d > M_PI ? d - 2 * M_PI : d < -M_PI ? d + 2 * M_PI : d;
   }
   out.turn = turn;

@@ -2,7 +2,8 @@
 // A case is a program building a shape (primitives, moves and turns, merges, cuts) and operations on it (roundings,
 // inward roundings, bevels, hollows, a cut across an edge):
 //   id|program|operations|expected
-//   program:    P kind a b c d ;   T m00 m01 m02 tx m10 … tz ;   B op ;   S px py pz nx ny nz side ;
+//   program:    P kind sizes… ;   N kind thread length clearance ;   T m00 m01 m02 tx m10 … tz ;   B op ;
+//               S px py pz nx ny nz side ;   (N: a bolt or nut, its other sizes standard; length 0 the usual one)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -77,46 +78,69 @@ void movePick(const Variant &v, int kind, const double *in, double *out) {
 
 BKShape *build(const std::string &prog, std::string &why) {
   std::istringstream in(prog);
+  std::vector<std::string> tok;
+  for (std::string t; in >> t;) tok.push_back(t);
+  size_t at = 0;
+  // The numbers that follow, up to the next word that isn't one (";" or the next step).
+  auto numbers = [&]() {
+    std::vector<double> v;
+    for (; at < tok.size(); at++) {
+      char *end = nullptr;
+      double x = std::strtod(tok[at].c_str(), &end);
+      if (end == tok[at].c_str() || *end) break;
+      v.push_back(x);
+    }
+    return v;
+  };
   std::vector<BKShape *> st;
-  std::string t;
   auto fail = [&](const std::string &w) {
     why = w;
     for (BKShape *s : st) bk_free(s);
     return nullptr;
   };
-  while (in >> t) {
+  while (at < tok.size()) {
+    std::string t = tok[at++];
+    std::vector<double> v = numbers();
+    auto need = [&](size_t n) { return v.size() >= n; };
     if (t == "P") {
-      int k;
-      double p[4];
-      in >> k >> p[0] >> p[1] >> p[2] >> p[3];
-      BKShape *s = bk_primitive(k, p);
+      // A kind and its sizes, as many as it takes (more are ignored).
+      if (!need(2)) return fail("primitive without sizes");
+      std::vector<double> p(v.begin() + 1, v.end());
+      p.resize(std::max<size_t>(p.size(), 8), 0);
+      BKShape *s = bk_primitive((int)v[0], p.data());
       if (!s) return fail(std::string("prim: ") + bk_last_error());
       st.push_back(s);
+    } else if (t == "N") {
+      // A bolt or nut: kind, thread, length (0: the usual one), clearance; the other sizes standard for it.
+      if (!need(4)) return fail("bolt without sizes");
+      BKFastener f{};
+      f.kind = (int)v[0], f.size = (int)v[1];
+      bk_fastener_defaults(&f, 1);
+      if (v[2] > 0) f.length = v[2], bk_fastener_fit(&f);
+      BKShape *s = bk_fastener(&f, v[3]);
+      if (!s) return fail(std::string("bolt: ") + bk_last_error());
+      st.push_back(s);
     } else if (t == "T") {
-      double m[12];
-      for (double &x : m) in >> x;
+      if (!need(12)) return fail("transform without its numbers");
       if (st.empty()) return fail("transform of nothing");
-      BKShape *s = bk_transform(st.back(), m);
+      BKShape *s = bk_transform(st.back(), v.data());
       bk_free(st.back());
       st.back() = s;
       if (!s) return fail("transform");
     } else if (t == "B") {
-      int op;
-      in >> op;
+      if (!need(1)) return fail("merge without its kind");
       if (st.size() < 2) return fail("merge of one");
       BKShape *b = st.back();
       st.pop_back();
       BKShape *a = st.back();
-      BKShape *s = bk_boolean(op, a, b);
+      BKShape *s = bk_boolean((int)v[0], a, b);
       bk_free(a), bk_free(b);
       st.back() = s;
       if (!s) return fail(std::string("bool: ") + bk_last_error());
     } else if (t == "S") {
-      double p[3], n[3];
-      int side;
-      in >> p[0] >> p[1] >> p[2] >> n[0] >> n[1] >> n[2] >> side;
+      if (!need(7)) return fail("split without its plane");
       if (st.empty()) return fail("split of nothing");
-      BKShape *s = bk_split(st.back(), p, n, side);
+      BKShape *s = bk_split(st.back(), v.data(), v.data() + 3, (int)v[6]);
       bk_free(st.back());
       st.back() = s;
       if (!s) return fail(std::string("split: ") + bk_last_error());

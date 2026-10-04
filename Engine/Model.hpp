@@ -20,7 +20,7 @@ struct Elem {
 
   static Elem line(double r0, double z0, double r1, double z1) { return {r0, z0, r1, z1}; }
   static Elem arcOf(double cr, double cz, double rad, double a0, double a1) {
-    Elem e{cr + rad * std::cos(a0), cz + rad * std::sin(a0), cr + rad * std::cos(a1), cz + rad * std::sin(a1), true, cr, cz, rad, a0, a1};
+    Elem e{cr + rad * trig::cos(a0), cz + rad * trig::sin(a0), cr + rad * trig::cos(a1), cz + rad * trig::sin(a1), true, cr, cz, rad, a0, a1};
     return e;
   }
   bool onAxis() const { return !arc && r0 == 0 && r1 == 0; }

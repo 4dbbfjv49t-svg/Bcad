@@ -20,7 +20,7 @@ constexpr double maxTurn = 0.35;
 double chordAngle(double r, double d) {
   if (r <= 0) return maxTurn;
   double c = 1 - d / r;
-  double a = c <= -1 ? pi : 2 * std::acos(c);
+  double a = c <= -1 ? pi : 2 * trig::acos(c);
   return std::min(a, maxTurn);
 }
 
@@ -37,7 +37,7 @@ void Elem::at(double t, double &r, double &z) const {
     r = r1, z = z1;
   } else if (arc) {
     double a = a0 + (a1 - a0) * t;
-    r = cr + rad * std::cos(a), z = cz + rad * std::sin(a);
+    r = cr + rad * trig::cos(a), z = cz + rad * trig::sin(a);
   } else {
     r = r0 + (r1 - r0) * t, z = z0 + (z1 - z0) * t;
   }
@@ -48,11 +48,11 @@ void Elem::normalAt(double t, double &nr, double &nz) const {
   double dr, dz;
   if (arc) {
     double a = a0 + (a1 - a0) * t, s = a1 > a0 ? 1 : -1;
-    dr = -s * std::sin(a), dz = s * std::cos(a);
+    dr = -s * trig::sin(a), dz = s * trig::cos(a);
   } else {
     dr = r1 - r0, dz = z1 - z0;
   }
-  double l = std::hypot(dr, dz);
+  double l = trig::hypot(dr, dz);
   nr = dz / l, nz = -dr / l;
 }
 
@@ -62,12 +62,12 @@ double Elem::nearest(double r, double z) const {
     return l2 > 0 ? std::clamp(((r - r0) * dr + (z - z0) * dz) / l2, 0.0, 1.0) : 0;
   }
   double lo = std::min(a0, a1), hi = std::max(a0, a1);
-  double ang = std::atan2(z - cz, r - cr);
+  double ang = trig::atan2(z - cz, r - cr);
   while (ang < lo) ang += 2 * pi;
   while (ang >= lo + 2 * pi) ang -= 2 * pi;
   if (ang <= hi) return (ang - a0) / (a1 - a0);
   // Outside the arc: the nearer end.
-  double d0 = std::hypot(r - r0, z - z0), d1 = std::hypot(r - r1, z - z1);
+  double d0 = trig::hypot(r - r0, z - z0), d1 = trig::hypot(r - r1, z - z1);
   return d0 <= d1 ? 0 : 1;
 }
 
@@ -236,7 +236,7 @@ std::vector<double> stepsOf(const Elem &e, double d, const std::vector<double> &
     if (!e.arc) {
       if (e.r0 != e.r1 && e.z0 != e.z1) cuts.push_back((z - e.z0) / (e.z1 - e.z0));
     } else if (std::fabs(z - e.cz) < e.rad) {
-      double v = std::asin((z - e.cz) / e.rad);
+      double v = trig::asin((z - e.cz) / e.rad);
       for (double a : {v, pi - v})
         for (int k = -2; k <= 2; k++) cuts.push_back((a + 2 * pi * k - e.a0) / (e.a1 - e.a0));
     }
@@ -261,9 +261,9 @@ void buildTurned(const Model &m, Solid &out, double d) {
   std::vector<double> cs(count + 1), sn(count + 1), cm(count), sm(count);
   for (int j = 0; j <= count; j++) {
     double a = 2 * pi * j / count;
-    cs[j] = j == 0 || j == count ? 1 : std::cos(a), sn[j] = j == 0 || j == count ? 0 : std::sin(a);
+    cs[j] = j == 0 || j == count ? 1 : trig::cos(a), sn[j] = j == 0 || j == count ? 0 : trig::sin(a);
   }
-  for (int j = 0; j < count; j++) cm[j] = std::cos(2 * pi * (j + 0.5) / count), sm[j] = std::sin(2 * pi * (j + 0.5) / count);
+  for (int j = 0; j < count; j++) cm[j] = trig::cos(2 * pi * (j + 0.5) / count), sm[j] = trig::sin(2 * pi * (j + 0.5) / count);
 
   const size_t ne = m.profile.size();
   std::vector<int> faceOf(ne, -1);
@@ -287,7 +287,7 @@ void buildTurned(const Model &m, Solid &out, double d) {
       e.at(ts[i + 1], r1, z1);
       meshed += moment(Elem::line(r0, z0, r1, z1));
     }
-    face.deficit = 2 * pi * (moment(e) - meshed * count * std::sin(2 * pi / count) / (2 * pi));
+    face.deficit = 2 * pi * (moment(e) - meshed * count * trig::sin(2 * pi / count) / (2 * pi));
     out.faces.push_back(face);
 
     // Each ring's first vertex (a pole has one, or one per column where the surface comes to a point at an angle).
@@ -373,15 +373,15 @@ void buildTurned(const Model &m, Solid &out, double d) {
 struct Oval {
   double a, b, c, s;
   V3 at(double t) const {
-    double x = a * std::cos(t), y = b * std::sin(t);
+    double x = a * trig::cos(t), y = b * trig::sin(t);
     return {c * x - s * y, s * x + c * y, 0};
   }
   V3 velocity(double t) const {
-    double x = -a * std::sin(t), y = b * std::cos(t);
+    double x = -a * trig::sin(t), y = b * trig::cos(t);
     return {c * x - s * y, s * x + c * y, 0};
   }
   V3 normal(double t) const {
-    double x = b * std::cos(t), y = a * std::sin(t), l = std::hypot(x, y);
+    double x = b * trig::cos(t), y = a * trig::sin(t), l = trig::hypot(x, y);
     return {(c * x - s * y) / l, (s * x + c * y) / l, 0};
   }
   // Radius of curvature.
@@ -392,7 +392,7 @@ struct Oval {
 };
 
 void buildSwept(const Model &m, Solid &out, double d) {
-  Oval o{m.a, m.b, std::cos(m.phi), std::sin(m.phi)};
+  Oval o{m.a, m.b, trig::cos(m.phi), trig::sin(m.phi)};
   double reach = 0;
   for (const auto &e : m.section) reach = std::max({reach, e.r0, e.r1, e.arc ? e.cr + e.rad : 0.0});
   // Steps along the oval: the outermost line's chords within d, and turning by no more than maxTurn.
@@ -424,7 +424,7 @@ void buildSwept(const Model &m, Solid &out, double d) {
       double t = (double)i / pieces, u, z;
       if (e.arc) {
         double a = e.a0 + (e.a1 - e.a0) * t;
-        u = e.cr + e.rad * std::cos(a), z = e.cz + e.rad * std::sin(a);
+        u = e.cr + e.rad * trig::cos(a), z = e.cz + e.rad * trig::sin(a);
         if (i == pieces) u = e.r1, z = e.z1;
         if (i == 0) u = e.r0, z = e.z0;
       } else {
@@ -491,30 +491,30 @@ double Model::support(V3 d, V3 *at) const {
     for (const auto &v : verts)
       if (dot(v, d) > best) best = dot(v, d), where = v;
   } else if (kind == Turned) {
-    double D = std::hypot(d.x, d.y), dz = d.z, c = D > 0 ? d.x / D : 1, sn = D > 0 ? d.y / D : 0, br = 0, bz = 0;
+    double D = trig::hypot(d.x, d.y), dz = d.z, c = D > 0 ? d.x / D : 1, sn = D > 0 ? d.y / D : 0, br = 0, bz = 0;
     auto take = [&](double r, double z) {
       if (r * D + z * dz > best) best = r * D + z * dz, br = r, bz = z;
     };
     for (const auto &e : profile) {
       take(e.r0, e.z0), take(e.r1, e.z1);
       if (e.arc) {
-        double a = std::atan2(dz, D), lo = std::min(e.a0, e.a1), hi = std::max(e.a0, e.a1);
+        double a = trig::atan2(dz, D), lo = std::min(e.a0, e.a1), hi = std::max(e.a0, e.a1);
         while (a < lo) a += 2 * pi;
         while (a >= lo + 2 * pi) a -= 2 * pi;
-        if (a <= hi) take(e.cr + e.rad * std::cos(a), e.cz + e.rad * std::sin(a));
+        if (a <= hi) take(e.cr + e.rad * trig::cos(a), e.cz + e.rad * trig::sin(a));
       }
     }
     where = {br * c, br * sn, bz};
   } else {
     // Swept: the best along the oval, sampled and then narrowed down.
-    Oval o{a, b, std::cos(phi), std::sin(phi)};
+    Oval o{a, b, trig::cos(phi), trig::sin(phi)};
     auto value = [&](double t, V3 *pt) {
       V3 c = o.at(t), nm = o.normal(t);
       double s = dot(nm, d), m = -INFINITY, bu = 0, bz = 0;
       for (const auto &e : section) {
         if (e.r0 * s + e.z0 * d.z > m) m = e.r0 * s + e.z0 * d.z, bu = e.r0, bz = e.z0;
         if (e.r1 * s + e.z1 * d.z > m) m = e.r1 * s + e.z1 * d.z, bu = e.r1, bz = e.z1;
-        double h = std::hypot(s, d.z);
+        double h = trig::hypot(s, d.z);
         if (e.arc && h > 0 && e.cr * s + e.cz * d.z + e.rad * h > m)
           m = e.cr * s + e.cz * d.z + e.rad * h, bu = e.cr + e.rad * s / h, bz = e.cz + e.rad * d.z / h;
       }
@@ -547,8 +547,8 @@ double moment(const Elem &e) {
   if (!e.arc) return (e.z1 - e.z0) * (e.r0 * e.r0 + e.r0 * e.r1 + e.r1 * e.r1) / 6;
   double c = e.cr, R = e.rad;
   auto F = [&](double t) {
-    double s = std::sin(t);
-    return R / 2 * (c * c * s + 2 * c * R * (t / 2 + std::sin(2 * t) / 4) + R * R * (s - s * s * s / 3));
+    double s = trig::sin(t);
+    return R / 2 * (c * c * s + 2 * c * R * (t / 2 + trig::sin(2 * t) / 4) + R * R * (s - s * s * s / 3));
   };
   return F(e.a1) - F(e.a0);
 }
@@ -599,7 +599,7 @@ std::vector<V3> ngon(int n, double r, double z) {
   double start = -pi / 2 + pi / n;
   for (int i = 0; i < n; i++) {
     double a = start + 2 * pi * i / n;
-    pts.push_back({r * std::cos(a), r * std::sin(a), z});
+    pts.push_back({r * trig::cos(a), r * trig::sin(a), z});
   }
   return pts;
 }
@@ -630,9 +630,9 @@ std::vector<std::pair<double, double>> tubeOutline(int sides, double w, double r
 
 // The ellipse with conjugate semi-diameters (a, 0) and b·(cos t, sin t): its semi-axes and the major one's angle.
 void conjugate(double a, double b, double t, double &major, double &minor, double &phi) {
-  double sxx = a * a + b * b * std::cos(t) * std::cos(t), sxy = b * b * std::cos(t) * std::sin(t), syy = b * b * std::sin(t) * std::sin(t);
-  double mean = (sxx + syy) / 2, spread = std::hypot((sxx - syy) / 2, sxy);
-  major = std::sqrt(mean + spread), minor = std::sqrt(std::max(mean - spread, 0.0)), phi = std::atan2(2 * sxy, sxx - syy) / 2;
+  double sxx = a * a + b * b * trig::cos(t) * trig::cos(t), sxy = b * b * trig::cos(t) * trig::sin(t), syy = b * b * trig::sin(t) * trig::sin(t);
+  double mean = (sxx + syy) / 2, spread = trig::hypot((sxx - syy) / 2, sxy);
+  major = std::sqrt(mean + spread), minor = std::sqrt(std::max(mean - spread, 0.0)), phi = trig::atan2(2 * sxy, sxx - syy) / 2;
 }
 
 double ellipseLength(double a, double b) {
@@ -641,14 +641,14 @@ double ellipseLength(double a, double b) {
   double sum = 0;
   for (int i = 0; i < n; i++) {
     double t = 2 * pi * i / n;
-    sum += std::hypot(a * std::sin(t), b * std::cos(t));
+    sum += trig::hypot(a * trig::sin(t), b * trig::cos(t));
   }
   return sum * 2 * pi / n;
 }
 
 Affine turnZ(double phi) {
   Affine r;
-  double c = std::cos(phi), s = std::sin(phi);
+  double c = trig::cos(phi), s = trig::sin(phi);
   r.m[0] = c, r.m[1] = -s, r.m[4] = s, r.m[5] = c;
   return r;
 }

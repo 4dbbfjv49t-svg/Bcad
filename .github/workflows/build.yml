@@ -36,7 +36,6 @@ jobs:
           echo "engine test took $(( $(date +%s) - start )) s"
 
       - name: Corpus
-        continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/digest"
           start=$(date +%s)
@@ -226,7 +225,6 @@ jobs:
         run: bash test/engine.sh
 
       - name: Corpus
-        continue-on-error: true
         run: |
           mkdir -p "$RUNNER_TEMP/digest"
           ./test/corpus.sh --digest "$RUNNER_TEMP/digest/linux.txt"
@@ -255,7 +253,6 @@ jobs:
     needs: [mac, linux]
     if: always()
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/download-artifact@v4
         with:

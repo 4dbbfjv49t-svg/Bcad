@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "Engine/Trig.hpp"
+
 // Per thread: the sizes each head and nut starts from, standard ones where there is a standard.
 static const ThreadSize sizes[] = {
     {"M3", 3, 0.5, 5.5, 2.0, 2.4, 12, 5.5, 2.5, 1.3, 6.72, 2, 1.1, 20, 10, 6.3, 1, 3.2, 1.8, 5.5, 2.4},
@@ -70,7 +72,7 @@ int bk_fastener_fields(int kind) {
 
 // The radius where a bolt's cone meets its head (a countersunk head's rim; just inside the flats of a head above a cone).
 double coneTop(const BKFastener &f) { return countersunk(f.kind) ? f.width / 2 : 0.46 * f.width; }
-double tanHalf(double angle) { return tan(angle * M_PI / 360); }
+double tanHalf(double angle) { return trig::tan(angle * M_PI / 360); }
 
 // How far a bolt's cone reaches below where its head starts, down to the thread's outside (0 without a cone).
 double coneDrop(const BKFastener &f, double d) {
@@ -145,13 +147,13 @@ void bk_fastener_range(const BKFastener *fp, int field, int loose, double *out) 
   case BK_ANGLE: {
     lo = k == BK_CONE_NUT ? 30 : 60, hi = 150;
     if (k == BK_CONE_NUT) {
-      hi = std::min(hi, atan((0.92 * w - d - 1) / (2 * f.seat)) * 360 / M_PI);
+      hi = std::min(hi, trig::atan((0.92 * w - d - 1) / (2 * f.seat)) * 360 / M_PI);
     } else {
       // The cone at least a pitch tall, and leaving two pitches of thread.
       double rise = coneTop(f) - d / 2;
-      hi = std::min(hi, atan(rise / p) * 360 / M_PI);
-      lo = std::max(lo, atan(rise / std::max(L - 2 * p, 1e-9)) * 360 / M_PI);
-      if (csk) hi = std::min({hi, atan((w - bottom - 1) / (2 * f.depth)) * 360 / M_PI, slim ? 180.0 : atan((w - d) / (2 * f.depth)) * 360 / M_PI});
+      hi = std::min(hi, trig::atan(rise / p) * 360 / M_PI);
+      lo = std::max(lo, trig::atan(rise / std::max(L - 2 * p, 1e-9)) * 360 / M_PI);
+      if (csk) hi = std::min({hi, trig::atan((w - bottom - 1) / (2 * f.depth)) * 360 / M_PI, slim ? 180.0 : trig::atan((w - d) / (2 * f.depth)) * 360 / M_PI});
     }
     break;
   }
