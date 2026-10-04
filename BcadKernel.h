@@ -75,8 +75,9 @@ void bk_sculpt_mesh_free(BKSculptMesh *m);
 
 // A sculpted body being shaped (Engine/Sculpt.hpp): made from its mesh, read back at any time as floats (positions and
 // normals 3 per point; the triangles never change). Strokes of a brush, each undone and redone as one: begun where it
-// starts on the surface, dabbed along its way (pressure 0…1, 1 for a mouse), ended. Radius in mm; strength 0…1;
-// mirror does the same across x = 0; invert carves instead of raising (and so on). NULL when the mesh is broken.
+// starts on the surface, dabbed along its way (a pen's pressure scaling each dab's strength, and its size the radius:
+// 0…1, both 1 for a mouse), ended. Radius in mm; strength 0…1; mirror does the same across x = 0; invert carves instead
+// of raising (and so on). NULL when the mesh is broken.
 enum { BK_BRUSH_GRAB, BK_BRUSH_DRAW, BK_BRUSH_INFLATE, BK_BRUSH_SMOOTH, BK_BRUSH_FLATTEN, BK_BRUSH_PINCH, BK_BRUSH_CREASE };
 typedef struct BKSculpt BKSculpt;
 BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount);
@@ -84,7 +85,7 @@ void bk_sculpt_free(BKSculpt *s);
 // Where the ray (origin, direction: 3 each) first meets the surface: 1 with the point and the surface's normal there.
 int bk_sculpt_ray(const BKSculpt *s, const double *origin, const double *direction, double *at, double *normal);
 void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert);
-void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure);
+void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size);
 void bk_sculpt_end(BKSculpt *s);
 int bk_sculpt_undo(BKSculpt *s);  // 1 when there was a stroke to undo
 int bk_sculpt_redo(BKSculpt *s);

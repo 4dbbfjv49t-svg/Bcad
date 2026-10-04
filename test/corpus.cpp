@@ -202,7 +202,7 @@ BKShape *build(const std::string &prog, std::string &why) {
         bk_sculpt_begin(sc, (int)v[1], hit, v[8], v[9], (int)v[10], (int)v[11]);
         for (int k = 0; k <= 4; k++) {
           double at[3] = {hit[0] + v[12] * k / 4, hit[1] + v[13] * k / 4, hit[2] + v[14] * k / 4};
-          bk_sculpt_dab(sc, at, 1);
+          bk_sculpt_dab(sc, at, 1, 1);
         }
         bk_sculpt_end(sc);
         bk_sculpt_sync(sc);

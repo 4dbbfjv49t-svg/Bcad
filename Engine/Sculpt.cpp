@@ -499,7 +499,7 @@ void Sculptor::begin(int b, V3 at, double r, double s, bool mir, bool inv) {
   }
 }
 
-void Sculptor::offsets(V3 c, double pressure, std::vector<uint32_t> &which, std::vector<double> &w, std::vector<V3> &by) const {
+void Sculptor::offsets(V3 c, double pressure, double radius, std::vector<uint32_t> &which, std::vector<double> &w, std::vector<V3> &by) const {
   within(c, radius, which, w);
   by.assign(which.size(), V3{0, 0, 0});
   if (which.empty()) return;
@@ -534,9 +534,9 @@ void Sculptor::offsets(V3 c, double pressure, std::vector<uint32_t> &which, std:
 }
 
 // One dab: what it does at c and (with the mirror) across x = 0, both from the points as they are, together.
-void Sculptor::dabAt(V3 c, double pressure) {
-  offsets(c, pressure, idx[0], wt[0], off[0]);
-  if (mirror) offsets(V3{-c.x, c.y, c.z}, pressure, idx[1], wt[1], off[1]);
+void Sculptor::dabAt(V3 c, double pressure, double r) {
+  offsets(c, pressure, r, idx[0], wt[0], off[0]);
+  if (mirror) offsets(V3{-c.x, c.y, c.z}, pressure, r, idx[1], wt[1], off[1]);
   else idx[1].clear(), off[1].clear();
   sum.clear(), offSum.clear();
   size_t a = 0, b = 0;
@@ -549,9 +549,11 @@ void Sculptor::dabAt(V3 c, double pressure) {
   moved(sum);
 }
 
-void Sculptor::dab(V3 at, double pressure) {
+void Sculptor::dab(V3 at, double pressure, double size) {
   if (!stroking) return;
   pressure = std::min(1.0, std::max(0.0, pressure));
+  // (A pen pressed lightly may make the brush smaller, down to a twentieth.)
+  double r = radius * std::min(1.0, std::max(0.05, size));
   if (brush == Grab) {
     V3 d = at - start, md{-d.x, d.y, d.z};
     for (size_t k = 0; k < grabbed.size(); k++) record(grabbed[k]), p[grabbed[k]] = grabFrom[k] + d * grabWeight[0][k] + md * grabWeight[1][k];
@@ -560,16 +562,16 @@ void Sculptor::dab(V3 at, double pressure) {
     return;
   }
   if (!dabbed) {
-    dabAt(at, pressure);
+    dabAt(at, pressure, r);
     last = at, dabbed = true;
     return;
   }
   // Every fifth of the radius along the way.
-  double gap = norm(at - last), spacing = 0.2 * radius;
+  double gap = norm(at - last), spacing = 0.2 * r;
   if (!(gap >= spacing)) return;
   int steps = (int)std::min(1000.0, std::floor(gap / spacing));
   V3 way = (at - last) / gap;
-  for (int s = 1; s <= steps; s++) dabAt(last + way * (s * spacing), pressure);
+  for (int s = 1; s <= steps; s++) dabAt(last + way * (s * spacing), pressure, r);
   last = last + way * (steps * spacing);
 }
 

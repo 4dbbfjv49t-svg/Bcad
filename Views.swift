@@ -2020,7 +2020,8 @@ struct SettingsPane: View {
          (L("Views: iso, south, north, west, east, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("All edges") + " (" + L("Angles") + ")", "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
          (L("Apply · Cancel"), "Enter  Esc"), (L("Add to selection"), "⇧/⌘ click"), (L("Orbit"), L("drag empty space")),
          (L("Pan"), L("two-finger scroll · ⇧ drag")), (L("Zoom"), L("pinch · ⌥ scroll")), (L("Move freely"), L("hold ⌘ while dragging")),
-         (L("Keep proportions"), L("hold ⇧ while resizing")), (L("Symmetric resizing"), L("hold ⌥ while resizing"))]
+         (L("Keep proportions"), L("hold ⇧ while resizing")), (L("Symmetric resizing"), L("hold ⌥ while resizing")),
+         (L("Sculpt: smooth · the other way · brush size"), "⇧  ⌥  [ ]")]
     }
 
     var body: some View {
@@ -2059,6 +2060,15 @@ struct SettingsPane: View {
                 }
                 SettingLine(title: L("Material shrinkage"), detail: L("Plastic shrinks as it cools, so bolts and nuts are made this much larger · 0.00 leaves them as drawn")) {
                     MMField(value: s.shrink, unit: "%", range: 0...5, width: 58) { v in lib.updateSettings { $0.shrink = v } }
+                }
+                SettingsTitle(text: L("Sculpting"))
+                SettingLine(title: L("Pen pressure sets the strength"), detail: L("With a drawing tablet: pressing harder shapes more")) {
+                    NeonToggle(state: s.penStrength) { lib.updateSettings { $0.penStrength.toggle() } }
+                        .accessibilityLabel(L("Pen pressure sets the strength"))
+                }
+                SettingLine(title: L("Pen pressure sets the size"), detail: L("With a drawing tablet: pressing harder makes the brush larger")) {
+                    NeonToggle(state: s.penSize) { lib.updateSettings { $0.penSize.toggle() } }
+                        .accessibilityLabel(L("Pen pressure sets the size"))
                 }
                 SettingsTitle(text: L("Other shortcuts"))
                 ForEach(fixed, id: \.0) { title, keys in

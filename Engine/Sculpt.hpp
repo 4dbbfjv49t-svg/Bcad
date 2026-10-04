@@ -28,10 +28,10 @@ class Sculptor {
   // Where a ray first meets the surface (its point, and the surface's normal there): false if it misses.
   bool ray(V3 origin, V3 dir, V3 &at, V3 &normal) const;
   // A stroke: begun at a point (for grab, where the drag starts), dabs along its way (for grab, where the drag has got
-  // to), ended. Pressure scales the strength of each dab (1 for a mouse).
+  // to), ended. Pressure scales the strength of each dab and size its radius (both 1 for a mouse; grab takes neither).
   enum Brush { Grab, Draw, Inflate, Smooth, Flatten, Pinch, Crease };
   void begin(int brush, V3 at, double radius, double strength, bool mirror, bool invert);
-  void dab(V3 at, double pressure);
+  void dab(V3 at, double pressure, double size = 1);
   void end();
   bool undo();
   bool redo();
@@ -92,8 +92,8 @@ class Sculptor {
   // The points within `r` of c, in order, and each one's weight (1 at the middle, falling smoothly to 0 at r).
   void within(V3 c, double r, std::vector<uint32_t> &out, std::vector<double> &weight) const;
   // How a dab at c would move the points under it (from where they are now).
-  void offsets(V3 c, double pressure, std::vector<uint32_t> &which, std::vector<double> &weight, std::vector<V3> &by) const;
-  void dabAt(V3 c, double pressure);
+  void offsets(V3 c, double pressure, double radius, std::vector<uint32_t> &which, std::vector<double> &weight, std::vector<V3> &by) const;
+  void dabAt(V3 c, double pressure, double radius);
   void record(uint32_t i);
   // After points moved: their triangles' boxes, their own and their neighbours' normals, and what's changed.
   void moved(const std::vector<uint32_t> &which);

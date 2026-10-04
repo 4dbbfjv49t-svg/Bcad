@@ -2150,7 +2150,7 @@ int main() {
       bk_sculpt_begin(s, brush, a, radius, strength, mirror, invert);
       for (V3 q : to) {
         double b[3] = {q.x, q.y, q.z};
-        bk_sculpt_dab(s, b, 1);
+        bk_sculpt_dab(s, b, 1, 1);
       }
       bk_sculpt_end(s);
       return bk_sculpt_sync(s);
@@ -2288,6 +2288,36 @@ int main() {
           sm && right1 - right0 > 0.1 && near(left1 - left0, right1 - right0, 0.01) && left2 == left1,
           fmt("raised %.4f and %.4f", right1 - right0, left1 - left0) + fmt(", then %.2g", left2 - left1));
 
+    // A pen: a dab pressed at a quarter raises a quarter as much; one at half size leaves all beyond half the radius be.
+    BKSculpt *sp = make(rb);
+    double quarter = 0, full = 0;
+    bool halfKept = true;
+    if (sp && hit) {
+      uint32_t v = nearest(sp, {at[0], at[1], at[2]});
+      V3 c = pt(sp, v);
+      double a[3] = {c.x, c.y, c.z};
+      auto press = [&](double pressure, double size) {
+        std::vector<float> before = snapshot(sp);
+        bk_sculpt_begin(sp, BK_BRUSH_DRAW, a, 4, 0.5, 0, 0);
+        bk_sculpt_dab(sp, a, pressure, size);
+        bk_sculpt_end(sp);
+        bk_sculpt_sync(sp);
+        double rose = pt(sp, v).z - c.z;
+        for (int i = 0; i < bk_sculpt_vertex_count(sp); i++) {
+          V3 was{before[3 * i], before[3 * i + 1], before[3 * i + 2]};
+          if (size < 1 && bce::norm(was - c) >= 4 * size && !(pt(sp, (uint32_t)i) == was)) halfKept = false;
+        }
+        bk_sculpt_undo(sp);
+        bk_sculpt_sync(sp);
+        return rose;
+      };
+      quarter = press(0.25, 1), full = press(1, 1);
+      press(1, 0.5);
+    }
+    check("sculpting: a pen pressed at a quarter raises a quarter as much; at half size, half as wide", sp && full > 0.1 &&
+          near(quarter / full, 0.25, 1e-4) && halfKept, fmt("%.6f of %.6f", quarter, full) + (halfKept ? "" : ", moved beyond half"));
+    bk_sculpt_free(sp);
+
     // Broken meshes refused.
     Ready broken = rb;
     if (!broken.idx.empty()) broken.idx[4] = (uint32_t)(broken.pos.size() / 3);
@@ -2305,7 +2335,7 @@ int main() {
       bk_sculpt_begin(sf, BK_BRUSH_DRAW, a0, 5, 0.5, 1, 0);
       for (int k = 0; k < 50; k++) {
         double ox[3] = {-12 + 0.5 * k, 0, 100}, a[3], n[3];
-        if (bk_sculpt_ray(sf, ox, down, a, n)) bk_sculpt_dab(sf, a, 1);
+        if (bk_sculpt_ray(sf, ox, down, a, n)) bk_sculpt_dab(sf, a, 1, 1);
         bk_sculpt_sync(sf);
       }
       bk_sculpt_end(sf);

@@ -94,9 +94,10 @@ final class SculptSession {
         bk_sculpt_begin(ptr, Int32(b.rawValue), a, radius, strength, mirror ? 1 : 0, invert ? 1 : 0)
     }
 
-    func dab(_ p: SIMD3<Double>, pressure: Double) {
+    // Pressure scales its strength, size its radius (0…1; both 1 for a mouse).
+    func dab(_ p: SIMD3<Double>, pressure: Double, size: Double = 1) {
         let a = [p.x, p.y, p.z]
-        bk_sculpt_dab(ptr, a, pressure)
+        bk_sculpt_dab(ptr, a, pressure, size)
         sync()
     }
 

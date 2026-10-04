@@ -1451,6 +1451,28 @@ enum SelfTest {
             lib.sculptMirror = false
             lib.sculptBrush = .draw
 
+            // A drawing tablet's pen: its pressure read from the tablet's events (a mouse's are full strength and size),
+            // and a dab pressed at a quarter raising a quarter as much as one pressed fully.
+            func tablet(_ pressure: Double) -> NSEvent? {
+                guard let cg = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: .zero, mouseButton: .left) else { return nil }
+                cg.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
+                cg.setDoubleValueField(.tabletEventPointPressure, value: pressure)
+                return NSEvent(cgEvent: cg)
+            }
+            let pen = tablet(0.25).map { CadView.pen($0, lib.settings) }, mouse = CadView.pen(event(.leftMouseDown, .zero, []), lib.settings)
+            let h0 = top(-8, 5)
+            lib.sculptBegin(at: SIMD3(-8, 5, h0), smooth: false, invert: false, pressure: pen?.pressure ?? 1)
+            lib.sculptEnd()
+            let light = top(-8, 5) - h0
+            lib.undo()
+            lib.sculptBegin(at: SIMD3(-8, 5, h0), smooth: false, invert: false, pressure: 1)
+            lib.sculptEnd()
+            let firm = top(-8, 5) - h0
+            lib.undo()
+            check("a tablet pen's pressure: pressed at a quarter, a quarter as strong (a mouse, full)", abs((pen?.pressure ?? 0) - 0.25) < 0.01 &&
+                  pen?.size == 1 && mouse == (1, 1) && firm > 0.05 && abs(light / firm - 0.25) < 0.02 && abs(top(-8, 5) - h0) < 1e-4,
+                  "pen \(String(describing: pen)), \(light) of \(firm)")
+
             let shaped = lib.sculpt?.data()
             lib.commitSculpt()
             settle()

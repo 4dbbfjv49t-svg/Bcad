@@ -1563,6 +1563,9 @@ struct Settings: Codable, Equatable {
     var symmetric = false
     // Shortcuts switched off: they don't fire and their keys are free for others.
     var off: Set<String> = []
+    // Sculpting with a drawing tablet: what pressing the pen harder does (a mouse is always full strength and size).
+    var penStrength = true
+    var penSize = false
 
     init() {}
 
@@ -1581,6 +1584,8 @@ struct Settings: Codable, Equatable {
         uniform = (try? c.decode(Bool.self, forKey: .uniform)) ?? false
         symmetric = (try? c.decode(Bool.self, forKey: .symmetric)) ?? false
         off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
+        penStrength = (try? c.decode(Bool.self, forKey: .penStrength)) ?? true
+        penSize = (try? c.decode(Bool.self, forKey: .penSize)) ?? false
     }
 
     // The print bed's longest side: no size or thread is made longer.
@@ -3180,19 +3185,19 @@ final class Workbench: DesignHost {
     // A stroke: begun where the pointer met the body (its own coordinates), dabbed along the way, ended. Shift smooths
     // whatever the brush; ⌥ inverts it. The brush it took (nil when there's nothing to sculpt).
     @discardableResult
-    func sculptBegin(at p: SIMD3<Double>, smooth: Bool, invert: Bool, pressure: Double = 1) -> SculptBrush? {
+    func sculptBegin(at p: SIMD3<Double>, smooth: Bool, invert: Bool, pressure: Double = 1, size: Double = 1) -> SculptBrush? {
         guard let s = sculpt, !sculptBusy else { return nil }
         let brush = smooth ? .smooth : sculptBrush
         // A new stroke after undoing a Remesh: that Remesh can't be done again.
         sculptAhead = []
         s.begin(brush, at: p, radius: sculptRadius, strength: sculptStrength, mirror: sculptMirror, invert: invert)
-        s.dab(p, pressure: pressure)
+        s.dab(p, pressure: pressure, size: size)
         sceneVersion += 1
         return brush
     }
 
-    func sculptDab(at p: SIMD3<Double>, pressure: Double = 1) {
-        sculpt?.dab(p, pressure: pressure)
+    func sculptDab(at p: SIMD3<Double>, pressure: Double = 1, size: Double = 1) {
+        sculpt?.dab(p, pressure: pressure, size: size)
         sceneVersion += 1
     }
 

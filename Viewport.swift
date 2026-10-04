@@ -253,15 +253,18 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The live mesh of the body being sculpted, in two sets of buffers taken in turn: the points changed since a set was
     // last written go into the one the GPU isn't reading, and that one is drawn (the other catches up on its next turn).
     private final class SculptGPU {
-        let owner: ObjectIdentifier
+        // (Held weakly: a session made later may sit where a freed one was, and mustn't be taken for it.)
+        weak var owner: SculptSession?
+        let vertexCount: Int
         let pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer
         let count: Int
         var applied = [-1, -1]  // how far into the session's changes each set is (-1: nothing in it yet)
         var current = 0
         let reading = Readers()
 
-        init(owner: ObjectIdentifier, pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer, count: Int) {
+        init(owner: SculptSession, pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer, count: Int) {
             self.owner = owner
+            vertexCount = owner.vertexCount
             self.pos = pos
             self.nrm = nrm
             self.idx = idx
@@ -288,14 +291,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var sculptGPU: SculptGPU?
 
     private func sculptBody(_ s: SculptSession, _ cmd: MTLCommandBuffer) -> GPUBody? {
-        if sculptGPU?.owner != ObjectIdentifier(s) {
+        if sculptGPU?.owner !== s || sculptGPU?.vertexCount != s.vertexCount {
             sculptGPU = nil
             let n = s.vertexCount * 16
             guard n > 0, s.triangleCount > 0,
                   let p0 = device.makeBuffer(length: n, options: .storageModeShared), let p1 = device.makeBuffer(length: n, options: .storageModeShared),
                   let n0 = device.makeBuffer(length: n, options: .storageModeShared), let n1 = device.makeBuffer(length: n, options: .storageModeShared),
                   let ib = device.makeBuffer(bytes: s.indices, length: s.triangleCount * 12, options: .storageModeShared) else { return nil }
-            sculptGPU = SculptGPU(owner: ObjectIdentifier(s), pos: [p0, p1], nrm: [n0, n1], idx: ib, count: 3 * s.triangleCount)
+            sculptGPU = SculptGPU(owner: s, pos: [p0, p1], nrm: [n0, n1], idx: ib, count: 3 * s.triangleCount)
         }
         guard let g = sculptGPU else { return nil }
         let next = 1 - g.current
@@ -905,6 +908,8 @@ final class CadView: MTKView {
     // The brush of the stroke under way, and where it began (the body's own coordinates).
     private var strokeBrush: SculptBrush?
     private var strokeFrom = SIMD3<Double>(0, 0, 0)
+    // A tablet pen's eraser end is near the tablet: it sculpts the other way.
+    private var eraser = false
     private var downAt = CGPoint.zero
     private var last = CGPoint.zero
     private var moved = false
@@ -1028,6 +1033,19 @@ final class CadView: MTKView {
     private func sculptHit(_ p: CGPoint) -> SculptRing? {
         guard let s = lib.sculpt, let (o, d) = sculptRay(p) else { return nil }
         return s.ray(o, d)
+    }
+
+    // How hard a drawing tablet's pen presses, as the settings use it: for a dab's strength and for its size (a mouse or
+    // trackpad: both full).
+    static func pen(_ e: NSEvent, _ s: Settings) -> (pressure: Double, size: Double) {
+        guard e.subtype == .tabletPoint else { return (1, 1) }
+        let read = e.cgEvent.map { $0.getDoubleValueField(.tabletEventPointPressure) } ?? Double(e.pressure)
+        let p = min(1, max(0.02, read))
+        return (s.penStrength ? p : 1, s.penSize ? p : 1)
+    }
+
+    override func tabletProximity(with e: NSEvent) {
+        eraser = e.isEnteringProximity && e.pointingDeviceType == .eraser
     }
 
     func hitBody(_ p: CGPoint) -> Hit? {
@@ -1304,7 +1322,9 @@ final class CadView: MTKView {
             return
         case .sculpt:
             // On the body: a stroke of the brush (Shift smooths, ⌥ turns it around); off it, the view turns (Shift: pans).
-            if let hit = sculptHit(p), let brush = lib.sculptBegin(at: hit.at, smooth: shift, invert: e.modifierFlags.contains(.option)) {
+            let pen = CadView.pen(e, lib.settings)
+            if let hit = sculptHit(p), let brush = lib.sculptBegin(at: hit.at, smooth: shift, invert: e.modifierFlags.contains(.option) != eraser,
+                                                                  pressure: pen.pressure, size: pen.size) {
                 strokeBrush = brush
                 strokeFrom = hit.at
                 lib.sculptRing = hit
@@ -1416,6 +1436,7 @@ final class CadView: MTKView {
             lib.splitOffset = (v * 100).rounded() / 100
         case .sculpt:
             guard let (o, d) = sculptRay(p) else { return }
+            let pen = CadView.pen(e, lib.settings)
             if strokeBrush == .grab {
                 // Grabbed: carried in the plane through where it was taken that faces the view.
                 guard let place = lib.sculptPlace else { return }
@@ -1427,7 +1448,7 @@ final class CadView: MTKView {
                 lib.sculptDab(at: at)
                 lib.sculptRing = SculptRing(at: at, normal: lib.sculptRing?.normal ?? -f)
             } else if let hit = lib.sculpt?.ray(o, d) {
-                lib.sculptDab(at: hit.at)
+                lib.sculptDab(at: hit.at, pressure: pen.pressure, size: pen.size)
                 lib.sculptRing = hit
             }
         case .tilt(let k):

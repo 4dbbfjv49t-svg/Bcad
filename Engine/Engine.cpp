@@ -189,9 +189,9 @@ void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, do
   s->sculptor.begin(brush, {at[0], at[1], at[2]}, radius, strength, mirror != 0, invert != 0);
 }
 
-void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure) {
-  if (!s || !at || !finite(at, 3) || !std::isfinite(pressure)) return;
-  s->sculptor.dab({at[0], at[1], at[2]}, pressure);
+void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size) {
+  if (!s || !at || !finite(at, 3) || !std::isfinite(pressure) || !std::isfinite(size)) return;
+  s->sculptor.dab({at[0], at[1], at[2]}, pressure, size);
 }
 
 void bk_sculpt_end(BKSculpt *s) {
