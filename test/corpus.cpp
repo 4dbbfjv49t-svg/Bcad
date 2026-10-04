@@ -8,12 +8,15 @@
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
 // Every shape made is also made as printers take it (bk_print_mesh): it must be a sound solid, its volume the shape's.
+// The digest carries, for each case as saved, a hash of that mesh's every bit and of its STEP file's, so two machines'
+// files are seen to be the same, not only their volumes. With --perturb, a case whose outcome flips fails the run.
 // With --perturb, each case is also made moved far off, turned a quarter turn, made a millionth larger, and with its tools
 // taken in two other orders; what then comes out differently is counted. --digest FILE writes one line per case and
 // variant (to compare one machine's results with another's). --record prints the cases with what they now give as their
 // expectation.
 #include "BcadKernel.h"
 #include "Engine/Model.hpp"
+#include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
 #include <algorithm>
@@ -54,6 +57,7 @@ struct Result {
   bool closed = true;
   std::string print;  // what's wrong with it as printers take it ("" when nothing)
   int crowded = 0, slivers = 0;
+  uint64_t files = 0;  // a hash of its print mesh and STEP file (the case as saved)
   long booleans = 0;
   double ms = 0;
   std::string why;
@@ -319,8 +323,6 @@ Result run(const std::string &prog, const std::string &ops, const Variant &v) {
       auto p0 = std::chrono::steady_clock::now();
       long c0 = bce::combineReport.calls;
       BKPrintMesh *pm = bk_print_mesh(cur);
-      t0 += std::chrono::steady_clock::now() - p0;
-      calls0 += bce::combineReport.calls - c0;
       // Its volume the mesh's own at that detail (not the shape's exact one: the mesh cuts inside curves).
       BKMesh *fine = bk_mesh(cur, 0.01);
       double own = 0;
@@ -334,6 +336,21 @@ Result run(const std::string &prog, const std::string &ops, const Variant &v) {
       if (!pm->valid) r.print = bk_last_error();
       else if (!(std::fabs(pm->volume - own) <= 1e-6 * own)) r.print = "volume " + digits(pm->volume) + ", the mesh's " + digits(own);
       r.crowded = pm->crowded, r.slivers = pm->slivers;
+      // FNV-1a over the mesh's bits and the STEP file's text (its header, which has the time, left out).
+      uint64_t h = 1469598103934665603ull;
+      auto mix = [&](const void *data, size_t n) {
+        for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)data)[i]) * 1099511628211ull;
+      };
+      mix(pm->positions, sizeof(float) * 3 * pm->vertexCount);
+      mix(pm->indices, sizeof(uint32_t) * 3 * pm->triangleCount);
+      std::string step, why;
+      if (bce::stepText({bce::heldShape(cur)}, {"case"}, "case.step", step, why)) {
+        size_t data = step.find("DATA;");
+        mix(step.data() + data, step.size() - data);
+      }
+      r.files = h;
+      t0 += std::chrono::steady_clock::now() - p0;
+      calls0 += bce::combineReport.calls - c0;
       bk_print_mesh_free(pm);
     }
   }
@@ -427,8 +444,9 @@ int main(int argc, char **argv) {
     for (int k = 0; k < nv; k++) {
       const Result &x = rs[k];
       if (digest)
-        fprintf(digest, "%s %s %s %s %d %d\n", id.c_str(), variants[k].name, x.status.c_str(),
-                x.status == "OK" ? digits(x.volume).c_str() : x.status == "SEC" ? digits(x.area).c_str() : "-", x.pieces, x.faces);
+        fprintf(digest, "%s %s %s %s %d %d%s\n", id.c_str(), variants[k].name, x.status.c_str(),
+                x.status == "OK" ? digits(x.volume).c_str() : x.status == "SEC" ? digits(x.area).c_str() : "-", x.pieces, x.faces,
+                x.files ? (" files " + std::to_string(x.files)).c_str() : "");
       if (k == 0) continue;
       if (x.status != r.status) {
         flips[k]++;
@@ -456,5 +474,7 @@ int main(int argc, char **argv) {
          cr.again);
   for (int k = 1; k < nv; k++)
     printf("%-7s outcome flips %d, volume drift >1e-6 %d, >1e-3 %d, faces or pieces differ %d\n", variants[k].name, flips[k], drift6[k], drift3[k], shape[k]);
-  return wrong || open || unprintable ? 1 : 0;
+  int flipped = 0;
+  for (int k = 1; k < nv; k++) flipped += flips[k];
+  return wrong || open || unprintable || flipped ? 1 : 0;
 }

@@ -1250,6 +1250,87 @@ enum SelfTest {
         settle()
         check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
 
+        // Everyday editing as the menus and keys do it: a split committed, hiding and showing, delete, undo and redo, cut and
+        // paste, a layer edited and removed, a bolt's thread changed, settings back to their defaults, a new document over
+        // unsaved work (answered Cancel, then Don't Save), every language's texts, and STL and STEP through the export code.
+        do {
+            let a = Solid(name: "A", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
+            let b = Solid(name: "B", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(40, 0, 10)))
+            use([a, b])
+            lib.selection = [a.id]
+            lib.enter(.split)
+            lib.split()
+            settle()
+            let halves = lib.doc.bodies.filter { if case .split = $0.node { return true } else { return false } }
+            check("a split is committed: the shape in two halves", lib.doc.bodies.count == 3 && halves.count == 2 && lib.mode == .select, "\(lib.doc.bodies.count) shapes")
+            lib.selection = [b.id]
+            lib.hideSelection()
+            let hid = lib.body(b.id)?.hidden == true && lib.selection.isEmpty
+            lib.showAll()
+            check("hide, then show all", hid && lib.doc.bodies.allSatisfy { !$0.hidden })
+            let before = lib.doc
+            lib.selection = [b.id]
+            lib.deleteSelection()
+            let deleted = lib.body(b.id) == nil && lib.doc.bodies.count == before.bodies.count - 1
+            lib.undo()
+            let undone = lib.doc == before
+            lib.redo()
+            let redone = lib.body(b.id) == nil
+            lib.undo()
+            check("delete, undo, redo", deleted && undone && redone && lib.doc == before)
+            lib.selection = [b.id]
+            lib.cutSelection()
+            let cut = lib.body(b.id) == nil
+            lib.paste()
+            settle()
+            check("cut and paste", cut && lib.doc.bodies.count == before.bodies.count && lib.doc.bodies.contains { $0.name == "B" })
+            // A rounding edited (2 mm to 1 mm), then removed: the box again.
+            let roundedBox = Solid(name: "R", color: Palette.colors[2], node: .round(of: box, picks: [edge], radius: 2), place: Placement(move: SIMD3(0, 0, 10)))
+            use([roundedBox])
+            lib.editLayer(roundedBox.id, level: 0) { n in if case .round(let of, let picks, _) = n { return .round(of: of, picks: picks, radius: 1) } else { return n } }
+            settle()
+            let edited: Bool = { if case .round(_, _, let r) = lib.body(roundedBox.id)?.node { return r == 1 } else { return false } }()
+            lib.removeLayer(roundedBox.id, level: 0)
+            settle()
+            check("a layer edited, then removed", edited && lib.body(roundedBox.id)?.node == box && lib.meshes[roundedBox.id].map { abs($0.volume - 8000) < 1e-6 } == true)
+            // A bolt's thread changed on its own tab: M8 to M10, built.
+            let bolt = Solid(name: "Bolt", color: Palette.colors[3], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(0, 0, 20)))
+            use([bolt])
+            lib.reshape(bolt.id) { _ in .fastener(Fastener(kind: .hex, size: 4).threaded(5)) }
+            settle()
+            let threaded: Bool = { if case .fastener(let f) = lib.body(bolt.id)?.node { return f.size == 5 } else { return false } }()
+            check("a bolt's thread changed is built", threaded && !(lib.meshes[bolt.id]?.vertices.isEmpty ?? true))
+            // Settings back to their defaults.
+            lib.updateSettings { $0.snap = 5; $0.clearance = 0.4 }
+            lib.restoreDefaults()
+            check("settings back to their defaults", lib.settings == Settings())
+            // A new document over unsaved work: Cancel keeps it, Don't Save lets it go.
+            lib.setPlace(bolt.id) { $0.move.x += 3 }
+            let unsaved = lib.doc
+            lib.testAnswer = .alertSecondButtonReturn
+            lib.newDocument()
+            let kept = lib.doc == unsaved && lib.dirty
+            lib.testAnswer = .alertThirdButtonReturn
+            lib.newDocument()
+            lib.testAnswer = nil
+            check("a new document over unsaved work: Cancel keeps it, Don't Save lets it go", kept && lib.doc.bodies.isEmpty && !lib.dirty && lib.fileURL == nil)
+            // Every language has its texts (the app's own table, as it's read at run time).
+            let missing = Languages.all.filter { $0.id != "en" && L10n.text("Your changes are lost if you don't save them.", $0.id, [:]) == "Your changes are lost if you don't save them." }
+            check("every language has its texts", Languages.all.count == 20 && missing.isEmpty, missing.map(\.id).joined(separator: ", "))
+            // STL and STEP through the export code, as the panels hand them over.
+            use([a, b])
+            var stlDone: Bool?, stepDone: Bool?
+            let stlURL = dir.appendingPathComponent("exported.stl"), stepURL = dir.appendingPathComponent("exported.step")
+            lib.export(lib.doc.bodies, step: false, to: stlURL) { stlDone = $0 }
+            lib.export(lib.doc.bodies, step: true, to: stepURL) { stepDone = $0 }
+            let asked = Date()
+            while (stlDone == nil || stepDone == nil) && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            let stlSize = (try? Data(contentsOf: stlURL))?.count ?? 0
+            let stepText = (try? String(contentsOf: stepURL, encoding: .utf8)) ?? ""
+            check("STL and STEP exported", stlDone == true && stepDone == true && stlSize == 84 + 50 * 24 && stepText.contains("=PRODUCT('A'") && stepText.contains("=PRODUCT('B'"),
+                  "\(stlSize) bytes · \(stepText.utf8.count) bytes")
+        }
+
         // Print samples for test/printcheck.py (and to open in slicers by hand): each saved as the app saves it and written as
         // an STL as it exports one; expect.json says what each holds.
         let samplesDir = dir.appendingPathComponent("print-samples")

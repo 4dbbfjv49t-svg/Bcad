@@ -81,17 +81,31 @@ jobs:
           ditto -c -k --keepParent "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app.zip"
 
       - name: Launch and open a file
-        continue-on-error: true
         run: |
           APP="$RUNNER_TEMP/out/Bcad.app"
           FILE="$TMPDIR/bcad-selftest/test.3mf"
           R="$RUNNER_TEMP/results"
           mkdir -p "$R/shots"
-          ls -la "$FILE" || echo "no test.3mf from the self-test"
+          ls -la "$FILE"
+          swiftc -O test/windows.swift -o "$RUNNER_TEMP/windows"
+          rm -f ~/Library/Logs/DiagnosticReports/*Bcad* 2>/dev/null || true
+          START=$(date "+%Y-%m-%d %H:%M:%S")
+          fail=0
           snap() {
             sleep "$2"
             screencapture -x "$R/shots/$1.png" || echo "screencapture failed"
-            if pgrep -x Bcad >/dev/null; then echo "$1: Bcad running"; else echo "$1: Bcad NOT running"; fi
+          }
+          # Running, with a window on screen, and the file opened as often as asked by now.
+          expect() {
+            local windows opened
+            windows=$("$RUNNER_TEMP/windows" Bcad)
+            opened=$(log show --start "$START" --style compact --predicate 'subsystem == "Bcad"' 2>/dev/null | grep -c "Opened test.3mf" || true)
+            if pgrep -x Bcad >/dev/null && [ "$windows" -ge 1 ] && [ "$opened" -ge "$2" ]; then
+              echo "✓ $1: running, $windows window(s), opened $opened time(s)"
+            else
+              echo "✗ $1: running $(pgrep -x Bcad >/dev/null && echo yes || echo no), $windows window(s), opened $opened time(s), wanted $2"
+              fail=1
+            fi
           }
           quit() {
             pkill -TERM -x Bcad || true
@@ -102,29 +116,34 @@ jobs:
           echo "▸ 1 launch empty"
           open --stdout "$R/1.out" --stderr "$R/1.err" "$APP"
           snap 1-empty 15
+          expect "launched" 0
 
           echo "▸ 2 open the file in the running app"
           open -a "$APP" "$FILE"
           snap 2-open-running-10s 10
           snap 2-open-running-40s 30
+          expect "a file opened in the running app" 1
           quit
 
           echo "▸ 3 cold launch with the file (Finder double-click)"
           open -a "$APP" --stdout "$R/3.out" --stderr "$R/3.err" "$FILE"
           snap 3-cold-10s 10
           snap 3-cold-40s 30
+          expect "launched with a file" 2
 
           echo "▸ 4 open the same file again"
           open -a "$APP" "$FILE"
           snap 4-reopen-30s 30
+          expect "the same file opened again" 3
           quit
 
-          log show --last 15m --style compact --predicate 'process == "Bcad"' > "$R/unified.log" 2>&1 || true
+          log show --start "$START" --style compact --predicate 'process == "Bcad"' > "$R/unified.log" 2>&1 || true
           tail -100 "$R/unified.log"
           mkdir -p "$R/crashes"
-          cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null || echo "no crash reports"
+          if cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null; then echo "✗ Bcad crashed"; fail=1; else echo "✓ no crash reports"; fi
           ls -la "$R" "$R/shots" "$R/crashes"
           for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
+          exit $fail
 
       - name: Thumbnails
         if: always()
@@ -187,18 +206,27 @@ jobs:
           ./test/corpus.sh --digest "$RUNNER_TEMP/digest/linux.txt"
 
       - name: Corpus, each case moved, turned, scaled and reordered
-        continue-on-error: true
         run: ./test/corpus.sh --perturb | grep -v "^WRONG" | tail -60
+
+      - name: Translations
+        run: python3 test/i18n.py
+
+      - name: Engine test under the address and undefined-behaviour sanitizers
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 BCAD_UNTIMED=1
+          c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined -ffp-contract=off -I. \
+            test/engine.cpp Engine/*.cpp -o "$RUNNER_TEMP/engine-asan"
+          "$RUNNER_TEMP/engine-asan" | grep -vE "^✓" | tail -60
 
       - name: Corpus under the address and undefined-behaviour sanitizers
         run: |
-          # A sanitizer's finding ends the run with 86; cases not as expected (1) are the step above's to report.
+          # A sanitizer's finding ends the run with 86; any case not as expected, open or not printable with 1: both fail it.
           export ASAN_OPTIONS=detect_leaks=0:exitcode=86 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:exitcode=86
           set +e
           CORPUS_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" ./test/corpus.sh > "$RUNNER_TEMP/asan.txt" 2>&1
           code=$?
           tail -40 "$RUNNER_TEMP/asan.txt"
-          [ $code -ne 86 ] && [ $code -le 1 ]
+          [ $code -eq 0 ]
 
       - uses: actions/upload-artifact@v4
         if: always()

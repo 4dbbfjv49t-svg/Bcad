@@ -25,6 +25,8 @@
 #include <vector>
 
 static int failures = 0;
+// Speeds are checked unless BCAD_UNTIMED is set (under the sanitizers, everything is several times slower).
+static const bool timed = !getenv("BCAD_UNTIMED");
 static void check(const char *name, bool ok, const std::string &note = "") {
   printf("%s %s %s\n", ok ? "✓" : "✗", name, note.c_str());
   if (!ok) failures++;
@@ -325,7 +327,7 @@ int main() {
       for (BKShape *t : trees) bk_bounds(t, m.data(), bx);
     double tree = ms(t0) / 400;
     printf("  a turned shape's box in %.4f ms, a merged or split one's in %.3f ms\n", prim, tree);
-    check("turned shapes' boxes are quick", prim < 0.05 && tree < 2);
+    check("turned shapes' boxes are quick", !timed || (prim < 0.05 && tree < 2));
     for (BKShape *t : trees) bk_free(t);
     bk_free(moved), bk_free(ball), bk_free(c), bk_free(box);
   }
@@ -894,7 +896,7 @@ int main() {
       double split = ms(t0);
       bk_mesh_free(m);
       printf("  two 40 mm spheres merged in %.2f ms (%d triangles), again in %.3f ms; that split in %.2f ms\n", first, tris, again, split);
-      check("merging and splitting are quick", first < 50 && again < first / 5 && split < 50);
+      check("merging and splitting are quick", !timed || (first < 50 && again < first / 5 && split < 50));
     }
     for (BKShape *s : made) bk_free(s);
     bk_free(box), bk_free(box2), bk_free(cyl);
@@ -994,7 +996,7 @@ int main() {
       auto t1 = std::chrono::steady_clock::now();
       BKShape *coved = keep(bk_cove(keep(bk_primitive(BK_PRISM, five)), &kb, body, 1, 0.5, &mr, &miss));
       double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
-      check("cove: every edge of a prism, made or refused in moments", took < 5, fmt("%.1f s, ", took) + (coved ? "made" : bk_last_error()));
+      check("cove: every edge of a prism, made or refused in moments", !timed || took < 5, fmt("%.1f s, ", took) + (coved ? "made" : bk_last_error()));
       // Every edge of a three-sided prism and of a wedge: where three meet at a corner two cylinders only touch, which
       // merging takes well only in some orders (reference 261.0555 and 2656.6523 mm³).
       double three[3] = {3, 11.6451, 6.32203}, wedge406[3] = {20.7767, 15.8337, 16.3498};
@@ -1470,7 +1472,7 @@ int main() {
       t1 = std::chrono::steady_clock::now();
       BKShape *b = bk_fastener(&big, 0.2);
       double large = ms(t1);
-      check("an M8 bolt made (and meshed twice) quickly, an M24 × 100 one in well under a second", s && b && small < 150 && large < 800,
+      check("an M8 bolt made (and meshed twice) quickly, an M24 × 100 one in well under a second", s && b && (!timed || (small < 150 && large < 800)),
             fmt("%.0f ms, %.0f ms", small, large));
       bk_free(s), bk_free(b);
     }
@@ -1875,6 +1877,242 @@ int main() {
     for (BKShape *x : {k1, k2, k3, edge, corner, box, hollowed, m3, far, apart, nothing}) bk_free(x);
   }
 
+  // MARK: coverage
+  // What the rest leaves out: distances (and the points they're between) on more shapes, sections across a corner, a face,
+  // a whole body and a concave edge, edge picks of other shapes, boxes of treated shapes, picks that match nothing, the
+  // oval torus merged and rounded, prisms and pyramids of every number of sides, every thread merged, stretched and
+  // mirrored shapes rounded and hollowed, the smallest and largest sizes, many shapes at once, three roundings in a row.
+  {
+    printf("— coverage\n");
+    // A sound solid as files take it: closed, its pieces as many as `pieces` (0: any).
+    auto sound = [](BKShape *s, int pieces = 0) {
+      if (!s) return false;
+      BKPrintMesh *p = bk_print_mesh(s);
+      bool ok = p->valid && p->triangleCount > 0 && (pieces == 0 || bk_piece_count(s) == pieces);
+      bk_print_mesh_free(p);
+      return ok;
+    };
+    auto vol = [](BKShape *s) {
+      BKMesh *m = bk_mesh(s, 0.05);
+      double v = m ? m->volume : 0;
+      bk_mesh_free(m);
+      return v;
+    };
+    auto faceWhere = [](BKShape *s, auto pred) {
+      BKMesh *m = bk_mesh(s, 0.05);
+      int found = -1;
+      for (int f = 0; f < m->faceCount && found < 0; f++)
+        if (pred(m->faceInfo + 6 * f)) found = f;
+      bk_mesh_free(m);
+      return found;
+    };
+    auto at = [](BKShape *s, double x, double y, double z) {
+      double m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+      return bk_transform(s, m);
+    };
+    int kb = BK_PICK_BODY, ke = BK_PICK_EDGE, kc = BK_PICK_CORNER, kf = BK_PICK_FACE, miss = 0;
+    double body6[6] = {0}, mr = 0, out[6];
+    std::string notes;
+    int bad = 0;
+    auto expect = [&](const char *what, bool ok, const std::string &note = "") {
+      if (!ok) bad++, notes += std::string(what) + (note.empty() ? "" : ": " + note) + "\n  ";
+    };
+
+    // Distances, each with its closest points checked to lie that far apart.
+    {
+      double cone[3] = {20, 0, 20}, torus[3] = {0, 30, 8}, p20[3] = {20, 0, 0}, above[3] = {0, 0, 10}, b20[3] = {20, 20, 20};
+      BKShape *c = bk_primitive(BK_CONE, cone), *t = bk_primitive(BK_TORUS, torus), *box = bk_primitive(BK_BOX, b20);
+      int side = faceWhere(c, [](double *i) { return std::fabs(i[2]) < 0.9; });
+      double d = bk_distance(nullptr, nullptr, BK_END_POINT, 0, p20, c, I, BK_END_FACE, side, nullptr, out);
+      // The cone's side runs from (10, -10) to (0, 10) in its xz plane.
+      expect("point to a cone's side", near(d, 300 / std::sqrt(500.0), 1e-9) && near(std::hypot(out[3] - out[0], out[4] - out[1], out[5] - out[2]), d, 1e-9),
+             fmt("%.12f", d));
+      d = bk_distance(nullptr, nullptr, BK_END_POINT, 0, above, t, I, BK_END_FACE, 0, nullptr, out);
+      expect("point to a torus", near(d, std::sqrt(121.0 + 100) - 4, 1e-9) && near(std::hypot(out[3] - out[0], out[4] - out[1], out[5] - out[2]), d, 1e-9),
+             fmt("%.12f", d));
+      BKFastener f{};
+      f.kind = BK_HEX, f.size = 4;
+      bk_fastener_defaults(&f, 1);
+      BKShape *bolt = bk_fastener(&f, 0.2);
+      double bb[6];
+      bk_bounds(bolt, I, bb);
+      double over[3] = {0, 0, bb[5] + 5};
+      int headTop = faceWhere(bolt, [&](double *i) { return i[2] > 0.99 && near(i[5], bb[5], 1e-6); });
+      d = bk_distance(nullptr, nullptr, BK_END_POINT, 0, over, bolt, I, BK_END_FACE, headTop, nullptr, out);
+      expect("point to a bolt head's top", near(d, 5, 1e-9), fmt("%.12f", d));
+      // Rounded edge: the point (15, 15, 0) to the edge rounded with radius 2 along z at (8, 8).
+      BKShape *r = bk_fillet(box, &kb, body6, 1, 2, &mr, &miss);
+      double corner[3] = {15, 15, 0}, best = 1e9;
+      BKMesh *rm = bk_mesh(r, 0.05);
+      for (int fi = 0; rm && fi < rm->faceCount; fi++) {
+        double g = bk_distance(nullptr, nullptr, BK_END_POINT, 0, corner, r, I, BK_END_FACE, fi, nullptr, out);
+        if (g >= 0) best = std::min(best, g);
+      }
+      bk_mesh_free(rm);
+      expect("point to a rounded edge", near(best, std::sqrt(98.0) - 2, 2e-3), fmt("%.6f", best));
+      // Shapes overlapping: a small box's top crosses the big one's side, nothing between them.
+      double b10[3] = {10, 10, 10};
+      BKShape *small = bk_primitive(BK_BOX, b10), *moved = at(small, 10, 0, 0);
+      int px = faceWhere(box, [](double *i) { return i[0] > 0.9; }), pz = faceWhere(small, [](double *i) { return i[2] > 0.9; });
+      d = bk_distance(box, I, BK_END_FACE, px, nullptr, moved, I, BK_END_FACE, pz, nullptr, out);
+      expect("faces crossing", d >= 0 && d <= 1e-9, fmt("%.12f", d));
+      bk_free(small);
+      for (BKShape *x : {c, t, box, bolt, r, moved}) bk_free(x);
+    }
+
+    // Sections across a corner, a face, a whole body and a concave edge (an L of two boxes).
+    {
+      double b20[3] = {20, 20, 20}, corner[6] = {0, 0, 1, 10, 10, 10}, top[6] = {0, 0, 1, 0, 0, 10};
+      BKShape *box = bk_primitive(BK_BOX, b20), *other = at(box, 20, 0, 0), *tall = at(box, 0, 0, 20), *l = bk_boolean(BK_UNION, other, tall);
+      BKShape *ell = bk_boolean(BK_UNION, box, l);
+      struct S {
+        const char *name;
+        BKShape *s;
+        int kind;
+        double *pick;
+        double angle;
+      };
+      // The L's concave edge: along y at x = 10, z = 10.
+      double concave[6] = {10, 0, 10, 0, 1, 0};
+      for (S x : {S{"a corner", box, kc, corner, 90}, S{"a face", box, kf, top, 90}, S{"a body", box, kb, body6, 90}, S{"a concave edge", ell, ke, concave, 270}}) {
+        BKSection *sec = bk_section(x.s, x.kind, x.pick, 10);
+        bool ok = sec && near(sec->angle, x.angle, 1e-9) && sec->loopCount >= 1;
+        if (ok) {
+          // Its point on an edge of the shape, its direction along an axis.
+          double dir = std::max({std::fabs(sec->direction[0]), std::fabs(sec->direction[1]), std::fabs(sec->direction[2])});
+          ok = near(dir, 1, 1e-9);
+        }
+        expect((std::string("section across ") + x.name).c_str(), ok, sec ? fmt("%.6f°", sec->angle) : bk_last_error());
+        if (sec) bk_section_free(sec);
+      }
+      for (BKShape *x : {box, other, tall, l, ell}) bk_free(x);
+    }
+
+    // Edge picks of other shapes: a cylinder's body is its two rims, a wedge's its 9 edges.
+    {
+      double cyl[2] = {20, 20}, wedge[3] = {30, 20, 10};
+      BKShape *c = bk_primitive(BK_CYLINDER, cyl), *w = bk_primitive(BK_WEDGE, wedge);
+      int rims = bk_pick_edges(c, &kb, body6, 1, nullptr, 0), edges = bk_pick_edges(w, &kb, body6, 1, nullptr, 0);
+      expect("edge picks of a cylinder and a wedge", rims == 2 && edges == 9, fmt("%.0f rims, %.0f edges", rims, edges));
+      // A pick that matches nothing is said to, and the rest still rounded.
+      double picks[12] = {0, -10, 10, 1, 0, 0, 500, 500, 500, 1, 0, 0}, b20[3] = {20, 20, 20};
+      int kinds[2] = {BK_PICK_EDGE, BK_PICK_EDGE};
+      BKShape *box = bk_primitive(BK_BOX, b20), *one = bk_fillet(box, kinds, picks, 2, 2, &mr, &miss);
+      expect("a pick matching nothing is said to be missing", one && miss == 1 && sound(one, 1), fmt("missing %.0f", miss));
+      for (BKShape *x : {c, w, box, one}) bk_free(x);
+    }
+
+    // Boxes of treated and hollowed shapes (rounding and hollowing keep a box's box), and of a bolt turned aslant.
+    {
+      double b20[3] = {20, 20, 20}, bb[6];
+      BKShape *box = bk_primitive(BK_BOX, b20), *r = bk_fillet(box, &kb, body6, 1, 2, &mr, &miss);
+      BKShape *h = bk_hollow(box, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr);
+      for (BKShape *x : {r, h}) {
+        int exact = bk_bounds(x, I, bb);
+        bool ok = exact >= 0;
+        for (int k = 0; k < 6; k++) ok = ok && near(bb[k], k < 3 ? -10 : 10, 0.1);
+        expect(x == r ? "a rounded box's box" : "a hollow box's box", ok, fmt("%.4f … %.4f", bb[0], bb[3]));
+      }
+      BKFastener f{};
+      f.kind = BK_SOCKET, f.size = 4;
+      bk_fastener_defaults(&f, 1);
+      BKShape *bolt = bk_fastener(&f, 0.2);
+      double turn[12] = {1, 0, 0, 0, 0, std::cos(0.5), -std::sin(0.5), 0, 0, std::sin(0.5), std::cos(0.5), 0};
+      BKShape *aslant = bk_transform(bolt, turn);
+      bk_bounds(bolt, turn, bb);
+      BKMesh *m = bk_mesh(aslant, 0.01);
+      double lo = 1e9, hi = -1e9;
+      for (int i = 0; m && i < m->vertexCount; i++) lo = std::min(lo, (double)m->positions[3 * i + 2]), hi = std::max(hi, (double)m->positions[3 * i + 2]);
+      bk_mesh_free(m);
+      expect("an aslant bolt's box", near(bb[2], lo, 0.1) && near(bb[5], hi, 0.1), fmt("%.4f … %.4f", bb[2], bb[5]) + fmt(" (mesh %.4f … %.4f)", lo, hi));
+      for (BKShape *x : {box, r, h, bolt, aslant}) bk_free(x);
+    }
+
+    // The oval torus merged with a box and rounded where it meets it; every prism and pyramid, 3 to 24 sides.
+    {
+      double ot[5] = {0, 30, 20, 90, 6}, slab[3] = {40, 10, 4};
+      BKShape *o = bk_primitive(BK_OVAL_TORUS, ot), *s = bk_primitive(BK_BOX, slab), *both = bk_boolean(BK_UNION, o, s);
+      expect("an oval torus merged with a slab", sound(both, 1));
+      BKShape *r = both ? bk_fillet(both, &kb, body6, 1, 0.5, &mr, &miss) : nullptr;
+      expect("an oval torus and a slab rounded", !r || sound(r, 1), r ? "" : fmt("refused (largest %.3f)", mr));
+      for (BKShape *x : {o, s, both, r}) bk_free(x);
+      for (int n = 3; n <= 24; n++)
+        for (int kind : {BK_PRISM, BK_PYRAMID}) {
+          double p[3] = {(double)n, 20, 20};
+          BKShape *x = bk_primitive(kind, p);
+          double area = n / 2.0 * 100 * std::sin(2 * PI / n), want = kind == BK_PRISM ? area * 20 : area * 20 / 3;
+          expect(fmt(kind == BK_PRISM ? "%.0f-sided prism" : "%.0f-sided pyramid", n).c_str(), sound(x, 1) && near(vol(x), want, 1e-6 * want), fmt("%.6f", vol(x)));
+          bk_free(x);
+        }
+    }
+
+    // Every thread merged with a block and cut from one.
+    {
+      for (int size = 0; size < bk_thread_count(); size++) {
+        BKFastener f{};
+        f.kind = BK_HEX, f.size = size;
+        bk_fastener_defaults(&f, 1);
+        BKShape *bolt = bk_fastener(&f, 0.2);
+        double bb[6];
+        bk_bounds(bolt, I, bb);
+        double block[3] = {bb[3] - bb[0] + 10, bb[4] - bb[1] + 10, 6};
+        BKShape *b = bk_primitive(BK_BOX, block), *merged = bk_boolean(BK_UNION, bolt, b), *cut = bk_boolean(BK_SUBTRACT, b, bolt);
+        expect((std::string(bk_thread_name(size)) + " merged and cut").c_str(), sound(merged, 1) && sound(cut));
+        for (BKShape *x : {bolt, b, merged, cut}) bk_free(x);
+      }
+    }
+
+    // Stretched and mirrored shapes rounded and hollowed: a mirror changes nothing; a stretch is an oval to round.
+    {
+      double b20[3] = {20, 20, 20}, cyl[2] = {20, 20};
+      double mirror[12] = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, stretch[12] = {1.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+      BKShape *box = bk_primitive(BK_BOX, b20), *c = bk_primitive(BK_CYLINDER, cyl);
+      BKShape *mb = bk_transform(box, mirror), *sc = bk_transform(c, stretch);
+      BKShape *h = bk_hollow(mb, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr), *h0 = bk_hollow(box, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr);
+      expect("a mirrored box hollowed as the box", sound(h, 1) && near(vol(h), vol(h0), 1e-9 * vol(h0)), fmt("%.6f vs %.6f", vol(h), vol(h0)));
+      BKShape *rm = bk_fillet(mb, &kb, body6, 1, 2, &mr, &miss), *r0 = bk_fillet(box, &kb, body6, 1, 2, &mr, &miss);
+      expect("a mirrored box rounded as the box", sound(rm, 1) && near(vol(rm), vol(r0), 1e-9 * vol(r0)));
+      BKShape *rs = bk_fillet(sc, &kb, body6, 1, 2, &mr, &miss), *hs = bk_hollow(sc, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr);
+      expect("a stretched cylinder rounded", sound(rs, 1), rs ? "" : bk_last_error());
+      expect("a stretched cylinder hollowed", sound(hs, 1) && vol(hs) < vol(sc), hs ? "" : bk_last_error());
+      for (BKShape *x : {box, c, mb, sc, h, h0, rm, r0, rs, hs}) bk_free(x);
+    }
+
+    // The smallest and largest sizes: a 0.01 mm cube, a 1 m box and ball.
+    {
+      double tiny[3] = {0.01, 0.01, 0.01}, metre[3] = {1000, 1000, 1000}, ball[1] = {1000};
+      BKShape *t = bk_primitive(BK_BOX, tiny), *m = bk_primitive(BK_BOX, metre), *s = bk_primitive(BK_SPHERE, ball);
+      expect("a 0.01 mm cube", sound(t, 1) && near(vol(t), 1e-6, 1e-12), fmt("%.3g", vol(t)));
+      expect("a 1 m box", sound(m, 1) && near(vol(m), 1e9, 1e-3), fmt("%.6g", vol(m)));
+      expect("a 1 m ball", sound(s, 1) && near(vol(s), 4 * PI * 500 * 500 * 500 / 3, 1e-6 * 5e8), fmt("%.6g", vol(s)));
+      for (BKShape *x : {t, m, s}) bk_free(x);
+    }
+
+    // Twelve cubes in a row, each touching the next, merged one by one: one piece, twelve cubes' volume.
+    {
+      double cube[3] = {10, 10, 10};
+      BKShape *k = bk_primitive(BK_BOX, cube), *row = bk_copy(k);
+      for (int i = 1; i < 12 && row; i++) {
+        BKShape *next = at(k, 10.0 * i, 0, 0), *joined = bk_boolean(BK_UNION, row, next);
+        bk_free(row), bk_free(next);
+        row = joined;
+      }
+      expect("twelve cubes in a row merged", sound(row, 1) && near(vol(row), 12000, 1e-6), row ? fmt("%.6f", vol(row)) : "failed");
+      bk_free(k), bk_free(row);
+    }
+
+    // Three roundings in a row, each on an edge of its own.
+    {
+      double b20[3] = {20, 20, 20}, e1[6] = {0, -10, 10, 1, 0, 0}, e2[6] = {0, 10, 10, 1, 0, 0}, e3[6] = {10, 0, -10, 0, 1, 0};
+      BKShape *box = bk_primitive(BK_BOX, b20), *a = bk_fillet(box, &ke, e1, 1, 2, &mr, &miss);
+      BKShape *b = a ? bk_fillet(a, &ke, e2, 1, 2, &mr, &miss) : nullptr, *c = b ? bk_fillet(b, &ke, e3, 1, 2, &mr, &miss) : nullptr;
+      double one = (4 - PI) * 20;
+      expect("three roundings in a row", sound(c, 1) && near(vol(c), 8000 - 3 * one, 1e-6), c ? fmt("%.6f", vol(c)) : "refused");
+      for (BKShape *x : {box, a, b, c}) bk_free(x);
+    }
+    check("coverage: distances, sections, picks, boxes, oval torus, 3–24 sides, every thread, mirrors, sizes, rows, roundings", bad == 0, notes);
+  }
+
   // MARK: speed
   {
     double sph[1] = {200}, cyl[2] = {20, 20};
@@ -1891,7 +2129,7 @@ int main() {
     BKMesh *m = bk_mesh(s, 0.01);
     double sphTook = ms(t0);
     printf("  a cylinder meshed in %.3f ms (%d triangles); a 200 mm sphere at 0.01 mm in %.1f ms (%d triangles)\n", cylTook, tris / 100, sphTook, m->triangleCount);
-    check("meshing is quick", cylTook < 5 && sphTook < 2000);
+    check("meshing is quick", !timed || (cylTook < 5 && sphTook < 2000));
     bk_mesh_free(m);
     bk_free(s), bk_free(c);
   }
