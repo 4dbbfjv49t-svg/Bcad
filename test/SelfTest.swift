@@ -139,7 +139,8 @@ enum SelfTest {
         let t2 = mesh(twice)
         check("round all edges after a rounding", t2?.valid == true && manifold(t2!) && (t2?.volume ?? 8000) < (e?.volume ?? 0))
         let skewed = Solid(name: "Skewed", color: Palette.colors[0], node: twice, place: Placement(move: SIMD3(-3, -5, 13), turn: SIMD3(0, 0, -60), scale: SIMD3(1.75, 1.3, 1.3)))
-        check("world mesh of a scaled, rotated, rounded body", k.worldMesh(skewed)?.valid == true)
+        let skewedPrint = k.printMesh(skewed)
+        check("a scaled, rotated, rounded body prints as a sound solid", skewedPrint != nil && skewedPrint?.problem == nil && !(skewedPrint?.mesh.triangles.isEmpty ?? true))
         _ = k.takeProblems()
         let tooBig = mesh(.round(of: box, picks: [edge], radius: 40))
         check("too large radius reported", k.takeProblems().contains { $0.hasPrefix("max:") } && tooBig != nil)
@@ -290,21 +291,69 @@ enum SelfTest {
                       Solid(name: "Half", color: Palette.colors[6], node: .split(of: .primitive(.make(.sphere)), plane: tilted, side: 0), place: Placement(move: SIMD3(-80, 0, 10))),
                       Solid(name: "M8 bolt", color: Palette.colors[1], node: .fastener(Fastener(kind: .hex, size: 4)), place: Placement(move: SIMD3(80, 0, 15))),
                       Solid(name: "M5 Torx", color: Palette.colors[6], node: .fastener(Fastener(kind: .torxCone, size: 2)), place: Placement(move: SIMD3(-60, 40, 10)))] + treated
-        let meshes = doc.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } }
+        let made = doc.bodies.map { b in (b, k.printMesh(b)) }
+        let meshes = made.compactMap { b, m in m.map { (b, $0.mesh) } }
+        check("every body prints as a sound solid", meshes.count == doc.bodies.count && made.allSatisfy { $0.1?.problem == nil },
+              made.filter { $0.1?.problem != nil }.map(\.0.name).joined(separator: ", "))
         let u3 = dir.appendingPathComponent("test.3mf")
-        try? ThreeMF.write(u3, meshes: meshes, doc: doc)
+        let bed = SIMD3<Double>(256, 220, 250)
+        try? ThreeMF.write(u3, meshes: meshes, doc: doc, bed: bed, thumbnail: Thumbnail.png(meshes.map { ($0.1, $0.0.color) }))
         check("3mf reopens editable", (try? ThreeMF.read(u3))?.doc == doc)
         check("a mixed colour is saved", (try? ThreeMF.read(u3))?.doc.bodies.first?.color == mixed)
         check("3mf carries every body's shape", (try? ThreeMF.read(u3))?.meshes.count == doc.bodies.count)
         let parts = (try? Zip.read(Data(contentsOf: u3))) ?? [:]
-        check("3mf model parses", parts[ThreeMF.modelPath].map { XMLParser(data: $0).parse() } == true)
+        // As a slicer reads it: an object per body, named and coloured, sound by point numbers, its volume the body's,
+        // moved so the bed's front left corner is the origin; a picture of it inside.
+        let printed = parts[ThreeMF.modelPath].flatMap { PrintedModel.read($0) }
+        check("3mf model parses", printed != nil)
+        let objects = printed?.objects ?? []
+        let asMade = objects.count == meshes.count && zip(objects, meshes).allSatisfy { o, m in
+            o.name == m.0.name && printed?.colors.indices.contains(o.color) == true && printed?.colors[o.color] == ThreeMF.hex(m.0.color)
+                && o.sound && abs(o.volume - m.1.volume) <= 1e-9 * abs(m.1.volume) && m.1.volume > 0
+        }
+        check("3mf objects are the bodies: named, coloured, sound, their volumes", asMade,
+              zip(objects, meshes).filter { o, m in !o.sound || abs(o.volume - m.1.volume) > 1e-9 * abs(m.1.volume) }.map(\.1.0.name).joined(separator: ", "))
+        check("3mf items put Bcad's bed middle at the bed's middle", printed?.moves.count == objects.count
+              && printed?.moves.allSatisfy { $0 == "1 0 0 0 1 0 0 0 1 128 110 0" } == true, printed?.moves.first ?? "")
+        check("3mf has a picture of itself", parts[ThreeMF.thumbnailPath]?.starts(with: [0x89, 0x50, 0x4E, 0x47]) == true
+              && (parts["_rels/.rels"].map { String(decoding: $0, as: UTF8.self).contains(ThreeMF.thumbnailPath) } ?? false))
+        // An odd name: marks escaped, control characters left out.
+        let oddName = "Tom & \"Jerry\" <1> 'x'\u{07} 🙂"
+        let oddBody = Solid(name: oddName, color: mixed, node: box)
+        let oddURL3 = dir.appendingPathComponent("odd-name.3mf")
+        try? ThreeMF.write(oddURL3, meshes: k.printMesh(oddBody).map { [(oddBody, $0.mesh)] } ?? [], doc: Document(bodies: [oddBody]), bed: bed)
+        let oddRead = ((try? Zip.read(Data(contentsOf: oddURL3)))?[ThreeMF.modelPath]).flatMap { PrintedModel.read($0) }
+        check("3mf names keep odd marks, without control characters", oddRead?.objects.first?.name == "Tom & \"Jerry\" <1> 'x' 🙂", oddRead?.objects.first?.name ?? "")
+        // STL as a slicer reads it (points joined by place): every side met by one running back along it, as often
+        // either way (parts touching along a line meet four times there); its volume the bodies'.
         let stl = dir.appendingPathComponent("test.stl")
         try? STL.write(stl, meshes: meshes.map(\.1))
-        let stlSize = (try? Data(contentsOf: stl).count) ?? 0
-        check("stl", stlSize == 84 + 50 * meshes.reduce(0) { $0 + $1.1.indices.count / 3 })
+        let stlData = (try? Data(contentsOf: stl)) ?? Data()
+        let triangleCount = meshes.reduce(0) { $0 + $1.1.triangles.count }
+        var stlSides: [SIMD2<Int>: Int] = [:], stlVolume = 0.0
+        if stlData.count == 84 + 50 * triangleCount {
+            var at: [SIMD3<Float>: Int] = [:]
+            stlData.withUnsafeBytes { raw in
+                for t in 0..<triangleCount {
+                    let base = 84 + 50 * t + 12
+                    let p = (0..<3).map { k in SIMD3((0..<3).map { c in raw.loadUnaligned(fromByteOffset: base + 12 * k + 4 * c, as: Float.self) }) }
+                    var id: [Int] = []
+                    for q in p {
+                        if at[q] == nil { at[q] = at.count }
+                        id.append(at[q] ?? 0)
+                    }
+                    for k in 0..<3 { stlSides[SIMD2(id[k], id[(k + 1) % 3]), default: 0] += 1 }
+                    let d = p.map { SIMD3<Double>($0) }
+                    stlVolume += dot(d[0], cross(d[1], d[2])) / 6
+                }
+            }
+        }
+        let meshVolume = meshes.reduce(0) { $0 + $1.1.volume }
+        check("stl", stlData.count == 84 + 50 * triangleCount && !stlSides.isEmpty && stlSides.allSatisfy { stlSides[SIMD2($0.key.y, $0.key.x)] == $0.value }
+              && abs(stlVolume - meshVolume) <= 1e-9 * meshVolume, String(format: "%.3f mm³ of %.3f", stlVolume, meshVolume))
         // STEP: a product under each shape's name, each a solid (or more, for a shape in pieces).
         let step = dir.appendingPathComponent("test.step")
-        let wrote = k.exportStep(doc.bodies, to: step.path)
+        let wrote = k.exportStep(doc.bodies, to: step.path).ok
         let stepText = (try? String(contentsOf: step, encoding: .utf8)) ?? ""
         let products = stepText.components(separatedBy: "=PRODUCT('").count - 1
         let solids = stepText.components(separatedBy: "=MANIFOLD_SOLID_BREP(").count + stepText.components(separatedBy: "=BREP_WITH_VOIDS(").count - 2
@@ -376,6 +425,7 @@ enum SelfTest {
         let returned = Date().timeIntervalSince(asked) < 0.5
         while saved == nil && Date().timeIntervalSince(asked) < 120 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         check("save works in the background", returned && saved == true && (try? ThreeMF.read(copy))?.doc == lib.doc && !lib.dirty)
+        check("saving says nothing's wrong when nothing is", lib.note.map { !$0.contains("Check before printing") } ?? true, lib.note ?? "")
         // Saved to `url`; `meanwhile` happens while the file is being written.
         func saveAs(_ url: URL, meanwhile: () -> Void = {}) -> Bool {
             lib.fileURL = url
@@ -796,9 +846,9 @@ enum SelfTest {
             Solid(name: "Ring", color: Palette.colors[1], node: .primitive(.make(.ring)), place: Placement(move: SIMD3(30, 0, 2.5))),
             Solid(name: "Torus", color: Palette.colors[2], node: .primitive(.make(.torus)), place: Placement(move: SIMD3(-30, 0, 4)))
         ])
-        let keptMeshes = k.queue.sync { kept.bodies.compactMap { b in k.worldMesh(b).map { (b, $0) } } }
+        let keptMeshes = k.queue.sync { kept.bodies.compactMap { b in k.printMesh(b).map { (b, $0.mesh) } } }
         let keptURL = dir.appendingPathComponent("kept.3mf")
-        try? ThreeMF.write(keptURL, meshes: keptMeshes, doc: kept)
+        try? ThreeMF.write(keptURL, meshes: keptMeshes, doc: kept, bed: bed)
         lib.note = nil
         lib.open(keptURL)
         settle()
@@ -1067,8 +1117,13 @@ enum SelfTest {
         let linked = switchedOff.count == 3 && Set(switchedOff.compactMap { $0.link?.id }).count == 1 && switchedOff.allSatisfy { $0.node == box }
         check("a merge switched off: its parts shapes again, the merge kept", linked, "\(switchedOff.count) shapes")
         let unmergedFile = dir.appendingPathComponent("unmerged.3mf")
-        try? ThreeMF.write(unmergedFile, meshes: [], doc: lib.doc)
+        try? ThreeMF.write(unmergedFile, meshes: [], doc: lib.doc, bed: bed)
         check("a merge switched off is kept in its file", (try? ThreeMF.read(unmergedFile))?.doc == lib.doc)
+        // Saved, it prints merged (its rounding too), not as its parts.
+        let unmergedSaved = dir.appendingPathComponent("unmerged-saved.3mf")
+        let unmergedObjects = saveAs(unmergedSaved) ? ((try? Zip.read(Data(contentsOf: unmergedSaved)))?[ThreeMF.modelPath]).flatMap { PrintedModel.read($0) }?.objects : nil
+        check("a merge switched off prints merged", unmergedObjects?.count == 1 && unmergedObjects?.first?.name == all3?.name && unmergedObjects?.first?.sound == true,
+              "\(unmergedObjects?.count ?? -1) objects")
         if let first = switchedOff.first {
             lib.setPlace(first.id) { $0.move.z += 5 }
             lib.remerge(first.id)
@@ -1156,7 +1211,7 @@ enum SelfTest {
         var nothingDoc = Document()
         nothingDoc.bodies = [nothing]
         let nothingURL = dir.appendingPathComponent("nothing.3mf"), nothingAgain = dir.appendingPathComponent("nothing-again.3mf")
-        try? ThreeMF.write(nothingURL, meshes: meshes.first.map { [(nothing, $0.1)] } ?? [], doc: nothingDoc)
+        try? ThreeMF.write(nothingURL, meshes: meshes.first.map { [(nothing, $0.1)] } ?? [], doc: nothingDoc, bed: bed)
         lib.open(nothingURL)
         settle()
         check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
@@ -1166,5 +1221,48 @@ enum SelfTest {
         print(ok ? "ALL OK" : "FAILURES")
         return ok
     }
+}
+
+// A 3MF's model as a slicer reads it: its colours, its objects (name, colour, points, triangles) and how its build items
+// move them.
+final class PrintedModel: NSObject, XMLParserDelegate {
+    struct Object {
+        var name = "", color = -1
+        var points: [SIMD3<Double>] = []
+        var triangles: [SIMD3<Int>] = []
+    }
+    var colors: [String] = []
+    var objects: [Object] = []
+    var moves: [String] = []
+
+    static func read(_ model: Data) -> PrintedModel? {
+        let m = PrintedModel(), parser = XMLParser(data: model)
+        parser.delegate = m
+        return parser.parse() ? m : nil
+    }
+
+    func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String] = [:]) {
+        switch name {
+        case "base": colors.append(a["displaycolor"] ?? "")
+        case "object": objects.append(Object(name: a["name"] ?? "", color: a["pindex"].flatMap { Int($0) } ?? -1))
+        case "vertex": objects[objects.count - 1].points.append(SIMD3(Double(a["x"] ?? "") ?? .nan, Double(a["y"] ?? "") ?? .nan, Double(a["z"] ?? "") ?? .nan))
+        case "triangle": objects[objects.count - 1].triangles.append(SIMD3(Int(a["v1"] ?? "") ?? -1, Int(a["v2"] ?? "") ?? -1, Int(a["v3"] ?? "") ?? -1))
+        case "item": moves.append(a["transform"] ?? "")
+        default: break
+        }
+    }
+}
+
+extension PrintedModel.Object {
+    // Sound as a slicer joins it, by point numbers: every side met once by one running back along it. Its volume.
+    var sound: Bool {
+        var sides = Set<SIMD2<Int>>()
+        for t in triangles {
+            guard t.min() >= 0, t.max() < points.count, t.x != t.y, t.y != t.z, t.x != t.z else { return false }
+            for e in [SIMD2(t.x, t.y), SIMD2(t.y, t.z), SIMD2(t.z, t.x)] where !sides.insert(e).inserted { return false }
+        }
+        return !triangles.isEmpty && sides.allSatisfy { sides.contains(SIMD2($0.y, $0.x)) }
+    }
+    var volume: Double { triangles.reduce(0) { $0 + dot(points[$1.x], cross(points[$1.y], points[$1.z])) / 6 } }
 }
 #endif

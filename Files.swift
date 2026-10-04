@@ -1,5 +1,7 @@
 import Foundation
 import Compression
+import CoreGraphics
+import ImageIO
 import simd
 
 enum FileError: Error { case corrupt, notBcad }
@@ -132,24 +134,37 @@ enum Weld {
 
 // MARK: - 3MF (with the editable Bcad model inside)
 
+// Each body an object of its own, named and coloured as in Bcad, its triangles as printers take them; the model's origin
+// the bed's front left corner (as the format has it), so slicers put each where it stands on Bcad's bed. Inside too: the
+// document itself, to edit again, and a picture of it for file browsers.
 enum ThreeMF {
     static let modelPath = "3D/3dmodel.model"
     static let docPath = "Metadata/bcad.json"
+    static let thumbnailPath = "Metadata/thumbnail.png"
 
-    private static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    // Text as XML takes it: no control characters, the five marks escaped.
+    static func escape(_ s: String) -> String {
+        let plain = String(String.UnicodeScalarView(s.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F && $0.value != 0xFFFE && $0.value != 0xFFFF }))
+        return plain.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "'", with: "&apos;")
     }
 
+    // A float as written: the shortest text that reads back as the same float.
     private static func num(_ v: Float) -> String {
-        var s = String(format: "%.4f", v)
-        while s.hasSuffix("0") { s.removeLast() }
-        if s.hasSuffix(".") { s.removeLast() }
-        return s == "-0" ? "0" : s
+        var s = v == 0 ? "0" : "\(v)"
+        if s.hasSuffix(".0") { s.removeLast(2) }
+        return s
     }
+
+    static func hex(_ c: SIMD3<UInt8>) -> String { String(format: "#%02X%02X%02X", c.x, c.y, c.z) }
+
+    // Where Bcad's origin (the bed's middle) lies from the bed's front left corner.
+    static func shift(bed: SIMD3<Double>) -> SIMD3<Float> { SIMD3(Float(bed.x / 2), Float(bed.y / 2), 0) }
 
     // Each object carries its body's id as part number, so opening the file can show it before the kernel rebuilds it.
-    static func write(_ url: URL, meshes: [(Solid, Mesh)], doc: Document) throws {
+    static func write(_ url: URL, meshes: [(Solid, SavedMesh)], doc: Document, bed: SIMD3<Double>, thumbnail: Data? = nil) throws {
+        var colors: [SIMD3<UInt8>] = []
+        for (body, _) in meshes where !colors.contains(body.color) { colors.append(body.color) }
         var xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
@@ -157,32 +172,41 @@ enum ThreeMF {
          <resources>
 
         """
+        if !colors.isEmpty {
+            xml += "  <basematerials id=\"1\">\n"
+            for c in colors { xml += "   <base name=\"\(hex(c))\" displaycolor=\"\(hex(c))\"/>\n" }
+            xml += "  </basematerials>\n"
+        }
+        let t = shift(bed: bed)
+        let move = "1 0 0 0 1 0 0 0 1 \(num(t.x)) \(num(t.y)) \(num(t.z))"
         var items = ""
-        for (i, (body, mesh)) in meshes.enumerated() {
-            let (pts, tris) = Weld.run(mesh)
-            guard !tris.isEmpty else { continue }
-            var obj = "  <object id=\"\(i + 1)\" type=\"model\" name=\"\(escape(body.name))\" partnumber=\"\(body.id.uuidString)\">\n   <mesh>\n    <vertices>\n"
-            obj.reserveCapacity(pts.count * 60 + tris.count * 50)
-            for p in pts { obj += "     <vertex x=\"\(num(p.x))\" y=\"\(num(p.y))\" z=\"\(num(p.z))\"/>\n" }
+        for (i, (body, mesh)) in meshes.enumerated() where !mesh.triangles.isEmpty {
+            let id = i + 2, color = colors.firstIndex(of: body.color) ?? 0
+            var obj = "  <object id=\"\(id)\" type=\"model\" name=\"\(escape(body.name))\" partnumber=\"\(body.id.uuidString)\" pid=\"1\" pindex=\"\(color)\">\n   <mesh>\n    <vertices>\n"
+            obj.reserveCapacity(mesh.points.count * 70 + mesh.triangles.count * 50)
+            for p in mesh.points { obj += "     <vertex x=\"\(num(p.x))\" y=\"\(num(p.y))\" z=\"\(num(p.z))\"/>\n" }
             obj += "    </vertices>\n    <triangles>\n"
-            for t in tris { obj += "     <triangle v1=\"\(t.x)\" v2=\"\(t.y)\" v3=\"\(t.z)\"/>\n" }
+            for t in mesh.triangles { obj += "     <triangle v1=\"\(t.x)\" v2=\"\(t.y)\" v3=\"\(t.z)\"/>\n" }
             obj += "    </triangles>\n   </mesh>\n  </object>\n"
             xml += obj
-            items += "  <item objectid=\"\(i + 1)\"/>\n"
+            items += "  <item objectid=\"\(id)\" transform=\"\(move)\"/>\n"
         }
         xml += " </resources>\n <build>\n" + items + " </build>\n</model>\n"
         let types = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="json" ContentType="application/json"/></Types>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="json" ContentType="application/json"/><Default Extension="png" ContentType="image/png"/></Types>
         """
+        let picture = thumbnail.map { _ in "<Relationship Target=\"/\(thumbnailPath)\" Id=\"rel1\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail\"/>" } ?? ""
         let rels = """
         <?xml version="1.0" encoding="UTF-8"?>
-        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/\(modelPath)" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/\(modelPath)" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\(picture)</Relationships>
         """
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys]
         let json = try enc.encode(doc)
-        let zip = Zip.write([("[Content_Types].xml", Data(types.utf8)), ("_rels/.rels", Data(rels.utf8)), (modelPath, Data(xml.utf8)), (docPath, json)])
+        var entries = [("[Content_Types].xml", Data(types.utf8)), ("_rels/.rels", Data(rels.utf8)), (modelPath, Data(xml.utf8)), (docPath, json)]
+        if let thumbnail { entries.append((thumbnailPath, thumbnail)) }
+        let zip = Zip.write(entries)
         try zip.write(to: url, options: .atomic)
     }
 
@@ -204,9 +228,18 @@ enum ThreeMF {
 struct SavedMesh {
     var points: [SIMD3<Float>] = []
     var triangles: [SIMD3<UInt32>] = []
+
+    // What its triangles hold (each's signed share from the origin).
+    var volume: Double {
+        triangles.reduce(0) { v, t in
+            let a = SIMD3<Double>(points[Int(t.x)]), b = SIMD3<Double>(points[Int(t.y)]), c = SIMD3<Double>(points[Int(t.z)])
+            return v + dot(a, cross(b, c)) / 6
+        }
+    }
 }
 
-// Reads the objects Bcad wrote (those with a body id as part number); one with a bad number or index is left out.
+// Reads the objects Bcad wrote (those with a body id as part number); one with a bad number or index is left out. (Their
+// points are as Bcad places them: the build items' move to the bed's corner is for slicers.)
 private final class ModelReader: NSObject, XMLParserDelegate {
     var meshes: [UUID: SavedMesh] = [:]
     private var id: UUID?
@@ -287,29 +320,84 @@ extension Node {
 // MARK: - STL (binary)
 
 enum STL {
-    static func write(_ url: URL, meshes: [Mesh]) throws {
-        var tris: [(SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)] = []
-        for m in meshes {
-            var i = 0
-            while i + 2 < m.indices.count {
-                let a = m.vertices[Int(m.indices[i])], b = m.vertices[Int(m.indices[i + 1])], c = m.vertices[Int(m.indices[i + 2])]
-                tris.append((SIMD3(a.x, a.y, a.z), SIMD3(b.x, b.y, b.z), SIMD3(c.x, c.y, c.z)))
-                i += 3
-            }
-        }
-        var d = Data(capacity: 84 + tris.count * 50)
+    static func write(_ url: URL, meshes: [SavedMesh]) throws {
+        let count = meshes.reduce(0) { $0 + $1.triangles.count }
+        var d = Data(capacity: 84 + count * 50)
         var header = Data("Bcad binary STL, millimetres".utf8)
         header.append(Data(count: 80 - header.count))
         d.append(header)
-        var n = UInt32(tris.count).littleEndian
+        var n = UInt32(count).littleEndian
         d.append(Data(bytes: &n, count: 4))
-        for (a, b, c) in tris {
-            let cr = cross(b - a, c - a)
-            let nrm = length(cr) > 0 ? normalize(cr) : SIMD3<Float>(0, 0, 0)
-            var f: [Float] = [nrm.x, nrm.y, nrm.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]
-            d.append(Data(bytes: &f, count: 48))
-            d.append(contentsOf: [0, 0])
+        for m in meshes {
+            for t in m.triangles {
+                let a = m.points[Int(t.x)], b = m.points[Int(t.y)], c = m.points[Int(t.z)]
+                let cr = cross(b - a, c - a)
+                let nrm = length(cr) > 0 ? normalize(cr) : SIMD3<Float>(0, 0, 0)
+                var f: [Float] = [nrm.x, nrm.y, nrm.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]
+                d.append(Data(bytes: &f, count: 48))
+                d.append(contentsOf: [0, 0])
+            }
         }
         try d.write(to: url, options: .atomic)
+    }
+}
+
+// MARK: - Thumbnail
+
+// A small picture of the bodies for file browsers: seen from the front, a little from the right and above, each in its
+// colour, lit from above left, on nothing (a z-buffer of its own, so it's made off the main thread too).
+enum Thumbnail {
+    static func png(_ bodies: [(SavedMesh, SIMD3<UInt8>)], size n: Int = 256) -> Data? {
+        let yaw: Float = -.pi / 6, pitch: Float = .pi / 5
+        func view(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            let x = p.x * cos(yaw) - p.y * sin(yaw), y = p.x * sin(yaw) + p.y * cos(yaw)
+            // Screen right x, up y, towards the eye z.
+            return SIMD3(x, p.z * cos(pitch) + y * sin(pitch), -y * cos(pitch) + p.z * sin(pitch))
+        }
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        let seen = bodies.map { ($0.0.points.map(view), $0.0.triangles, $0.1) }
+        for (pts, _, _) in seen { for p in pts { lo = simd_min(lo, p); hi = simd_max(hi, p) } }
+        guard lo.x <= hi.x else { return nil }
+        let scale = Float(n) * 0.9 / max(hi.x - lo.x, hi.y - lo.y, 1e-6), middle = (lo + hi) / 2
+        var depth = [Float](repeating: -.infinity, count: n * n), rgba = [UInt8](repeating: 0, count: n * n * 4)
+        let light = normalize(SIMD3<Float>(-0.4, 0.6, 0.7))
+        for (pts, tris, color) in seen {
+            let px = pts.map { p in SIMD3(Float(n) / 2 + (p.x - middle.x) * scale, Float(n) / 2 - (p.y - middle.y) * scale, p.z) }
+            for t in tris {
+                let a = px[Int(t.x)], b = px[Int(t.y)], c = px[Int(t.z)]
+                let normal = cross(pts[Int(t.y)] - pts[Int(t.x)], pts[Int(t.z)] - pts[Int(t.x)])
+                guard length(normal) > 0, normal.z > 0 else { continue }
+                let shade = 0.35 + 0.65 * max(0, dot(normalize(normal), light))
+                let area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+                guard area != 0 else { continue }
+                let x0 = max(0, Int(min(a.x, b.x, c.x))), x1 = min(n - 1, Int(max(a.x, b.x, c.x)))
+                let y0 = max(0, Int(min(a.y, b.y, c.y))), y1 = min(n - 1, Int(max(a.y, b.y, c.y)))
+                guard x0 <= x1, y0 <= y1 else { continue }
+                for y in y0...y1 {
+                    for x in x0...x1 {
+                        let q = SIMD2(Float(x) + 0.5, Float(y) + 0.5)
+                        let wa = ((b.x - q.x) * (c.y - q.y) - (b.y - q.y) * (c.x - q.x)) / area
+                        let wb = ((c.x - q.x) * (a.y - q.y) - (c.y - q.y) * (a.x - q.x)) / area
+                        let wc = 1 - wa - wb
+                        guard wa >= 0, wb >= 0, wc >= 0 else { continue }
+                        let z = wa * a.z + wb * b.z + wc * c.z, i = y * n + x
+                        guard z > depth[i] else { continue }
+                        depth[i] = z
+                        rgba[4 * i] = UInt8(Float(color.x) * shade)
+                        rgba[4 * i + 1] = UInt8(Float(color.y) * shade)
+                        rgba[4 * i + 2] = UInt8(Float(color.z) * shade)
+                        rgba[4 * i + 3] = 255
+                    }
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let image = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: n * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider, decode: nil, shouldInterpolate: false,
+                                  intent: .defaultIntent) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out as CFMutableData, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest) ? out as Data : nil
     }
 }

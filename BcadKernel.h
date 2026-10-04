@@ -139,8 +139,25 @@ typedef struct {
 
 BKMesh *bk_mesh(const BKShape *s, double deflection);
 void bk_mesh_free(BKMesh *m);
+// A body as printers take it (3MF, STL): its mesh at 0.01 mm, points as the file holds them (float), every edge between
+// exactly two triangles (where parts touch along a line or at a point, each part has its own copy of the points there).
+// valid 0 when it isn't a sound solid (bk_last_error says how, as for bk_export_step); its triangles are still given.
+typedef struct {
+  int vertexCount, triangleCount;
+  float *positions;                 // 3 per vertex
+  uint32_t *indices;                // 3 per triangle
+  double volume;                    // of the triangles as given
+  int crowded;                      // edges still between more than two (where a part touches itself round a point)
+  int slivers;                      // triangles thinner than float holds, left in (flat: corners all but in a line)
+  int valid;
+} BKPrintMesh;
+
+BKPrintMesh *bk_print_mesh(const BKShape *s);
+void bk_print_mesh_free(BKPrintMesh *m);
 // A STEP file (AP214, millimetres) of the shapes, each a closed solid named as given (names may be NULL): flat faces as
-// they are, curved ones as fine flat facets (0.01 mm). 0 when it can't be written (bk_last_error says why).
+// they are, curved ones as fine flat facets (0.01 mm). 0 when it can't be written: bk_last_error is then "file N: " and
+// what's wrong with shape N ("empty", "open", "inside out"; for bk_print_mesh also "thin": a triangle float flattens or
+// turns over, or two points it makes one), or "file: " and why nothing was written.
 int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path);
 const char *bk_last_error(void);
 

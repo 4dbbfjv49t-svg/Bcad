@@ -1,11 +1,12 @@
 // Bcad's geometry engine behind its C API (BcadKernel.h): shapes, bolts and nuts, placements, meshes, boxes, measuring,
-// merging, splitting, rounding, hollowing and STEP files.
+// merging, splitting, rounding, hollowing, and meshes and STEP files to print and send on.
 #include "BcadKernel.h"
 
 #include "Engine/Bolts.hpp"
 #include "Engine/Distance.hpp"
 #include "Engine/Fasteners.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Print.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
@@ -412,20 +413,46 @@ void bk_section_free(BKSection *section) {
 }
 
 int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path) {
-  if (!shapes || count < 0 || !path) return lastError = "STEP: nothing to write", 0;
+  if (!shapes || count < 0 || !path) return lastError = "file: nothing to write", 0;
   std::vector<Shape> list;
   std::vector<std::string> named;
   for (int i = 0; i < count; i++) {
-    if (!shapes[i]) return lastError = "STEP: nothing to write", 0;
+    if (!shapes[i]) return lastError = "file: nothing to write", 0;
     list.push_back(shapes[i]->shape);
     named.push_back(names && names[i] ? names[i] : "");
   }
   std::string file = path, text, why;
+  size_t which = 0;
   if (size_t slash = file.find_last_of('/'); slash != std::string::npos) file.erase(0, slash + 1);
-  if (!stepText(list, named, file, text, why)) return lastError = "STEP: " + why, 0;
+  if (!stepText(list, named, file, text, why, &which)) return lastError = "file " + std::to_string(which) + ": " + why, 0;
   FILE *f = fopen(path, "wb");
   bool ok = f && fwrite(text.data(), 1, text.size(), f) == text.size();
   if (f) ok = fclose(f) == 0 && ok;
-  if (!ok) return lastError = "STEP: couldn't write the file", 0;
+  if (!ok) return lastError = "file: couldn't write it", 0;
   return 1;
+}
+
+BKPrintMesh *bk_print_mesh(const BKShape *s) {
+  if (!s) return nullptr;
+  PrintMesh pm;
+  std::string why;
+  bool sound = printMesh(s->shape, pm, why);
+  if (!sound) lastError = "file 0: " + why;
+  BKPrintMesh *m = new BKPrintMesh();
+  m->vertexCount = (int)(pm.pos.size() / 3);
+  m->triangleCount = (int)(pm.tri.size() / 3);
+  m->positions = mallocCopy(pm.pos);
+  m->indices = mallocCopy(pm.tri);
+  m->volume = pm.volume;
+  m->crowded = pm.crowded;
+  m->slivers = pm.slivers;
+  m->valid = sound ? 1 : 0;
+  return m;
+}
+
+void bk_print_mesh_free(BKPrintMesh *m) {
+  if (!m) return;
+  free(m->positions);
+  free(m->indices);
+  delete m;
 }

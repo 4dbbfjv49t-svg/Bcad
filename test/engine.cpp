@@ -8,6 +8,7 @@
 #include "Engine/Implicit.hpp"
 #include "Engine/Math.hpp"
 #include "Engine/Model.hpp"
+#include "Engine/Print.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <random>
 #include <string>
@@ -1712,7 +1714,7 @@ int main() {
       double want = 0;
       for (const auto &x : shapes) {
         bce::Solid m;
-        bce::mesh(x, bce::stepDeflection, m);
+        bce::mesh(x, bce::fileDeflection, m);
         want += m.meshVolume();
       }
       bool good = wrote && r.ok && r.solids == w.solids && r.voids == w.voids && (w.faces < 0 || r.faces == w.faces) && r.products == (int)shapes.size() &&
@@ -1742,6 +1744,135 @@ int main() {
           wroteFile ? fmt("%.0f solids", rf.solids) + " " + rf.why : std::string(bk_last_error()));
     remove(path.c_str());
     for (BKShape *x : {box, c, s, drill, drilled, hollowed, k1, k2, touching, bolt, rounded}) bk_free(x);
+  }
+
+  // MARK: print meshes
+  // Bodies as 3MF and STL files take them: every edge, by point number, between exactly two triangles run opposite ways;
+  // the shells as many as the pieces and voids; the volume the 0.01 mm mesh's own; no triangle left flat or turned over
+  // in float; where parts touch, each with its own points there.
+  {
+    printf("— print meshes\n");
+    // Checked by point numbers alone (as a 3MF reader joins them): shells, signed volume, why not.
+    auto strict = [](const BKPrintMesh *m, int &shells, double &vol, std::string &why) {
+      shells = 0, vol = 0;
+      std::map<std::pair<uint32_t, uint32_t>, std::vector<int>> sides;  // the triangles running along each side
+      std::vector<int> up(m->triangleCount);
+      for (int t = 0; t < m->triangleCount; t++) up[t] = t;
+      std::function<int(int)> root = [&](int x) { return up[x] == x ? x : up[x] = root(up[x]); };
+      for (int t = 0; t < m->triangleCount; t++) {
+        const uint32_t *v = m->indices + 3 * t;
+        if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2] || std::max({v[0], v[1], v[2]}) >= (uint32_t)m->vertexCount) return why = "a bad triangle", false;
+        const float *a = m->positions + 3 * v[0], *b = m->positions + 3 * v[1], *c = m->positions + 3 * v[2];
+        vol += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) + (double)a[1] * ((double)b[2] * c[0] - (double)b[0] * c[2]) +
+                (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+        for (int k = 0; k < 3; k++) sides[{v[k], v[(k + 1) % 3]}].push_back(t);
+      }
+      for (auto &[e, ts] : sides) {
+        if (ts.size() != 1) return why = "a side run the same way twice", false;
+        auto back = sides.find({e.second, e.first});
+        if (back == sides.end()) return why = "an open side", false;
+        int a = root(ts[0]), b = root(back->second[0]);
+        if (a != b) up[a] = b;
+      }
+      for (int t = 0; t < m->triangleCount; t++) shells += root(t) == t;
+      return true;
+    };
+    // The mesh's own volume at the files' detail.
+    auto own = [](const BKShape *x) {
+      BKMesh *m = bk_mesh(x, 0.01);
+      double v = 0;
+      for (int t = 0; t < m->triangleCount; t++) {
+        const float *a = m->positions + 3 * m->indices[3 * t], *b = m->positions + 3 * m->indices[3 * t + 1], *c = m->positions + 3 * m->indices[3 * t + 2];
+        v += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) + (double)a[1] * ((double)b[2] * c[0] - (double)b[0] * c[2]) +
+              (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+      }
+      bk_mesh_free(m);
+      return v;
+    };
+    // Sound, `want` shells, its volume the mesh's own and near `exact` (2%: the mesh cuts inside curves).
+    auto sound = [&](const char *name, BKShape *x, int want, double exact, std::string &notes) {
+      BKPrintMesh *pm = x ? bk_print_mesh(x) : nullptr;
+      int shells = 0;
+      double vol = 0, mine = x ? own(x) : 0;
+      std::string why = pm && !pm->valid ? bk_last_error() : "";
+      bool good = pm && pm->valid && strict(pm, shells, vol, why) && shells == want && pm->crowded == 0 && pm->slivers == 0 &&
+                  std::fabs(vol - pm->volume) <= 1e-9 * std::fabs(vol) && std::fabs(vol - mine) <= 1e-6 * std::fabs(mine) && std::fabs(vol - exact) <= 0.02 * exact;
+      if (!good) {
+        char n[300];
+        snprintf(n, sizeof n, "%s: %d shells, volume %.6f (mesh %.6f, exact %.6f), %d slivers, %d crowded, %s", name, shells, vol, mine, exact,
+                 pm ? pm->slivers : -1, pm ? pm->crowded : -1, why.c_str());
+        notes += std::string(n) + "\n  ";
+      }
+      bk_print_mesh_free(pm);
+      return good;
+    };
+    std::string notes;
+    int bad = 0;
+    for (const Case &c : cases) {
+      BKShape *x = bk_primitive(c.kind, c.p.data());
+      bad += !sound(c.name, x, 1, c.volume, notes);
+      bk_free(x);
+    }
+    check("print meshes: every kind of shape", bad == 0, notes);
+    // Every bolt and nut, as made, stretched, mirrored and turned.
+    notes.clear(), bad = 0;
+    int made = 0;
+    for (int kind = BK_ROD; kind <= BK_CONE_NUT; kind++) {
+      BKFastener f{};
+      f.kind = kind, f.size = 4;
+      bk_fastener_defaults(&f, 1);
+      BKShape *x = bk_fastener(&f, 0.2);
+      double plain = x ? own(x) : 0;
+      double stretch[12] = {1.5, 0, 0, 3, 0, 1, 0, 0, 0, 0, 1, 0}, mirror[12] = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0},
+             turn[12] = {0.6, -0.8, 0, 10, 0.8, 0.6, 0, -20, 0, 0, 1, 5};
+      const double *ms[3] = {stretch, mirror, turn};
+      double scale[3] = {1.5, 1, 1};
+      bad += !sound("a bolt or nut", x, 1, plain, notes);
+      for (int k = 0; k < 3; k++) {
+        BKShape *y = x ? bk_transform(x, ms[k]) : nullptr;
+        bad += !sound(k == 0 ? "a stretched bolt or nut" : k == 1 ? "a mirrored bolt or nut" : "a turned bolt or nut", y, 1, plain * scale[k], notes);
+        bk_free(y);
+      }
+      made += x != nullptr;
+      bk_free(x);
+    }
+    check("print meshes: bolts and nuts, stretched, mirrored and turned", bad == 0 && made == 16, notes);
+    // Parts touching along an edge and at a corner: one solid each, its own points where they touch.
+    notes.clear(), bad = 0;
+    double cube[3] = {10, 10, 10}, b20[3] = {20, 30, 10};
+    auto at = [](BKShape *s, double x, double y, double z) {
+      double m[12] = {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z};
+      return bk_transform(s, m);
+    };
+    BKShape *k1 = bk_primitive(BK_BOX, cube), *k2 = at(k1, 10, 10, 0), *k3 = at(k1, 10, 10, 10);
+    BKShape *edge = bk_boolean(BK_UNION, k1, k2), *corner = bk_boolean(BK_UNION, k1, k3);
+    bad += !sound("two cubes touching along an edge", edge, 2, 2000, notes);
+    bad += !sound("two cubes touching at a corner", corner, 2, 2000, notes);
+    BKPrintMesh *pe = bk_print_mesh(edge), *pc = bk_print_mesh(corner);
+    BKMesh *me = bk_mesh(edge, 0.01);
+    // (Welded by place, as an STL reader would, the edge's two points are shared: two more points here.)
+    std::map<std::tuple<float, float, float>, int> places;
+    for (int i = 0; i < me->vertexCount; i++) places[{me->positions[3 * i], me->positions[3 * i + 1], me->positions[3 * i + 2]}] = 1;
+    bool own2 = pe->vertexCount == (int)places.size() + 2 && pc->vertexCount == 16;
+    bk_mesh_free(me);
+    bk_print_mesh_free(pe), bk_print_mesh_free(pc);
+    // A hollow box: its void a shell of its own, turned inward.
+    BKShape *box = bk_primitive(BK_BOX, b20), *hollowed = bk_hollow(box, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 2, nullptr);
+    bad += !sound("a hollow box", hollowed, 2, 6000 - 16 * 26 * 6, notes);
+    // Far from the origin, a fine thread still sound in float.
+    BKFastener f{};
+    f.kind = BK_HEX, f.size = 0;
+    bk_fastener_defaults(&f, 1);
+    BKShape *m3 = bk_fastener(&f, 0.2), *far = m3 ? at(m3, 900, -700, 300) : nullptr;
+    bad += !sound("an M3 bolt far from the origin", far, 1, m3 ? own(m3) : 0, notes);
+    check("print meshes: touching parts, a void, far from the origin", bad == 0 && own2, notes + (own2 ? "" : "points where parts touch not given twice"));
+    // Nothing to print: said so.
+    BKShape *apart = at(k1, 50, 0, 0), *nothing = bk_boolean(BK_INTERSECT, k1, apart);
+    BKPrintMesh *pn = nothing ? bk_print_mesh(nothing) : nullptr;
+    check("print meshes: an empty shape is said to be empty", !nothing || (pn && !pn->valid && std::string(bk_last_error()) == "file 0: empty"),
+          nothing ? bk_last_error() : "");
+    bk_print_mesh_free(pn);
+    for (BKShape *x : {k1, k2, k3, edge, corner, box, hollowed, m3, far, apart, nothing}) bk_free(x);
   }
 
   // MARK: speed

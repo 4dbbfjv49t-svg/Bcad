@@ -5,16 +5,13 @@
 // faces there are told apart by the wedge of material each pair of them bounds. ISO 10303-21, AP214 ("automotive
 // design"), millimetres.
 #include "Engine/Step.hpp"
-#include "Engine/Treat.hpp"
-#include "Engine/Trig.hpp"
+#include "Engine/Print.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <ctime>
-#include <numeric>
 #include <unordered_map>
 
 namespace bce {
@@ -105,139 +102,22 @@ struct Out {
   int direction(V3 d) { return add("DIRECTION(''," + std::string("(") + num(d.x) + "," + num(d.y) + "," + num(d.z) + "))"); }
 };
 
-struct Find {
-  std::vector<uint32_t> up;
-  explicit Find(size_t n) : up(n) { std::iota(up.begin(), up.end(), 0); }
-  uint32_t operator()(uint32_t x) {
-    while (up[x] != x) x = up[x] = up[up[x]];
-    return x;
-  }
-  void join(uint32_t a, uint32_t b) {
-    a = (*this)(a), b = (*this)(b);
-    if (a != b) up[std::max(a, b)] = std::min(a, b);
-  }
-};
-
 // One body's solids, written into `o` (in the representation context `context`): the solids' numbers in `solids`.
 bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &solids, std::string &why) {
-  if (s.tri.empty()) return why = name + " is empty", false;
-  if (!shut(s)) return why = name + " isn't a closed solid", false;
-  // Points one where they're one to the last bit (as closed tells it).
-  std::vector<V3> P;
-  std::vector<uint32_t> T(s.tri.size());
-  {
-    struct Key {
-      uint64_t x, y, z;
-      bool operator==(const Key &k) const { return x == k.x && y == k.y && z == k.z; }
-    };
-    struct Hash {
-      size_t operator()(const Key &k) const { return (size_t)(k.x * 0x9E3779B97F4A7C15ull ^ k.y * 0xC2B2AE3D27D4EB4Full ^ k.z * 0x165667B19E3779F9ull); }
-    };
-    std::unordered_map<Key, uint32_t, Hash> at;
-    for (size_t i = 0; i < s.tri.size(); i++) {
-      V3 q = s.p[s.tri[i]];
-      double x = q.x + 0.0, y = q.y + 0.0, z = q.z + 0.0;
-      Key k;
-      std::memcpy(&k.x, &x, 8), std::memcpy(&k.y, &y, 8), std::memcpy(&k.z, &z, 8);
-      auto [it, fresh] = at.emplace(k, (uint32_t)P.size());
-      if (fresh) P.push_back(q);
-      T[i] = it->second;
-    }
-  }
-  size_t nt = T.size() / 3, ns = T.size();
-  double size = 1;
-  for (V3 q : P) size = std::max({size, std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
-  auto from = [&](uint32_t side) { return T[side]; };
-  auto to = [&](uint32_t side) { return T[side / 3 * 3 + (side % 3 + 1) % 3]; };
-  auto across = [&](uint32_t side) { return T[side / 3 * 3 + (side % 3 + 2) % 3]; };
-
-  // Each side met by one running the other way, as one edge. Along a line where more than two triangles meet (parts
-  // touching there), each is met by the one that bounds the same wedge of material: in the turning order round the line,
-  // material lies just past a triangle running back along it, and just short of one running forward.
-  std::vector<uint32_t> mate(ns), edgeOf(ns);
-  std::vector<std::pair<uint32_t, uint32_t>> edges;  // each edge's ends (lower point number first)
-  {
-    std::vector<std::pair<uint64_t, uint32_t>> sides(ns);
-    for (uint32_t i = 0; i < ns; i++) {
-      uint32_t a = from(i), b = to(i);
-      sides[i] = {(uint64_t)std::min(a, b) << 32 | std::max(a, b), i};
-    }
-    std::sort(sides.begin(), sides.end());
-    for (size_t i = 0, j; i < ns; i = j) {
-      for (j = i + 1; j < ns && sides[j].first == sides[i].first;) j++;
-      uint32_t u = (uint32_t)(sides[i].first >> 32), v = (uint32_t)(sides[i].first & 0xffffffffu);
-      std::vector<uint32_t> fwd, back;
-      for (size_t k = i; k < j; k++) (from(sides[k].second) == u ? fwd : back).push_back(sides[k].second);
-      std::vector<std::pair<uint32_t, uint32_t>> pairs;
-      if (fwd.size() == 1 && back.size() == 1) {
-        pairs.push_back({fwd[0], back[0]});
-      } else {
-        V3 d = unit(P[v] - P[u]);
-        V3 e1 = unit(std::fabs(d.x) < 0.9 ? cross(d, V3{1, 0, 0}) : cross(d, V3{0, 1, 0})), e2 = cross(d, e1);
-        struct Round {
-          double angle;
-          uint32_t side;
-          bool fwd;
-        };
-        std::vector<Round> round;
-        for (auto *group : {&fwd, &back})
-          for (uint32_t side : *group) {
-            V3 w = P[across(side)] - P[u];
-            w = w - d * dot(w, d);
-            round.push_back({trig::atan2(dot(w, e2), dot(w, e1)), side, group == &fwd});
-          }
-        std::sort(round.begin(), round.end(), [](const Round &a, const Round &b) { return a.angle != b.angle ? a.angle < b.angle : a.side < b.side; });
-        size_t n = round.size(), first = 0;
-        while (first < n && round[first].fwd) first++;
-        bool alternate = n % 2 == 0 && first < n;
-        for (size_t k = 0; k < n && alternate; k++) alternate = round[(first + k) % n].fwd == (k % 2 == 1);
-        if (alternate) {
-          for (size_t k = 0; k < n; k += 2) pairs.push_back({round[(first + k + 1) % n].side, round[(first + k) % n].side});
-        } else {
-          // (Never expected of a closed solid: met in order instead.)
-          for (size_t k = 0; k < std::min(fwd.size(), back.size()); k++) pairs.push_back({fwd[k], back[k]});
-        }
-      }
-      for (auto [f, b] : pairs) {
-        mate[f] = b, mate[b] = f;
-        edgeOf[f] = edgeOf[b] = (uint32_t)edges.size();
-        edges.push_back({u, v});
-      }
-    }
-  }
-
-  // Shells: triangles joined across their edges. Inside out (less than nothing within), a shell is a void, of the
-  // smallest solid round it.
-  Find shellOf(nt);
-  for (uint32_t i = 0; i < ns; i++) shellOf.join(i / 3, mate[i] / 3);
-  std::vector<uint32_t> shells;
-  std::vector<int> shellAt(nt, -1);
-  std::vector<double> vol;
-  for (uint32_t t = 0; t < nt; t++) {
-    uint32_t r = shellOf(t);
-    if (shellAt[r] < 0) shellAt[r] = (int)shells.size(), shells.push_back(r), vol.push_back(0);
-    shellAt[t] = shellAt[r];
-    V3 a = P[T[3 * t]], b = P[T[3 * t + 1]], c = P[T[3 * t + 2]];
-    vol[shellAt[t]] += dot(a, cross(b, c)) / 6;
-  }
-  size_t nsh = shells.size();
-  std::vector<int> voidOf(nsh, -1);
-  for (size_t v = 0; v < nsh; v++) {
-    if (!(vol[v] < 0)) continue;
-    // A point within the void: the middle of its first triangle.
-    V3 q{0, 0, 0};
-    for (int k = 0; k < 3; k++) q = q + P[T[3 * shells[v] + k]] / 3;
-    double best = INFINITY;
-    for (size_t o = 0; o < nsh; o++) {
-      if (!(vol[o] > 0) || vol[o] >= best) continue;
-      Solid one;
-      one.p = P;
-      for (uint32_t t = 0; t < nt; t++)
-        if (shellAt[t] == (int)o) one.tri.insert(one.tri.end(), {T[3 * t], T[3 * t + 1], T[3 * t + 2]});
-      if (inside(one, q)) best = vol[o], voidOf[v] = (int)o;
-    }
-    if (voidOf[v] < 0) return why = name + " isn't a closed solid", false;
-  }
+  Shells sh;
+  if (!shells(s, sh, why)) return false;
+  const auto &P = sh.P;
+  const auto &T = sh.T;
+  const auto &mate = sh.mate;
+  const auto &edgeOf = sh.edgeOf;
+  const auto &edges = sh.edges;
+  const auto &shellAt = sh.shellAt;
+  const auto &vol = sh.vol;
+  const auto &voidOf = sh.voidOf;
+  size_t nt = T.size() / 3, ns = T.size(), nsh = vol.size();
+  double size = sh.size;
+  auto from = [&](uint32_t side) { return sh.from(side); };
+  auto to = [&](uint32_t side) { return sh.to(side); };
 
   // Faces flat all over: each run of their triangles joined across sides one face, bounded by the run's outline (one
   // loop round it, and one round each hole), where that's plain; otherwise triangle by triangle.
@@ -386,7 +266,7 @@ bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &sol
 }  // namespace
 
 bool stepText(const std::vector<Shape> &shapes, const std::vector<std::string> &names, const std::string &file, std::string &out,
-              std::string &why) {
+              std::string &why, size_t *which) {
   Out o;
   int app = o.add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
   o.add("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000," + ref(app) + ")");
@@ -402,9 +282,12 @@ bool stepText(const std::vector<Shape> &shapes, const std::vector<std::string> &
   for (size_t i = 0; i < shapes.size(); i++) {
     std::string name = i < names.size() && !names[i].empty() ? names[i] : "Body " + std::to_string(i + 1);
     Solid s;
-    mesh(shapes[i], stepDeflection, s);
+    mesh(shapes[i], fileDeflection, s);
     std::vector<int> items;
-    if (!body(s, name, o, items, why)) return false;
+    if (!body(s, name, o, items, why)) {
+      if (which) *which = i;
+      return false;
+    }
     items.push_back(origin);
     int product = o.add("PRODUCT(" + str(name) + "," + str(name) + ",''," + list(std::vector<int>{productContext}) + ")");
     o.add("PRODUCT_RELATED_PRODUCT_CATEGORY('part',$," + list(std::vector<int>{product}) + ")");

@@ -614,6 +614,48 @@ struct Document: Codable, Equatable, Sendable {
     var bodies: [Solid] = []
 }
 
+extension Document {
+    // A merge switched off, made again of its shapes as they are now (shown or not), with the layers it had.
+    func merged(_ link: MergeLink) -> Solid? {
+        let members = bodies.filter { $0.link?.id == link.id }.sorted { ($0.link?.order ?? 0) < ($1.link?.order ?? 0) }
+        guard !members.isEmpty else { return nil }
+        // In the merge's own frame, where its layers' picks are.
+        let back = link.place.matrix.inverse
+        let parts = members.map { m in Part(node: m.node, place: Placement.from(back * m.place.matrix), name: m.name, color: m.color) }
+        let node = link.shell.replacingBase { _ in .group(op: link.op, parts: parts) }
+        return Solid(id: link.id, name: link.name, color: link.color, node: node, place: link.place)
+    }
+
+    // What goes to a file of these bodies: each as it is, but the shapes of a merge switched off for editing as that
+    // merge, once, as it will print.
+    func printed(_ chosen: [Solid]) -> [Solid] {
+        var out: [Solid] = [], links = Set<UUID>()
+        for b in chosen {
+            guard let link = b.link else { out.append(b); continue }
+            if links.insert(link.id).inserted, let m = merged(link) { out.append(m) }
+        }
+        return out
+    }
+}
+
+// What keeps a body from going to a file as it should: it can't be built, nothing is left of it, it isn't a closed solid,
+// or (on saving) it couldn't be built and goes as it was shown.
+enum FileProblem: Equatable, Sendable {
+    case unbuilt, empty, notSolid, shown
+
+    // From the engine's "file N: what" ("empty", "open", "inside out", "thin").
+    init(_ why: String) { self = why.hasSuffix(": empty") ? .empty : .notSolid }
+
+    @MainActor func text(_ body: String) -> String {
+        switch self {
+        case .unbuilt: L("{body} couldn't be built", ["body": body])
+        case .empty: L("{body} is empty", ["body": body])
+        case .notSolid: L("{body} isn't a closed solid", ["body": body])
+        case .shown: L("{body} couldn't be built, so it's saved as shown", ["body": body])
+        }
+    }
+}
+
 // Colours are red, green and blue from 0 to 255.
 enum Palette {
     static let colors: [SIMD3<UInt8>] = [
@@ -757,11 +799,13 @@ struct Mesh {
 
     var size: SIMD3<Double> { high - low }
 
-    // Its triangles where the placement puts them (for files; faces and normals left as they are).
+    // Its triangles where the placement puts them (for files; faces and normals left as they are), still running round
+    // outward where the placement mirrors them.
     func placed(_ place: Placement) -> Mesh {
         let m = simd_float4x4(place.matrix)
         var out = self
         out.vertices = vertices.map { v in SIMD4((m * SIMD4(v.xyz, 1)).xyz, v.w) }
+        if m.determinant < 0 { for i in stride(from: 0, to: out.indices.count - 2, by: 3) { out.indices.swapAt(i + 1, i + 2) } }
         return out
     }
 }
@@ -1253,26 +1297,38 @@ final class Kernel: @unchecked Sendable {
         return Gap(distance: d, a: SIMD3(out[0], out[1], out[2]), b: SIMD3(out[3], out[4], out[5]))
     }
 
-    // A body's fine mesh in world coordinates, for files.
-    func worldMesh(_ b: Solid, deflection: Double = 0.01) -> Mesh? {
-        guard let s = placed(b), let m = s.with({ bk_mesh($0, deflection) }) else { return nil }
-        defer { bk_mesh_free(m) }
-        return Mesh(m)
+    // A body as printers take it (3MF, STL), in world coordinates (0.01 mm), and what's wrong with it if anything; nil
+    // when it can't be built.
+    func printMesh(_ b: Solid) -> (mesh: SavedMesh, problem: FileProblem?)? {
+        guard let s = placed(b), let m = s.with({ bk_print_mesh($0) }) else { return nil }
+        defer { bk_print_mesh_free(m) }
+        let p = m.pointee
+        var out = SavedMesh()
+        out.points = (0..<Int(p.vertexCount)).map { SIMD3(p.positions[$0 * 3], p.positions[$0 * 3 + 1], p.positions[$0 * 3 + 2]) }
+        out.triangles = (0..<Int(p.triangleCount)).map { SIMD3(p.indices[$0 * 3], p.indices[$0 * 3 + 1], p.indices[$0 * 3 + 2]) }
+        return (out, p.valid != 0 ? nil : FileProblem(String(cString: bk_last_error())))
     }
 
-    // A STEP file of the bodies, each a solid under its own name.
-    func exportStep(_ bodies: [Solid], to path: String) -> Bool {
-        let shapes = bodies.compactMap { placed($0) }
-        guard shapes.count == bodies.count else { return false }
+    // A STEP file of the bodies, each a solid under its own name: whether it's written, and if a body kept it from being
+    // written, which (by its place in the list) and how.
+    func exportStep(_ bodies: [Solid], to path: String) -> (ok: Bool, problem: (Int, FileProblem)?) {
+        let shapes = bodies.map { placed($0) }
+        if let i = shapes.firstIndex(where: { $0 == nil }) { return (false, (i, .unbuilt)) }
         let names = bodies.map { strdup($0.name) }
         defer { names.forEach { free($0) } }
-        return withExtendedLifetime(shapes) {
-            let ptrs: [OpaquePointer?] = shapes.map { $0.with { $0 } }
+        let ok = withExtendedLifetime(shapes) {
+            let ptrs: [OpaquePointer?] = shapes.map { $0?.with { $0 } }
             let named: [UnsafePointer<CChar>?] = names.map { $0.map { UnsafePointer($0) } }
             return ptrs.withUnsafeBufferPointer { p in
                 named.withUnsafeBufferPointer { n in bk_export_step(p.baseAddress, n.baseAddress, Int32(ptrs.count), path) }
             } != 0
         }
+        guard !ok else { return (true, nil) }
+        // "file N: what's wrong with shape N"
+        let why = String(cString: bk_last_error())
+        let head = why.split(separator: ":").first.map(String.init) ?? ""
+        guard head.hasPrefix("file "), let i = Int(head.dropFirst(5)), bodies.indices.contains(i) else { return (false, nil) }
+        return (false, (i, FileProblem(why)))
     }
 }
 
@@ -1839,11 +1895,12 @@ final class Workbench: DesignHost {
         updateSettings { $0.keys[a.rawValue] = name }
     }
 
+    // Shown a while (longer the more there is to read).
     func flash(_ text: String) {
         flashTask?.cancel()
         withAnimation(Neon.spring) { note = text }
         flashTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3.5))
+            try? await Task.sleep(for: .seconds(max(3.5, Double(text.count) / 15)))
             guard !Task.isCancelled, let self, self.note == text else { return }
             withAnimation(Neon.spring) { self.note = nil }
         }
@@ -2328,16 +2385,10 @@ final class Workbench: DesignHost {
 
     // The shapes of a merge switched off (as they are now, edited or not), merged again with the layers it had.
     func remerge(_ id: UUID) {
-        guard let link = body(id)?.link else { return }
-        let members = doc.bodies.filter { $0.link?.id == link.id }.sorted { ($0.link?.order ?? 0) < ($1.link?.order ?? 0) }
-        guard !members.isEmpty else { return }
-        // In the merge's own frame, where its layers' picks are.
-        let back = link.place.matrix.inverse
-        let parts = members.map { m in Part(node: m.node, place: Placement.from(back * m.place.matrix), name: m.name, color: m.color) }
-        let node = link.shell.replacingBase { _ in .group(op: link.op, parts: parts) }
-        let merged = Solid(name: link.name, color: link.color, node: node, place: link.place)
+        guard let link = body(id)?.link, let merged = doc.merged(link) else { return }
+        let members = doc.bodies.filter { $0.link?.id == link.id }
         let ids = Set(members.map(\.id))
-        tryThen([node]) { [weak self] in
+        tryThen([merged.node]) { [weak self] in
             guard let self, members.allSatisfy({ self.body($0.id) == $0 }) else { return }
             self.commit { d in
                 let at = d.bodies.firstIndex { ids.contains($0.id) } ?? d.bodies.count
@@ -3334,15 +3385,29 @@ final class Workbench: DesignHost {
             url = u
         }
         guard let url else { done(false); return }
-        let doc = self.doc, clearance = settings.clearance, note = L("Saving…"), generation = self.generation
+        let doc = self.doc, clearance = settings.clearance, bed = settings.bed, note = L("Saving…"), generation = self.generation
         // What the engine can't build is saved as it's shown.
         let looks = meshes
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
             let shown = { (b: Solid) in looks[b.id].flatMap { $0.vertices.isEmpty ? nil : $0.placed(b.place) } }
-            let meshes = doc.bodies.filter { !$0.hidden }.compactMap { b in (Kernel.shared.worldMesh(b) ?? shown(b)).map { (b, $0) } }
-            let ok = (try? ThreeMF.write(url, meshes: meshes, doc: doc)) != nil
+            var meshes: [(Solid, SavedMesh)] = [], problems: [(String, FileProblem)] = []
+            for b in doc.printed(doc.bodies.filter { !$0.hidden }) {
+                if let made = Kernel.shared.printMesh(b) {
+                    meshes.append((b, made.mesh))
+                    if let problem = made.problem { problems.append((b.name, problem)) }
+                } else if let look = shown(b) {
+                    let (points, triangles) = Weld.run(look)
+                    meshes.append((b, SavedMesh(points: points, triangles: triangles)))
+                    problems.append((b.name, .shown))
+                } else {
+                    problems.append((b.name, .unbuilt))
+                }
+            }
+            let picture = Thumbnail.png(meshes.map { ($0.1, $0.0.color) })
+            let ok = (try? ThreeMF.write(url, meshes: meshes, doc: doc, bed: bed, thumbnail: picture)) != nil
+            let found = problems
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
@@ -3353,7 +3418,9 @@ final class Workbench: DesignHost {
                             self.docName = nil
                             self.saved = doc
                         }
-                        self.flash(L("Saved {name}", ["name": url.lastPathComponent]))
+                        let name = url.lastPathComponent
+                        self.flash(found.isEmpty ? L("Saved {name}", ["name": name])
+                                   : L("Saved {name}. Check before printing: {problem}", ["name": name, "problem": found.map { $0.1.text($0.0) }.joined(separator: "; ")]))
                     } else {
                         self.flash(L("Couldn't save the file"))
                     }
@@ -3370,21 +3437,32 @@ final class Workbench: DesignHost {
         panel.allowedContentTypes = [UTType(filenameExtension: step ? "step" : "stl") ?? .data]
         panel.nameFieldStringValue = title + (step ? ".step" : ".stl")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let clearance = settings.clearance, note = L("Exporting…")
+        let clearance = settings.clearance, note = L("Exporting…"), printed = doc.printed(bodies)
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
             Kernel.shared.clearance = clearance
-            let ok: Bool
+            var ok = false
+            var problem: (String, FileProblem)?
             if step {
-                ok = Kernel.shared.exportStep(bodies, to: url.path)
+                let out = Kernel.shared.exportStep(printed, to: url.path)
+                ok = out.ok
+                problem = out.problem.map { (printed[$0.0].name, $0.1) }
             } else {
-                let meshes = bodies.compactMap { Kernel.shared.worldMesh($0) }
-                ok = meshes.count == bodies.count && (try? STL.write(url, meshes: meshes)) != nil
+                // Nothing written when a body isn't fit to print.
+                var meshes: [SavedMesh] = []
+                for b in printed where problem == nil {
+                    guard let made = Kernel.shared.printMesh(b) else { problem = (b.name, .unbuilt); break }
+                    if let wrong = made.problem { problem = (b.name, wrong) }
+                    meshes.append(made.mesh)
+                }
+                ok = problem == nil && (try? STL.write(url, meshes: meshes)) != nil
             }
+            let written = ok, found = problem
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
-                    self.flash(ok ? L("Exported {name}", ["name": url.lastPathComponent]) : L("Export failed"))
+                    self.flash(written ? L("Exported {name}", ["name": url.lastPathComponent])
+                               : found.map { L("Not exported: {problem}", ["problem": $0.1.text($0.0)]) } ?? L("Export failed"))
                 }
             }
         }

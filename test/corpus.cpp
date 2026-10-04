@@ -7,6 +7,7 @@
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
+// Every shape made is also made as printers take it (bk_print_mesh): it must be a sound solid, its volume the shape's.
 // With --perturb, each case is also made moved far off, turned a quarter turn, made a millionth larger, and with its tools
 // taken in two other orders; what then comes out differently is counted. --digest FILE writes one line per case and
 // variant (to compare one machine's results with another's). --record prints the cases with what they now give as their
@@ -51,6 +52,8 @@ struct Result {
   double volume = 0, area = 0;
   int pieces = 0, faces = 0;
   bool closed = true;
+  std::string print;  // what's wrong with it as printers take it ("" when nothing)
+  int crowded = 0, slivers = 0;
   long booleans = 0;
   double ms = 0;
   std::string why;
@@ -177,6 +180,8 @@ std::vector<int> kindsOf(const std::vector<double> &picks, std::vector<double> &
   }
   return k;
 }
+
+std::string digits(double x);
 
 Result run(const std::string &prog, const std::string &ops, const Variant &v) {
   Result r;
@@ -309,6 +314,28 @@ Result run(const std::string &prog, const std::string &ops, const Variant &v) {
     r.closed = closedMesh(m);
     r.pieces = bk_piece_count(cur);
     bk_mesh_free(m);
+    if (v.seed == 0 && v.m[3] == 0 && v.m[0] == 1) {
+      // (Not counted in the case's time, nor its merges.)
+      auto p0 = std::chrono::steady_clock::now();
+      long c0 = bce::combineReport.calls;
+      BKPrintMesh *pm = bk_print_mesh(cur);
+      t0 += std::chrono::steady_clock::now() - p0;
+      calls0 += bce::combineReport.calls - c0;
+      // Its volume the mesh's own at that detail (not the shape's exact one: the mesh cuts inside curves).
+      BKMesh *fine = bk_mesh(cur, 0.01);
+      double own = 0;
+      for (int t = 0; t < fine->triangleCount; t++) {
+        const float *a = fine->positions + 3 * fine->indices[3 * t], *b = fine->positions + 3 * fine->indices[3 * t + 1],
+                    *c = fine->positions + 3 * fine->indices[3 * t + 2];
+        own += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) + (double)a[1] * ((double)b[2] * c[0] - (double)b[0] * c[2]) +
+                (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+      }
+      bk_mesh_free(fine);
+      if (!pm->valid) r.print = bk_last_error();
+      else if (!(std::fabs(pm->volume - own) <= 1e-6 * own)) r.print = "volume " + digits(pm->volume) + ", the mesh's " + digits(own);
+      r.crowded = pm->crowded, r.slivers = pm->slivers;
+      bk_print_mesh_free(pm);
+    }
   }
   bk_free(cur), bk_free(base);
   return done();
@@ -341,7 +368,7 @@ int main(int argc, char **argv) {
   }
   FILE *digest = digestPath.empty() ? nullptr : fopen(digestPath.c_str(), "w");
   std::string line;
-  int cases = 0, wrong = 0, open = 0;
+  int cases = 0, wrong = 0, open = 0, unprintable = 0, crowded = 0, slivers = 0, sliverCases = 0;
   // Per variant: outcomes that differ from the case's own, volumes off by more than 1e-6 and 1e-3, faces or pieces
   // that differ.
   int nv = perturb ? (int)(sizeof variants / sizeof variants[0]) : 1;
@@ -374,6 +401,11 @@ int main(int argc, char **argv) {
       open++;
       printf("OPEN %s: the result's mesh isn't closed\n", id.c_str());
     }
+    if (r.status == "OK" && !r.print.empty()) {
+      unprintable++;
+      printf("PRINT %s: %s\n", id.c_str(), r.print.c_str());
+    }
+    crowded += r.crowded, slivers += r.slivers, sliverCases += r.slivers > 0;
     if (record) {
       std::string e = r.status == "OK" ? "made " + digits(r.volume) + " " + digits(std::max(2e-4 * r.volume, 1e-3))
                       : r.status == "SEC" ? "sec " + digits(r.area) + " " + digits(std::max(1e-4 * std::fabs(r.area), 1e-3))
@@ -415,13 +447,14 @@ int main(int argc, char **argv) {
   }
   if (digest) fclose(digest);
   if (record) return 0;
-  printf("%d cases, %d not as expected, %d open; %.1f s, slowest %s %.0f ms; %ld mesh booleans, most %s %ld\n", cases, wrong, open, total / 1000,
-         slowestId.c_str(), slowest, booleans, mostId.c_str(), mostBooleans);
+  printf("%d cases, %d not as expected, %d open, %d not printable (%d crowded edges, %d slivers in %d); %.1f s, slowest %s %.0f ms; %ld mesh "
+         "booleans, most %s %ld\n", cases, wrong, open, unprintable, crowded, slivers, sliverCases, total / 1000, slowestId.c_str(), slowest, booleans,
+         mostId.c_str(), mostBooleans);
   const auto &cr = bce::combineReport;
   printf("booleans: %ld; keeps failed %ld, cuts dropped %ld, cuts crossing %ld, misses %ld, overflows %ld, came out open %ld, "
          "rays all grazing %ld, made again %ld\n", cr.calls, cr.keepsFailed, cr.segsDropped, cr.crossingsMade, cr.misses, cr.overflows, cr.open, cr.unsure,
          cr.again);
   for (int k = 1; k < nv; k++)
     printf("%-7s outcome flips %d, volume drift >1e-6 %d, >1e-3 %d, faces or pieces differ %d\n", variants[k].name, flips[k], drift6[k], drift3[k], shape[k]);
-  return wrong || open ? 1 : 0;
+  return wrong || open || unprintable ? 1 : 0;
 }
