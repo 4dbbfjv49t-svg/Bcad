@@ -1238,7 +1238,26 @@ bool clearOfWalls(const Solid &S, const std::vector<double> &depth, double size,
 
 }  // namespace
 
+static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing);
+
+// Worked on about the shape's own middle (see middleOf), moved back after.
 bool hollowed(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing) {
+  V3 lo, hi;
+  bounds(s, lo, hi);
+  V3 c = middleOf(lo, hi);
+  if (c.x == 0 && c.y == 0 && c.z == 0) return hollowedHere(s, h, d, out, missing);
+  Affine back = Affine::translation(-c);
+  Shape here{s.node, s.place.then(back)};
+  Hollowing moved = h;
+  std::vector<int> faces(moved.open.size() / 6, BK_PICK_FACE), walls(moved.walls.size() / 6, BK_PICK_FACE);
+  movePicks(faces, moved.open, -c), movePicks(walls, moved.walls, -c);
+  if (moved.viaSharp) moved.sharp = Shape{moved.sharp.node, moved.sharp.place.then(back)};
+  if (!hollowedHere(here, moved, d, out, missing)) return false;
+  out.transform(Affine::translation(c));
+  return true;
+}
+
+static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &out, int *missing) {
   if (missing) *missing = 0;
   Solid whole;
   mesh(s, d, whole);

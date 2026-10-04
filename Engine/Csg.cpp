@@ -193,13 +193,20 @@ int pieces(const Solid &s) {
       if (f == UINT32_MAX) f = (uint32_t)t;
       else parent[find((uint32_t)t)] = find(f);
     }
+  // Each shell's volume about the mesh's middle, against its size (not how far it sits from the origin, which would make a
+  // small part far off count as nothing).
   std::vector<double> vol(nt, 0);
-  double scale = 0;
-  for (const auto &p : w.pts) scale = std::max({scale, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});
-  for (size_t t = 0; t < nt; t++) vol[find((uint32_t)t)] += dot(w.pts[w.tri[3 * t]], cross(w.pts[w.tri[3 * t + 1]], w.pts[w.tri[3 * t + 2]])) / 6;
+  V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+  for (const auto &p : w.pts) lo = vmin(lo, p), hi = vmax(hi, p);
+  V3 mid = (lo + hi) * 0.5, ext = hi - lo;
+  double size = std::max({ext.x, ext.y, ext.z, 0.0});
+  for (size_t t = 0; t < nt; t++) {
+    V3 a = w.pts[w.tri[3 * t]] - mid, b = w.pts[w.tri[3 * t + 1]] - mid, c = w.pts[w.tri[3 * t + 2]] - mid;
+    vol[find((uint32_t)t)] += dot(a, cross(b, c)) / 6;
+  }
   int n = 0;
   for (size_t t = 0; t < nt; t++)
-    if (find((uint32_t)t) == t && vol[t] > 1e-9 * (1 + scale * scale * scale)) n++;
+    if (find((uint32_t)t) == t && vol[t] > 1e-9 * (1 + size * size * size)) n++;
   return n;
 }
 

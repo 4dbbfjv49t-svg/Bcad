@@ -2926,7 +2926,42 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
 
 int toolOrderSeed = 0;
 
+V3 middleOf(V3 lo, V3 hi) {
+  V3 mid = (lo + hi) * 0.5, ext = hi - lo;
+  double size = std::max({ext.x, ext.y, ext.z, 1e-3});
+  if (!std::isfinite(size) || !std::isfinite(mid.x) || !std::isfinite(mid.y) || !std::isfinite(mid.z)) return V3{};
+  double unit = std::ldexp(1.0, std::ilogb(size) - 2);
+  return {std::nearbyint(mid.x / unit) * unit, std::nearbyint(mid.y / unit) * unit, std::nearbyint(mid.z / unit) * unit};
+}
+
+void movePicks(const std::vector<int> &kinds, std::vector<double> &picks, V3 v) {
+  for (size_t i = 0; i < kinds.size() && 6 * i + 5 < picks.size(); i++) {
+    size_t at = kinds[i] == BK_PICK_EDGE ? 0 : kinds[i] == BK_PICK_FACE || kinds[i] == BK_PICK_CORNER ? 3 : 6;
+    if (at > 3) continue;
+    picks[6 * i + at] += v.x, picks[6 * i + at + 1] += v.y, picks[6 * i + at + 2] += v.z;
+  }
+}
+
+static Solid treatedHere(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto);
+
+// Worked on about the shape's own middle (see middleOf), moved back after.
 Solid treated(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
+  V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+  for (V3 q : s.p) lo = vmin(lo, q), hi = vmax(hi, q);
+  V3 c = s.p.empty() ? V3{} : middleOf(lo, hi);
+  if (c.x == 0 && c.y == 0 && c.z == 0) return treatedHere(s, t, d, fit, onto);
+  Solid here = s, hereOnto;
+  here.transform(Affine::translation(-c));
+  if (onto) hereOnto = *onto, hereOnto.transform(Affine::translation(-c));
+  Treatment moved = t;
+  movePicks(moved.kinds, moved.picks, -c);
+  Solid made = treatedHere(here, moved, d, fit, onto ? &hereOnto : nullptr);
+  if (!fit.fits) return s;
+  made.transform(Affine::translation(c));
+  return made;
+}
+
+static Solid treatedHere(const Solid &s, const Treatment &t, double d, TreatFit &fit, const Solid *onto) {
   // At most 300 merges for one treatment, its second try included (the most any case needed was 175): what can't be
   // made in that many is refused in moments. (A treatment inside a hollow's has its own, within the hollow's.)
   long outer = mergesUntil;

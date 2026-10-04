@@ -82,6 +82,12 @@ bool shut(const Solid &s);
 // it).
 extern int toolOrderSeed;
 
+// The middle of a box (lo, hi) on a coarse grid (a power of two a quarter of its size or so): what a shape is moved by to
+// be worked on about its own middle, so that its tolerances (and its merges' grid) don't depend on where it sits.
+V3 middleOf(V3 lo, V3 hi);
+// Picks (kinds as in BcadKernel.h, 6 numbers each) moved by v: an edge pick's point, a face's or corner's point.
+void movePicks(const std::vector<int> &kinds, std::vector<double> &picks, V3 v);
+
 // Hollowing: walls of `thickness` (faces picked as openings left out, others with walls of their own), and the shape
 // without its roundings to hollow instead when the shape itself won't (only what lies inside the shape kept).
 struct Hollowing {

@@ -1201,6 +1201,20 @@ int main() {
     BKMesh *m = rounded ? bk_mesh(rounded, 0.05) : nullptr;
     check("a rounded box's mesh is a closed solid", m && m->valid == 1);
     bk_mesh_free(m), bk_free(rounded), bk_free(cube);
+    // Where a part sits doesn't change what's made of it: a small box far from the middle is one piece, rounded the same.
+    double b2[3] = {2, 2, 2}, away[12] = {1, 0, 0, 5000, 0, 1, 0, -3000, 0, 0, 1, 2000}, bodyAway[6] = {5000, -3000, 2000, 0, 0, 0};
+    BKShape *tiny = bk_primitive(BK_BOX, b2), *tinyAway = bk_transform(tiny, away);
+    check("a small part far from the middle is one piece", tinyAway && bk_piece_count(tinyAway) == 1);
+    BKShape *r0 = bk_fillet(tiny, &kb, body, 1, 0.4, &mr, &miss), *r1 = tinyAway ? bk_fillet(tinyAway, &kb, bodyAway, 1, 0.4, &mr, &miss) : nullptr;
+    auto volumeOf = [](BKShape *s) {
+      BKMesh *k = bk_mesh(s, 0.05);
+      double v = k ? k->volume : -1;
+      bk_mesh_free(k);
+      return v;
+    };
+    double v0 = r0 ? volumeOf(r0) : 0, v1 = r1 ? volumeOf(r1) : -1;
+    check("rounded far from the middle as at it", r0 && r1 && near(v0, v1, 1e-6 * v0), fmt("%.6f vs %.6f mm³", v0, v1));
+    bk_free(r1), bk_free(r0), bk_free(tinyAway), bk_free(tiny);
   }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
