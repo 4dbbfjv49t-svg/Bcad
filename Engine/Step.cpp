@@ -228,7 +228,9 @@ bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &sol
         int loop = o.add("EDGE_LOOP(''," + list(oriented) + ")");
         bounds.push_back(o.add(std::string(l == 0 ? "FACE_OUTER_BOUND" : "FACE_BOUND") + "(''," + ref(loop) + ",.T.)"));
       }
-      int ax = o.add("AXIS2_PLACEMENT_3D(''," + ref(pointAt(anchor)) + "," + ref(o.direction(turned ? -n : n)) + ",$)");
+      // (One entity per statement: within one expression, the order they're numbered in is the compiler's choice.)
+      int at = pointAt(anchor), up = o.direction(turned ? -n : n);
+      int ax = o.add("AXIS2_PLACEMENT_3D(''," + ref(at) + "," + ref(up) + ",$)");
       int plane = o.add("PLANE(''," + ref(ax) + ")");
       faces.push_back(o.add("ADVANCED_FACE(''," + list(bounds) + "," + ref(plane) + ",.T.)"));
     };
@@ -278,7 +280,8 @@ bool stepText(const std::vector<Shape> &shapes, const std::vector<std::string> &
                       ref(mm) + "," + ref(rad) + "," + ref(sr) + "))REPRESENTATION_CONTEXT('','3D'))");
   int productContext = o.add("PRODUCT_CONTEXT(''," + ref(app) + ",'mechanical')");
   int definitionContext = o.add("PRODUCT_DEFINITION_CONTEXT('part definition'," + ref(app) + ",'design')");
-  int origin = o.add("AXIS2_PLACEMENT_3D(''," + ref(o.point({0, 0, 0})) + "," + ref(o.direction({0, 0, 1})) + "," + ref(o.direction({1, 0, 0})) + ")");
+  int zero = o.point({0, 0, 0}), z = o.direction({0, 0, 1}), x = o.direction({1, 0, 0});
+  int origin = o.add("AXIS2_PLACEMENT_3D(''," + ref(zero) + "," + ref(z) + "," + ref(x) + ")");
   for (size_t i = 0; i < shapes.size(); i++) {
     std::string name = i < names.size() && !names[i].empty() ? names[i] : "Body " + std::to_string(i + 1);
     Solid s;
