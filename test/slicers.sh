@@ -14,12 +14,17 @@ bad=0
 mount_latest() {
   local repo="$1" pattern="$2" name dmg mnt
   name=$(gh release view -R "$repo" --json assets -q '.assets[].name' | grep -iE "$pattern" | head -1)
-  [ -n "$name" ] || { echo "no release asset of $repo matches $pattern" >&2; return 1; }
+  if [ -z "$name" ]; then
+    echo "no release asset of $repo matches $pattern; it has:" >&2
+    gh release view -R "$repo" --json tagName,assets -q '.tagName, .assets[].name' >&2
+    return 1
+  fi
   dmg="$WORK/$name"
   [ -f "$dmg" ] || gh release download -R "$repo" -p "$name" -D "$WORK" >&2 || return 1
   mnt="$WORK/mnt-${repo##*/}"
   mkdir -p "$mnt"
-  yes | hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$dmg" >/dev/null || return 1
+  # (Agreeing to any licence it shows; yes stops on the broken pipe, which isn't a failure.)
+  (yes 2>/dev/null || true) | hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$dmg" >/dev/null || { echo "$repo: $name doesn't mount" >&2; return 1; }
   echo "$mnt"
   echo "  $repo: $name" >&2
 }
@@ -39,11 +44,15 @@ info() {
 
 if mnt=$(mount_latest bambulab/BambuStudio 'mac.*\.dmg$'); then
   app=$(find "$mnt" -maxdepth 4 -path '*Contents/MacOS/*' -type f -perm -u+x | grep -i bambu | head -1)
-  [ -n "$app" ] && info "Bambu Studio" "$app" || echo "Bambu Studio: no program in the image"
+  if [ -n "$app" ]; then info "Bambu Studio" "$app"; else echo "Bambu Studio: no program in the image"; ls -R "$mnt" | head -30; fi
+else
+  echo "Bambu Studio: not tried"
 fi
 if mnt=$(mount_latest prusa3d/PrusaSlicer 'mac.*\.dmg$'); then
   app=$(find "$mnt" -maxdepth 4 -path '*Contents/MacOS/*' -type f -perm -u+x | grep -i prusa | head -1)
-  [ -n "$app" ] && info "PrusaSlicer" "$app" || echo "PrusaSlicer: no program in the image"
+  if [ -n "$app" ]; then info "PrusaSlicer" "$app"; else echo "PrusaSlicer: no program in the image"; fi
+else
+  echo "PrusaSlicer: not tried"
 fi
 
 # Cura: its engine slices each STL with its plain printer definition.
@@ -64,6 +73,9 @@ if mnt=$(mount_latest Ultimaker/Cura 'mac.*(arm|aarch).*\.dmg$|macos.*\.dmg$'); 
     done
   else
     echo "Cura: no engine or definitions in the image"
+    find "$mnt" -maxdepth 4 | head -30
   fi
+else
+  echo "Cura: not tried"
 fi
 exit $bad
