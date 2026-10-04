@@ -131,6 +131,8 @@ struct MMField: View {
     // How strongly the field is tinted at rest.
     var fill = 0.07
     var digits = 2
+    // What VoiceOver calls it.
+    var label = ""
     let set: (Double) -> Void
     @State private var text = ""
     @State private var blink = false
@@ -151,6 +153,7 @@ struct MMField: View {
                 .monospacedDigit()
                 .multilineTextAlignment(.center)
                 .focused($focused)
+                .accessibilityLabel(Text(label.isEmpty ? unit ?? "" : label))
                 .onSubmit {
                     commit()
                     focused = false
@@ -443,18 +446,18 @@ struct ToolRail: View {
     var body: some View {
         let s = lib.settings
         VStack(spacing: 6) {
-            ToolButton(icon: "arrow.down.to.line", title: Action.drop.label, key: Keys.label(s.key(.drop)), tint: lib.accent3, size: 30) { lib.perform(.drop) }
+            ToolButton(icon: "arrow.down.to.line", title: Action.drop.label, key: s.isOn(.drop) ? Keys.label(s.key(.drop)) : nil, tint: lib.accent3, size: 30) { lib.perform(.drop) }
             divider
-            ToolButton(icon: "scissors", title: Action.split.label, key: Keys.label(s.key(.split)), tint: lib.accent2, lit: lib.mode == .split, size: 30) { lib.perform(.split) }
-            ToolButton(icon: "angle", title: Action.angles.label, key: Keys.label(s.key(.angles)), tint: lib.accent2, lit: lib.mode == .angles, size: 30) { lib.perform(.angles) }
-            ToolButton(icon: "square.dashed.inset.filled", title: Action.hollow.label, key: Keys.label(s.key(.hollow)), tint: lib.accent2,
+            ToolButton(icon: "scissors", title: Action.split.label, key: s.isOn(.split) ? Keys.label(s.key(.split)) : nil, tint: lib.accent2, lit: lib.mode == .split, size: 30) { lib.perform(.split) }
+            ToolButton(icon: "angle", title: Action.angles.label, key: s.isOn(.angles) ? Keys.label(s.key(.angles)) : nil, tint: lib.accent2, lit: lib.mode == .angles, size: 30) { lib.perform(.angles) }
+            ToolButton(icon: "square.dashed.inset.filled", title: Action.hollow.label, key: s.isOn(.hollow) ? Keys.label(s.key(.hollow)) : nil, tint: lib.accent2,
                        lit: lib.mode == .hollow, size: 30) { lib.perform(.hollow) }
-            ToolButton(icon: "ruler", title: Action.measure.label, key: Keys.label(s.key(.measure)), tint: lib.accent2,
+            ToolButton(icon: "ruler", title: Action.measure.label, key: s.isOn(.measure) ? Keys.label(s.key(.measure)) : nil, tint: lib.accent2,
                        lit: lib.mode == .measure, size: 30) { lib.perform(.measure) }
             divider
             ToolButton(icon: "arrow.uturn.backward", title: L("Undo"), key: "⌘Z", size: 30) { lib.undo() }
             ToolButton(icon: "arrow.uturn.forward", title: L("Redo"), key: "⇧⌘Z", size: 30) { lib.redo() }
-            ToolButton(icon: "viewfinder", title: Action.frame.label, key: Keys.label(s.key(.frame)), size: 30) { lib.perform(.frame) }
+            ToolButton(icon: "viewfinder", title: Action.frame.label, key: s.isOn(.frame) ? Keys.label(s.key(.frame)) : nil, size: 30) { lib.perform(.frame) }
             // Straight views along an axis, opening beside the rail.
             Button { withAnimation(Neon.glide) { views.toggle() } } label: {
                 Image(systemName: "chevron.left").font(.ui(size: 8, weight: .black))
@@ -911,7 +914,7 @@ struct LayerRow: View {
             ToggleLine(title: op == BK_UNION ? L("Merge") : op == BK_SUBTRACT ? L("Subtract") : L("Intersect"),
                        detail: L("{n} shapes", ["n": parts.count]), on: true) { lib.unmerge(item.id) }
         case .primitive(let p):
-            SettingLine(title: L(p.name)) { EmptyView() }
+            SettingLine(title: p.title) { EmptyView() }
         case .fastener(let f):
             SettingLine(title: f.name) { EmptyView() }
         }
@@ -1431,7 +1434,7 @@ struct AxisRow: View {
             ForEach(0..<3, id: \.self) { i in
                 HStack(spacing: 3) {
                     Text(["X", "Y", "Z"][i]).font(.ui(size: 10.5, weight: .black, design: .rounded)).foregroundStyle(Axis.color(i))
-                    MMField(value: values[i], range: range, width: 64, tint: Axis.color(i)) { set(i, $0) }
+                    MMField(value: values[i], range: range, width: 64, tint: Axis.color(i), label: ["X", "Y", "Z"][i]) { set(i, $0) }
                 }
             }
         }
@@ -1453,7 +1456,7 @@ struct SizeLine: View {
         HStack(spacing: 10) {
             Text(title).font(.ui(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Ink.text).lineLimit(2)
             Spacer(minLength: 4)
-            MMField(value: value, unit: unit, range: range, tint: tint, fill: tint == nil ? 0.07 : 0.24, set: set)
+            MMField(value: value, unit: unit, range: range, tint: tint, fill: tint == nil ? 0.07 : 0.24, label: title, set: set)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1970,7 +1973,7 @@ struct SettingsPane: View {
         [(L("New · Open · Save"), "⌘N  ⌘O  ⌘S"), (L("Export STL · STEP"), "⇧⌘E  ⌥⌘E"), (L("Undo · Redo"), "⌘Z  ⇧⌘Z"),
          (L("Duplicate · Delete"), "⌘D  ⌫"), (L("Select all"), "⌘A"), (L("Merge"), "⌘U"), (L("Subtract · Intersect"), "⌘⌫  ⌘I"),
          (L("Ungroup"), "⇧⌘G"), (L("Add thread"), "⌘B"), (L("Nudge"), "← → ↑ ↓  PgUp PgDn"), (L("Nudge ×10"), "⇧ + ←→↑↓"),
-         (L("Views: iso, front, back, left, right, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("All edges") + " (" + L("Angles") + ")", "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
+         (L("Views: iso, south, north, west, east, top, bottom"), "0–6"), (L("Split axis"), "X  Y  Z"), (L("All edges") + " (" + L("Angles") + ")", "A"), (L("A face with its own wall (Hollow)"), "⌥ click"),
          (L("Apply · Cancel"), "Enter  Esc"), (L("Add to selection"), "⇧/⌘ click"), (L("Orbit"), L("drag empty space")),
          (L("Pan"), L("two-finger scroll · ⇧ drag")), (L("Zoom"), L("pinch · ⌥ scroll")), (L("Move freely"), L("hold ⌘ while dragging")),
          (L("Keep proportions"), L("hold ⇧ while resizing")), (L("Symmetric resizing"), L("hold ⌥ while resizing"))]
@@ -2141,7 +2144,7 @@ struct StepperLine: View {
         SettingLine(title: title) {
             HStack(spacing: 5) {
                 step(-1, "minus", enabled: value > range.lowerBound + 0.001)
-                MMField(value: value, unit: L("mm"), range: range, width: 58, set: set)
+                MMField(value: value, unit: L("mm"), range: range, width: 58, label: title, set: set)
                 step(1, "plus", enabled: value < range.upperBound - 0.001)
             }
         }
@@ -2419,7 +2422,7 @@ struct AnglePanel: View {
     private func leg(_ name: String, _ value: Double, _ set: @escaping (Double) -> Void) -> some View {
         VStack(spacing: 3) {
             Text(name).font(.ui(size: 10.5, weight: .black, design: .rounded)).foregroundStyle(lib.accent3)
-            MMField(value: value, range: 0.01...1000, width: 62, set: set)
+            MMField(value: value, range: 0.01...1000, width: 62, label: name, set: set)
         }
         .frame(maxWidth: .infinity)
     }

@@ -1,4 +1,5 @@
 import SwiftUI
+import OSLog
 import AppKit
 import simd
 import UniformTypeIdentifiers
@@ -180,6 +181,12 @@ struct Primitive: Codable, Hashable, Sendable {
         case .ring: [1]
         default: []
         }
+    }
+
+    // Its name as shown (prisms and pyramids without a name of their own by their number of sides).
+    @MainActor var title: String {
+        guard kind == .prism || kind == .pyramid, ![3, 4, 5, 6, 8].contains(sides) else { return L(name) }
+        return L(kind == .prism ? "{n}-sided prism" : "{n}-sided pyramid", ["n": sides])
     }
 
     var name: String {
@@ -1054,8 +1061,8 @@ final class Kernel: @unchecked Sendable {
         return nil
     }
 
-    // Problems that mean the shape didn't come out as asked (skipped picks and a merge in pieces still did).
-    static func failure(_ p: String) -> Bool { p != "missing" && p != "pieces" }
+    // Problems that mean the shape didn't come out as asked (skipped picks still did).
+    static func failure(_ p: String) -> Bool { p != "missing" }
 
     // Whether the engine's last refusal wasn't for size but because it couldn't work the shape out (said as a failure,
     // not as "too large").
@@ -1421,6 +1428,7 @@ struct Store: Codable {
     var settings: Settings?
     var look: SkinSettings?
     var shapes: [String: String]?
+    var recent: [String]?
 }
 
 // Unsaved work set aside: the document, and the file it came from or the name it was given.
@@ -1762,6 +1770,8 @@ final class Workbench: DesignHost {
     var screenStep = 1
     // Each shape group's quick shape when it isn't the program's default (chosen by holding it in the group's row).
     var shapes: [String: String] = [:]
+    // Files opened or saved lately, the latest first.
+    var recent: [URL] = []
 
     @ObservationIgnored private var undoStack: [Document] = []
     @ObservationIgnored private var redoStack: [Document] = []
@@ -1793,6 +1803,11 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var keptAside: Document?
     @ObservationIgnored private var keeping: Task<Void, Never>?
     nonisolated static let recoveryQueue = DispatchQueue(label: "Bcad.unsaved")
+    // (What CI's launch check looks for: the files opened.)
+    nonisolated static let log = Logger(subsystem: "Bcad", category: "files")
+    #if SELFTEST
+    @ObservationIgnored var testAnswer: NSApplication.ModalResponse?
+    #endif
 
     var accent: Color { Skin.shared.accent }
     var accent2: Color { Skin.shared.accent2 }
@@ -1821,12 +1836,39 @@ final class Workbench: DesignHost {
         L10n.shared.id = L10n.valid(s?.language)
         Skin.shared.apply(s?.look ?? SkinSettings())
         shapes = (s?.shapes ?? [:]).filter { g, k in ShapeGroup(rawValue: g).map { $0.members.dropFirst().contains { $0.rawValue == k } } ?? false }
+        recent = (s?.recent ?? []).prefix(10).map { URL(fileURLWithPath: $0) }
     }
 
     func save() {
-        let s = Store(style: style, language: L10n.shared.id, brightness: brightness, settings: settings, look: Skin.shared.values, shapes: shapes)
+        let s = Store(style: style, language: L10n.shared.id, brightness: brightness, settings: settings, look: Skin.shared.values, shapes: shapes,
+                      recent: recent.map(\.path))
         try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: Paths.state, options: .atomic) }
+    }
+
+    // MARK: recent files
+
+    func noteRecent(_ url: URL) {
+        recent = Array(([url] + recent.filter { $0.standardizedFileURL != url.standardizedFileURL }).prefix(10))
+        scheduleSave()
+    }
+
+    func openRecent(_ url: URL) {
+        confirmDiscard { go in
+            guard go else { return }
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                self.recent.removeAll { $0 == url }
+                self.scheduleSave()
+                self.flash(L("This file can't be found"))
+                return
+            }
+            self.open(url)
+        }
+    }
+
+    func clearRecent() {
+        recent = []
+        scheduleSave()
     }
 
     // MARK: unsaved work
@@ -1983,6 +2025,11 @@ final class Workbench: DesignHost {
     func flash(_ text: String) {
         flashTask?.cancel()
         withAnimation(Neon.spring) { note = text }
+        // Read out by VoiceOver too (once the app is running: the self-test has none).
+        if let app = NSApp {
+            NSAccessibility.post(element: app, notification: .announcementRequested,
+                                 userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
         flashTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(max(3.5, Double(text.count) / 15)))
             guard !Task.isCancelled, let self, self.note == text else { return }
@@ -2110,7 +2157,7 @@ final class Workbench: DesignHost {
 
     func addShape(_ k: ShapeKind) {
         let p = k.primitive
-        add(.primitive(p), name: L(p.name))
+        add(.primitive(p), name: p.title)
     }
 
     // MARK: shape groups
@@ -2231,10 +2278,11 @@ final class Workbench: DesignHost {
         let node = b.node, clearance = settings.clearance
         var still = b.place
         still.move = .zero
-        let exact = Kernel.shared.queue.sync { () -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? in
+        // (The engine may be busy with a long build: the window doesn't wait on it for more than a moment.)
+        let exact = Kernel.shared.queue.sync(within: 1.5) { () -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? in
             Kernel.shared.clearance = clearance
             return Kernel.shared.bounds(node, still)
-        }
+        } ?? nil
         guard let exact else { return box }
         return (exact.low + b.place.move, exact.high + b.place.move)
     }
@@ -2712,7 +2760,14 @@ final class Workbench: DesignHost {
         if !settings.symmetric, let e0 = b.node.base.extent(clearance: c), let e1 = next.extent(clearance: c) {
             move += b.place.rotation * (b.place.scale * (e1 - e0) / 2)
         }
-        mutate(id) { $0.node = followed($0.node, to: next); $0.place.move = move }
+        // A shape still called by its kind follows it (a hexagon prism made 7-sided is a 7-sided prism).
+        var renamed: String?
+        if case .primitive(let was) = b.node.base, case .primitive(let now) = next, b.name == was.title, now.title != was.title { renamed = now.title }
+        mutate(id) {
+            $0.node = followed($0.node, to: next)
+            $0.place.move = move
+            if let renamed { $0.name = renamed }
+        }
         rebuildScene()
     }
 
@@ -3278,8 +3333,10 @@ final class Workbench: DesignHost {
         if problems.contains("bend") { return L("The tube is too thick for this torus's tightest bend") }
         if problems.contains(where: { $0.hasPrefix("bolt") || $0.hasPrefix("nut") }) { return L("These sizes don't fit this bolt or nut") }
         if problems.contains("empty") { return L("Nothing is left of this shape") }
-        if problems.contains("pieces") { return L("These shapes don't touch, so the merge stays in separate pieces") }
         if problems.contains("hollow") { return L("These walls don't fit this shape — try thinner walls") }
+        if problems.contains("failed") { return L("This couldn't be worked out at these sizes — try a slightly different size") }
+        if problems.contains(where: { $0.hasPrefix("shape: the tube is too thick") }) { return L("The tube is too thick for this torus") }
+        if problems.contains(where: { $0.hasPrefix("shape:") }) { return L("These sizes don't make a shape") }
         if problems.contains("missing") { return L("Some picked edges or faces no longer exist and were skipped") }
         return problems.isEmpty ? nil : L("The shape operation failed")
     }
@@ -3300,7 +3357,7 @@ final class Workbench: DesignHost {
             if mode == .split { split(); return true }
             if mode == .hollow { commitHollow(); return true }
             return false
-        case "Backspace":
+        case "Backspace", "Delete":
             deleteSelection(); return true
         case "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown":
             nudge(name, big: shift); return true
@@ -3387,11 +3444,19 @@ final class Workbench: DesignHost {
         a.addButton(withTitle: L("Save"))
         a.addButton(withTitle: L("Cancel")).keyEquivalent = "\u{1b}"
         a.addButton(withTitle: L("Don't Save"))
-        switch a.runModal() {
+        switch answer(a) {
         case .alertFirstButtonReturn: saveDocument(done: done)
         case .alertThirdButtonReturn: done(true)
         default: done(false)
         }
+    }
+
+    // The self-test answers its questions itself.
+    private func answer(_ a: NSAlert) -> NSApplication.ModalResponse {
+        #if SELFTEST
+        if let testAnswer { return testAnswer }
+        #endif
+        return a.runModal()
     }
 
     func newDocument() {
@@ -3447,6 +3512,8 @@ final class Workbench: DesignHost {
             fileURL = url
             docName = nil
             dropUnsaved()
+            noteRecent(url)
+            Self.log.notice("Opened \(url.lastPathComponent, privacy: .public)")
             // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
             meshes = [:]
             for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
@@ -3507,6 +3574,7 @@ final class Workbench: DesignHost {
                             self.docName = nil
                             self.saved = doc
                             if !self.dirty { self.dropUnsaved() }
+                            self.noteRecent(url)
                         }
                         let name = url.lastPathComponent
                         self.flash(found.isEmpty ? L("Saved {name}", ["name": name])
@@ -3527,6 +3595,11 @@ final class Workbench: DesignHost {
         panel.allowedContentTypes = [UTType(filenameExtension: step ? "step" : "stl") ?? .data]
         panel.nameFieldStringValue = title + (step ? ".step" : ".stl")
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        export(bodies, step: step, to: url)
+    }
+
+    // Written on the kernel's thread; `done` learns whether it was.
+    func export(_ bodies: [Solid], step: Bool, to url: URL, done: @escaping (Bool) -> Void = { _ in }) {
         let clearance = settings.clearance, note = L("Exporting…"), printed = doc.printed(bodies)
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
@@ -3553,6 +3626,7 @@ final class Workbench: DesignHost {
                     self.ended(note)
                     self.flash(written ? L("Exported {name}", ["name": url.lastPathComponent])
                                : found.map { L("Not exported: {problem}", ["problem": $0.1.text($0.0)]) } ?? L("Export failed"))
+                    done(written)
                 }
             }
         }
@@ -3617,8 +3691,15 @@ struct BcadApp: App {
             CommandGroup(replacing: .newItem) {
                 Button(L("New")) { lib.newDocument() }.keyboardShortcut("n")
                 Button(L("Open…")) { lib.openDocument() }.keyboardShortcut("o")
+                Menu(L("Open Recent")) {
+                    ForEach(lib.recent, id: \.self) { url in Button(url.deletingPathExtension().lastPathComponent) { lib.openRecent(url) } }
+                    if !lib.recent.isEmpty { Divider() }
+                    Button(L("Clear Menu")) { lib.clearRecent() }.disabled(lib.recent.isEmpty)
+                }
             }
             CommandGroup(replacing: .saveItem) {
+                Button(L("Close")) { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w")
+                Divider()
                 Button(L("Save")) { lib.saveDocument() }.keyboardShortcut("s")
                 Button(L("Save As…")) { lib.saveDocument(as: true) }.keyboardShortcut("s", modifiers: [.command, .shift])
                 Divider()
@@ -3629,8 +3710,9 @@ struct BcadApp: App {
                 Button(L("Settings…")) { lib.toggleSettings() }.keyboardShortcut(",")
             }
             CommandGroup(replacing: .undoRedo) {
-                Button(L("Undo")) { Edits.send(#selector(UndoManager.undo)) ? () : lib.undo() }.keyboardShortcut("z")
-                Button(L("Redo")) { Edits.send(#selector(UndoManager.redo)) ? () : lib.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
+                // (A text field being typed in undoes its own typing.)
+                Button(L("Undo")) { Edits.send(Selector(("undo:"))) ? () : lib.undo() }.keyboardShortcut("z")
+                Button(L("Redo")) { Edits.send(Selector(("redo:"))) ? () : lib.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .pasteboard) {
                 // In a text field these edit its text; otherwise they work on shapes, between files too.
@@ -3639,7 +3721,15 @@ struct BcadApp: App {
                 Button(L("Paste")) { if !Edits.send(#selector(NSText.paste(_:))) { lib.paste() } }.keyboardShortcut("v")
                 Button(L("Select All")) { Edits.send(#selector(NSText.selectAll(_:))) ? () : lib.selectAll() }.keyboardShortcut("a")
                 Button(L("Duplicate")) { lib.duplicate() }.keyboardShortcut("d")
-                Button(L("Delete")) { lib.deleteSelection() }
+                Button(L("Delete")) { if !Edits.send(#selector(NSText.delete(_:))) { lib.deleteSelection() } }
+            }
+            CommandGroup(before: .toolbar) {
+                Button(Action.frame.label) { lib.perform(.frame) }
+                Button(Action.hide.label) { lib.perform(.hide) }
+                Button(Action.showAll.label) { lib.perform(.showAll) }
+                Divider()
+                ForEach(Side.allCases, id: \.self) { side in Button(side.name) { lib.look(from: side) } }
+                Divider()
             }
             CommandMenu(L("Shape")) {
                 Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u")

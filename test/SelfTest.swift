@@ -30,7 +30,7 @@ enum SelfTest {
             let cm = mesh(cubeNode), cyl = mesh(canNode)
             let px = cm?.faceInfo.firstIndex { $0.normal.x > 0.9 } ?? -1, nx = cm?.faceInfo.firstIndex { $0.normal.x < -0.9 } ?? -1
             let side = cyl?.faceInfo.firstIndex { abs($0.normal.z) < 0.1 } ?? -1
-            // An upright edge (engines number edges differently).
+            // An upright edge (found by its height: edges come in no set order).
             let standing = Int32(cm?.edges.firstIndex { e in (e.map(\.z).max() ?? 0) - (e.map(\.z).min() ?? 0) > 1 } ?? 0)
             func at(_ x: Double, _ sx: Double = 1) -> [Double] { Placement(move: SIMD3(x, 0, 0), scale: SIMD3(sx, 1, 1)).kernel }
             func face(_ n: Node, _ f: Int, _ place: [Double]) -> GapEnd { GapEnd(kind: Int32(BK_END_FACE), index: Int32(f), node: n, place: place, point: [0, 0, 0]) }
@@ -176,12 +176,6 @@ enum SelfTest {
                   && mesh(.fastener(narrower))?.valid == true, String(format: "T%.0f", narrower.drive))
             let phHead = Fastener(kind: .phCone, size: 4).setting(.drive, 2)
             check("a Phillips size brings its recess", phHead.drive == 2 && phHead.recess == 5 && mesh(.fastener(phHead))?.valid == true)
-            // Each kind's volume at three threads, to hold one engine's against the other's.
-            for size in [0, 4, Int(bk_thread_count()) - 1] {
-                for kind in Fastener.Kind.allCases {
-                    print("· volume", kind, size, String(format: "%.4f", mesh(.fastener(Fastener(kind: kind, size: size)))?.volume ?? 0))
-                }
-            }
         }
         _ = k.takeProblems()
         var misfit = Fastener(kind: .torx, size: 4)
