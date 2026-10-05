@@ -41,6 +41,6 @@ plutil -lint Info.plist >/dev/null
 python3 plist_strings.py Resources "${LANGS[@]}"
 
 echo "▸ Xcode project"
-export BCAD_VERSION="$(tr -d '[:space:]' < ../VERSION)" BCAD_BUILD="${BUILD_NUMBER:-1}"
+export BCAD_VERSION="$(tr -d '[:space:]' < ../VERSION.txt)" BCAD_BUILD="${BUILD_NUMBER:-1}"
 xcodegen generate --spec project.yml
 echo "✓ appstore/Bcad.xcodeproj ($BCAD_VERSION, build $BCAD_BUILD)"

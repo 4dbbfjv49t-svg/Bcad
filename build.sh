@@ -22,7 +22,7 @@ while [[ "${1:-}" == --* ]]; do
   esac
   shift
 done
-VERSION="$(tr -d '[:space:]' < VERSION)"
+VERSION="$(tr -d '[:space:]' < VERSION.txt)"
 BUILD="${BUILD_NUMBER:-1}"
 case $MODE in
   personal) BUNDLE_ID=com.bohdan.bcad.personal ;;

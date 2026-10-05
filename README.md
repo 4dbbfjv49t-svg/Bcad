@@ -26,7 +26,7 @@ On macOS 26 with Xcode 26 (installs `/Applications/Bcad.app`, or the `.app` path
 - `./build.sh --appstore`: as the Mac App Store has it: sandboxed, hardened runtime, plans through StoreKit
   (`com.bohdan.bcad`). To publish, `appstore/prepare.sh` makes the Xcode project; see `appstore/README.md`.
 
-The version is in `VERSION`; the build number comes from `BUILD_NUMBER` (CI's run number).
+The version is in `VERSION.txt` (not `VERSION`: that name would stand in for the C++ `<version>` header on a Mac); the build number comes from `BUILD_NUMBER` (CI's run number).
 
 ## Test
 - `./test/engine.sh`: the engine against exact maths (Linux or macOS).
