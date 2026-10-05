@@ -2732,6 +2732,385 @@ int main() {
     bk_free(ball);
   }
 
+  // MARK: brushes
+  // The brushes' tips (a core at full strength, a crisp fade, an oval at an angle, a lean), mirrors across any of the
+  // three planes, and the brushes added to the first eight: each does what it says, undone and done again to the bit;
+  // as they were, the first eight do exactly what they always did.
+  {
+    printf("— brushes\n");
+    using bce::V3;
+    auto make = [](const BKShape *x, double detail) {
+      BKSculptMesh *r = x ? bk_remesh(x, I, detail) : nullptr;
+      BKSculpt *s = r ? bk_sculpt_new(r->positions, r->vertexCount, r->indices, r->triangleCount) : nullptr;
+      bk_sculpt_mesh_free(r);
+      return s;
+    };
+    auto pt = [](const BKSculpt *s, uint32_t i) {
+      const float *q = bk_sculpt_positions(s) + 3 * i;
+      return V3{q[0], q[1], q[2]};
+    };
+    auto points = [&](const BKSculpt *s) {
+      std::vector<V3> v;
+      for (int i = 0; i < bk_sculpt_vertex_count(s); i++) v.push_back(pt(s, (uint32_t)i));
+      return v;
+    };
+    auto nearest = [&](const BKSculpt *s, V3 c) {
+      uint32_t best = 0;
+      double d = INFINITY;
+      for (int i = 0; i < bk_sculpt_vertex_count(s); i++) {
+        double e = bce::norm2(pt(s, (uint32_t)i) - c);
+        if (e < d) d = e, best = (uint32_t)i;
+      }
+      return best;
+    };
+    auto snapshot = [](const BKSculpt *s) {
+      int n = 3 * bk_sculpt_vertex_count(s);
+      std::vector<float> v(bk_sculpt_positions(s), bk_sculpt_positions(s) + n);
+      v.insert(v.end(), bk_sculpt_normals(s), bk_sculpt_normals(s) + n);
+      v.insert(v.end(), bk_sculpt_indices(s), bk_sculpt_indices(s) + 3 * bk_sculpt_triangle_count(s));
+      return v;
+    };
+    // The mesh as it is (its slots compacted: with the detail on, slots made by a stroke stay, free, after it's undone).
+    auto meshOf = [](const BKSculpt *s) {
+      BKSculptMesh *m = bk_sculpt_mesh(s);
+      std::vector<float> v(m->positions, m->positions + 3 * m->vertexCount);
+      for (int i = 0; i < 3 * m->triangleCount; i++) v.push_back((float)m->indices[i]);
+      bk_sculpt_mesh_free(m);
+      return v;
+    };
+    auto brushOf = [](int kind, double radius, double strength) {
+      BKBrush b{};
+      b.brush = kind, b.radius = radius, b.strength = strength, b.oval = 1;
+      return b;
+    };
+    auto stroke = [](BKSculpt *s, const BKBrush &b, V3 from, std::vector<V3> to, double tilt = NAN) {
+      double a[3] = {from.x, from.y, from.z};
+      bk_sculpt_begin_brush(s, &b, a);
+      for (V3 q : to) {
+        double c[3] = {q.x, q.y, q.z};
+        bk_sculpt_dab_tilted(s, c, 1, 1, tilt);
+      }
+      bk_sculpt_end(s);
+      return bk_sculpt_sync(s);
+    };
+    double b40[3] = {40, 40, 20}, d30[1] = {30};
+    BKShape *slab = bk_primitive(BK_BOX, b40), *ball = bk_primitive(BK_SPHERE, d30);
+    const V3 top{0, 0, 10};
+
+    // As they were: every one of the first eight, mirrored or not, by the old call and by the new one with a plain tip.
+    {
+      int same = 0, of = 0;
+      for (int kind = 0; kind < 8; kind++)
+        for (int mirror = 0; mirror < 2; mirror++) {
+          BKSculpt *a = make(ball, 1.2), *b = make(ball, 1.2);
+          if (!a || !b) continue;
+          if (kind == BK_BRUSH_DETAIL) bk_sculpt_set_detail(a, 0.6), bk_sculpt_set_detail(b, 0.6);
+          V3 from{3, 4, 14.1};
+          std::vector<V3> path = {from, {4, 4, 14}, {6, 3, 13}, {8, 1, 11.5}};
+          double f[3] = {from.x, from.y, from.z};
+          bk_sculpt_begin(a, kind, f, 4, 0.6, mirror, kind == BK_BRUSH_PINCH);
+          for (V3 q : path) {
+            double c[3] = {q.x, q.y, q.z};
+            bk_sculpt_dab(a, c, 1, 1);
+          }
+          bk_sculpt_end(a), bk_sculpt_sync(a);
+          BKBrush br = brushOf(kind, 4, 0.6);
+          br.mirror = mirror ? BK_MIRROR_X : 0, br.invert = kind == BK_BRUSH_PINCH;
+          stroke(b, br, from, path);
+          same += snapshot(a) == snapshot(b), of++;
+          bk_sculpt_free(a), bk_sculpt_free(b);
+        }
+      check("brushes: the first eight with a plain tip as they always were, to the bit", same == of && of == 16, fmt("%.0f of %.0f", same, of));
+    }
+
+    // Hardness: within the core a point is carried exactly with Grab's drag; past it, by the fade from the core.
+    // Rigidity 1: a straight fade, a point halfway out carried half way.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      bool ok = s;
+      double worst = 0;
+      for (int pass = 0; pass < 2 && ok; pass++) {
+        std::vector<V3> before = points(s);
+        uint32_t c = nearest(s, top), mid = nearest(s, top + V3{pass ? 1.5 : 2.25, 0, 0});
+        V3 at = before[c], drag{0.3, -0.2, 0.5};
+        BKBrush b = brushOf(BK_BRUSH_GRAB, 3, 1);
+        if (pass == 0) b.hardness = 0.5;
+        else b.rigidity = 1;
+        stroke(s, b, at, {at + drag});
+        double rho = bce::norm(before[mid] - at) / 3, w;
+        if (pass == 0) {
+          double u = (rho - 0.5) / 0.5, f = 1 - u * u;
+          w = rho <= 0.5 ? 1 : f * f;
+        } else {
+          w = 1 - rho;
+        }
+        V3 movedC = pt(s, c) - before[c], movedM = pt(s, mid) - before[mid];
+        worst = std::max({worst, bce::norm(movedC - drag), bce::norm(movedM - drag * w)});
+        ok = ok && rho > (pass ? 0.3 : 0.6);
+        bk_sculpt_undo(s), bk_sculpt_sync(s);
+      }
+      check("brushes: hardness carries the core exactly with the drag and fades past it; rigidity makes the fade straight", ok && worst < 1e-5,
+            fmt("off by %.2g", worst));
+      bk_sculpt_free(s);
+    }
+
+    // An oval half as wide, its long way along the stroke (+x): a point 0.6 of the radius across it isn't touched, one as far
+    // along it rises as the fade has it there.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      std::vector<V3> before = points(s);
+      uint32_t c = nearest(s, top), along = nearest(s, top + V3{1.8, 0, 0}), across = nearest(s, top + V3{0, 1.8, 0});
+      BKBrush b = brushOf(BK_BRUSH_DRAW, 3, 0.5);
+      b.oval = 0.5, b.across[0] = 1;
+      stroke(s, b, before[c], {before[c]});
+      double q = bce::norm2(before[along] - before[c]) / 9, f = 1 - q, want = 0.15 * f * f;
+      double rose = pt(s, along).z - before[along].z, acrossRose = pt(s, across).z - before[across].z;
+      check("brushes: an oval half as wide leaves a point across it be, and raises one as far along it by the fade", near(rose, want, 1e-6) && acrossRose == 0,
+            fmt("along %.6f (%.6f), across %.6f", rose, want, acrossRose));
+      bk_sculpt_free(s);
+    }
+
+    // Mirrors: across x and y, four places on the top rise alike; across all three, the bottom's four sink alike too. Grab
+    // mirrored across x and y follows the drag four ways.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      std::vector<V3> before = points(s);
+      BKBrush b = brushOf(BK_BRUSH_DRAW, 3, 0.5);
+      b.mirror = BK_MIRROR_X | BK_MIRROR_Y;
+      uint32_t c = nearest(s, {6, 4, 10});
+      stroke(s, b, before[c], {before[c]});
+      std::vector<double> rose;
+      for (V3 q : {V3{6, 4, 10}, V3{-6, 4, 10}, V3{6, -4, 10}, V3{-6, -4, 10}}) {
+        uint32_t v = nearest(s, q);
+        rose.push_back(pt(s, v).z - before[v].z);
+      }
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      b.mirror = 7;
+      stroke(s, b, before[c], {before[c]});
+      std::vector<double> sank;
+      for (V3 q : {V3{6, 4, -10}, V3{-6, 4, -10}, V3{6, -4, -10}, V3{-6, -4, -10}}) {
+        uint32_t v = nearest(s, q);
+        sank.push_back(pt(s, v).z - before[v].z);
+      }
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      bool alike = true;
+      for (int k = 0; k < 4; k++) alike = alike && near(rose[k], rose[0], 0.01) && rose[k] > 0.1 && near(sank[k], -rose[0], 0.01);
+      // Grab across x and y.
+      BKBrush g = brushOf(BK_BRUSH_GRAB, 3, 1);
+      g.mirror = BK_MIRROR_X | BK_MIRROR_Y;
+      V3 drag{0.5, 0.25, 1};
+      stroke(s, g, before[c], {before[c] + drag});
+      bool four = true;
+      for (int k = 0; k < 4; k++) {
+        V3 sign{k & 1 ? -1.0 : 1.0, k & 2 ? -1.0 : 1.0, 1};
+        uint32_t v = nearest(s, V3{6 * sign.x, 4 * sign.y, 10});
+        V3 m = pt(s, v) - before[v];
+        four = four && m.x * sign.x > 0.3 && m.y * sign.y > 0.15 && m.z > 0.7;
+      }
+      check("brushes: mirrored across x and y four places rise alike, across all three the bottom's sink alike; grab follows four ways", alike && four,
+            fmt("%.4f %.4f", rose[0], rose[3]) + fmt(" · %.4f %.4f", sank[0], sank[3]));
+      bk_sculpt_free(s);
+    }
+
+    // Tilt: Draw leant 45° toward the stroke's way moves the point under it as far along that way as up.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      uint32_t c = nearest(s, top);
+      V3 at = pt(s, c);
+      BKBrush b = brushOf(BK_BRUSH_DRAW, 3, 0.5);
+      b.tilt = 45, b.across[0] = 1;
+      stroke(s, b, at, {at});
+      V3 m = pt(s, c) - at;
+      // (A pen's own tilt instead: straight up, as at 0.)
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      stroke(s, b, at, {at}, 0);
+      V3 m0 = pt(s, c) - at;
+      check("brushes: leant 45° toward the stroke's way, as far along it as up; a pen held upright straight up", near(m.x, m.z, 1e-6) && m.z > 0.1 &&
+                                                                                                                       near(m0.x, 0, 1e-9) && near(m0.z, 0.15, 1e-6),
+            fmt("x %.6f z %.6f", m.x, m.z) + fmt(", upright z %.6f", m0.z));
+      bk_sculpt_free(s);
+    }
+
+    // Clay: the flat raised up to its plane (a tenth of the radius times the strength above it), never past; a bump that
+    // stands above the plane is left where it is.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      std::vector<V3> before = points(s);
+      uint32_t c = nearest(s, top);
+      BKBrush b = brushOf(BK_BRUSH_CLAY, 3, 0.5);
+      stroke(s, b, before[c], {before[c]});
+      double most = 0;
+      for (size_t i = 0; i < before.size(); i++) most = std::max(most, pt(s, (uint32_t)i).z - before[i].z);
+      double rise = pt(s, c).z - before[c].z;
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      // A bump 1 mm high at the middle, then clay at strength 0.2 (its plane 0.06 above the points' middle).
+      BKBrush d = brushOf(BK_BRUSH_DRAW, 3, 1);
+      for (int k = 0; k < 4; k++) stroke(s, d, before[c], {before[c]});
+      std::vector<V3> bumped = points(s);
+      BKBrush cl = brushOf(BK_BRUSH_CLAY, 3, 0.2);
+      stroke(s, cl, bumped[c], {bumped[c]});
+      double peak = pt(s, c).z - bumped[c].z;
+      uint32_t edge = nearest(s, top + V3{2.6, 0, 0});
+      double rim = pt(s, edge).z - bumped[edge].z;
+      check("brushes: clay raises the flat to its plane and never past; a bump above the plane is left alone, the hollow round it filled",
+            near(rise, 0.15, 1e-6) && most <= 0.15 + 1e-9 && peak == 0 && rim > 0, fmt("rose %.6f (most %.6f), peak %.6f, rim %.6f", rise, most, peak) + fmt(" %.6f", rim));
+      bk_sculpt_free(s);
+    }
+
+    // Layer: a stroke over the same place three times raises it to one height; Draw piles up.
+    {
+      double heights[2];
+      for (int k = 0; k < 2; k++) {
+        BKSculpt *s = make(slab, 0.5);
+        uint32_t c = nearest(s, top);
+        V3 at = pt(s, c);
+        BKBrush b = brushOf(k ? BK_BRUSH_DRAW : BK_BRUSH_LAYER, 3, 0.5);
+        stroke(s, b, at, {at, at + V3{4, 0, 0}, at, at + V3{4, 0, 0}, at});
+        heights[k] = pt(s, c).z - at.z;
+        bk_sculpt_free(s);
+      }
+      check("brushes: layer raises to one height however often it passes; draw piles up", near(heights[0], 0.15, 1e-6) && heights[1] > 0.3,
+            fmt("layer %.6f, draw %.6f", heights[0], heights[1]));
+    }
+
+    // Blob: points pushed out from below the middle: up there, outward to the sides.
+    // Scrape: what stands above its plane cut down, the rest left; inverted (fill), what lies below filled up, the rest left.
+    // Smudge: carried along the stroke's way, not up or down; nothing at its first dab.
+    // Twist: turned round the brush's axis, each point as far from it as before.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      std::vector<V3> before = points(s);
+      uint32_t c = nearest(s, top);
+      stroke(s, brushOf(BK_BRUSH_BLOB, 3, 0.5), before[c], {before[c]});
+      bool outward = pt(s, c).z > before[c].z;
+      for (size_t i = 0; i < before.size(); i++) {
+        V3 m = pt(s, (uint32_t)i) - before[i], d = before[i] - before[c];
+        if (bce::norm(m) > 1e-9 && d.x * m.x + d.y * m.y < -1e-12) outward = false;
+      }
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+
+      // A bump, then scrape (only down) and fill (only up).
+      for (int k = 0; k < 3; k++) stroke(s, brushOf(BK_BRUSH_DRAW, 3, 1), before[c], {before[c]});
+      std::vector<V3> bumped = points(s);
+      stroke(s, brushOf(BK_BRUSH_SCRAPE, 4, 1), bumped[c], {bumped[c]});
+      bool down = pt(s, c).z < bumped[c].z, onlyDown = true, someStill = false;
+      for (size_t i = 0; i < bumped.size(); i++) {
+        double dz = pt(s, (uint32_t)i).z - bumped[i].z;
+        onlyDown = onlyDown && dz <= 0, someStill = someStill || (bce::norm(bumped[i] - bumped[c]) < 3 && pt(s, (uint32_t)i) == bumped[i]);
+      }
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      BKBrush fill = brushOf(BK_BRUSH_SCRAPE, 4, 1);
+      fill.invert = 1;
+      stroke(s, fill, bumped[c], {bumped[c]});
+      bool onlyUp = pt(s, c).z == bumped[c].z, filled = false;
+      for (size_t i = 0; i < bumped.size(); i++) {
+        double dz = pt(s, (uint32_t)i).z - bumped[i].z;
+        onlyUp = onlyUp && dz >= 0, filled = filled || dz > 0;
+      }
+      bk_sculpt_undo(s), bk_sculpt_undo(s), bk_sculpt_undo(s), bk_sculpt_undo(s), bk_sculpt_sync(s);
+
+      stroke(s, brushOf(BK_BRUSH_SMUDGE, 3, 0.5), before[c], {before[c]});
+      bool first = points(s) == before;
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      stroke(s, brushOf(BK_BRUSH_SMUDGE, 3, 0.5), before[c], {before[c], before[c] + V3{3, 0, 0}});
+      bool along = true, moved = false;
+      for (size_t i = 0; i < before.size(); i++) {
+        V3 m = pt(s, (uint32_t)i) - before[i];
+        along = along && m.x >= 0 && std::fabs(m.z) <= 1e-5, moved = moved || m.x > 0.01;
+      }
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+
+      stroke(s, brushOf(BK_BRUSH_TWIST, 3, 0.5), before[c], {before[c]});
+      double worst = 0, turned = 0;
+      for (size_t i = 0; i < before.size(); i++) {
+        V3 a = before[i] - before[c], b = pt(s, (uint32_t)i) - before[c];
+        worst = std::max({worst, std::fabs(std::hypot(a.x, a.y) - std::hypot(b.x, b.y)), std::fabs(a.z - b.z)});
+        if (std::hypot(a.x, a.y) > 0.5) turned = std::max(turned, std::fabs(std::atan2(a.x * b.y - a.y * b.x, a.x * b.x + a.y * b.y)));
+      }
+      check("brushes: blob pushes out, scrape only cuts down and fill only fills up, smudge carries along (nothing at first), twist turns",
+            outward && down && onlyDown && someStill && onlyUp && filled && first && along && moved && worst < 1e-5 && turned > 0.05,
+            fmt("%.0f%.0f%.0f", outward, down, onlyDown) + fmt("%.0f%.0f%.0f", someStill, onlyUp, filled) + fmt("%.0f%.0f%.0f ", first, along, moved) +
+                fmt("twist off by %.2g, turned up to %.3f rad", worst, turned));
+      bk_sculpt_free(s);
+    }
+
+    // Snake hook: the point under it pulled along with the pointer off the surface, within a step; with the detail on, the
+    // stretched part made finer as it goes, the mesh sound.
+    {
+      BKSculpt *s = make(slab, 0.5);
+      uint32_t c = nearest(s, top);
+      V3 at = pt(s, c);
+      std::vector<V3> path;
+      for (int k = 1; k <= 10; k++) path.push_back(at + V3{0, 0, 0.5 * k});
+      int before = bk_sculpt_live_triangle_count(s);
+      stroke(s, brushOf(BK_BRUSH_SNAKE_HOOK, 2, 0.5), at, path);
+      double off = bce::norm(pt(s, c) - (at + V3{0, 0, 5}));
+      bk_sculpt_undo(s), bk_sculpt_sync(s);
+      bk_sculpt_set_detail(s, 0.4);
+      stroke(s, brushOf(BK_BRUSH_SNAKE_HOOK, 2, 0.5), at, path);
+      int after = bk_sculpt_live_triangle_count(s);
+      std::string why = bk_sculpt_check(s);
+      check("brushes: snake hook pulls the point along with the pointer; with the detail on, finer as it goes, sound", off <= 0.4 + 1e-9 && after > before + 100 && why.empty(),
+            fmt("off by %.4f, %.0f → %.0f triangles ", off, before, after) + why);
+      bk_sculpt_free(s);
+    }
+
+    // Each new brush (with a tip, mirrored), undone and done again to the bit; random strokes of every brush with any
+    // tip and mirrors keep the mesh sound, all undone the start again.
+    {
+      BKSculpt *s = make(ball, 1.0);
+      int same = 0;
+      for (int kind = BK_BRUSH_CLAY; kind < BK_BRUSH_COUNT; kind++) {
+        bk_sculpt_set_detail(s, kind % 2 ? 0.7 : 0);
+        std::vector<float> a = meshOf(s);
+        BKBrush b = brushOf(kind, 4, 0.7);
+        b.hardness = 0.3, b.rigidity = 0.5, b.oval = 0.6, b.angle = 30, b.tilt = 20, b.mirror = kind % 4, b.across[1] = 1;
+        stroke(s, b, {3, 4, 14.1}, {{3, 4, 14.1}, {4, 4, 14.5}, {6, 3, 14}, {8, 1, 13}});
+        std::vector<float> z = meshOf(s);
+        bk_sculpt_undo(s), bk_sculpt_sync(s);
+        bool back = meshOf(s) == a;
+        bk_sculpt_redo(s), bk_sculpt_sync(s);
+        same += back && meshOf(s) == z && z != a;
+      }
+      bk_sculpt_free(s);
+      s = make(ball, 1.5);
+      std::vector<float> start = meshOf(s);
+      uint64_t seed = 0x2545F4914F6CDD1Dull;
+      auto rnd = [&]() {
+        seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+        return seed;
+      };
+      auto unit01 = [&]() { return (double)(rnd() >> 11) / 9007199254740992.0; };
+      std::string bad;
+      for (int k = 0; k < 50 && s && bad.empty(); k++) {
+        V3 dir{unit01() - 0.5, unit01() - 0.5, unit01() - 0.5};
+        if (bce::norm(dir) < 1e-3) dir = {0, 0, 1};
+        dir = bce::unit(dir);
+        double o[3] = {dir.x * 100, dir.y * 100, dir.z * 100}, w[3] = {-dir.x, -dir.y, -dir.z}, h[3], n[3];
+        if (!bk_sculpt_ray(s, o, w, h, n)) continue;
+        BKBrush b = brushOf((int)(rnd() % BK_BRUSH_COUNT), 1 + unit01() * 5, 0.1 + unit01() * 0.9);
+        b.mirror = (int)(rnd() % 8), b.invert = (int)(rnd() % 2);
+        b.hardness = unit01(), b.rigidity = unit01(), b.oval = 0.05 + unit01(), b.angle = unit01() * 360, b.tilt = (unit01() - 0.5) * 180;
+        b.across[0] = unit01() - 0.5, b.across[1] = unit01() - 0.5, b.across[2] = unit01() - 0.5;
+        bk_sculpt_set_detail(s, rnd() % 3 ? 0 : 0.8);
+        V3 from{h[0], h[1], h[2]};
+        std::vector<V3> path;
+        for (int d = 0; d < 1 + (int)(rnd() % 6); d++) path.push_back(from + V3{(unit01() - 0.5) * 6, (unit01() - 0.5) * 6, (unit01() - 0.5) * 6});
+        stroke(s, b, from, path, rnd() % 4 ? NAN : (unit01() - 0.5) * 120);
+        bad = bk_sculpt_check(s);
+        if (!bad.empty()) bad = fmt("stroke %.0f, brush %.0f: ", k, b.brush) + bad;
+      }
+      while (s && bk_sculpt_undo(s)) {
+      }
+      bk_sculpt_sync(s);
+      bool back = s && meshOf(s) == start;
+      check("brushes: each new one undone and done again to the bit; random strokes of every brush, tip and mirror sound, all undone the start",
+            same == BK_BRUSH_COUNT - BK_BRUSH_CLAY && bad.empty() && back, fmt("%.0f of 7 · ", same) + bad);
+      bk_sculpt_free(s);
+    }
+    bk_free(slab), bk_free(ball);
+  }
+
   // MARK: figures
   // A man and a woman in every pose, full and as a draft: closed, one piece, taken as a mesh body, its box as worked out
   // before it's made; standing exactly its height, its soles flat at the bottom, alike across its middle; posed as asked;
@@ -3250,6 +3629,24 @@ int main() {
     double v0 = r0 ? volumeOf(r0) : 0, v1 = r1 ? volumeOf(r1) : -1;
     check("rounded far from the middle as at it", r0 && r1 && near(v0, v1, 1e-6 * v0), fmt("%.6f vs %.6f mm³", v0, v1));
     bk_free(r1), bk_free(r0), bk_free(tinyAway), bk_free(tiny);
+    // (Found by test/fuzz.cpp.) A prism of thousands of sides refused (rounding it took minutes); walls as thick as half
+    // the body refused at once (working them out took minutes), thinner ones still made; a cove far wider than the body
+    // refused at once (cutting it took most of a minute), saying how large one may be.
+    double manySides[3] = {1e4, 3, 1.35}, sides64[3] = {64, 20, 10}, bowl[2] = {98.445, 227.195}, slim[3] = {3, 22.97, 3.805};
+    BKShape *many = bk_primitive(BK_PYRAMID, manySides), *p64 = bk_primitive(BK_PRISM, sides64), *bw = bk_primitive(BK_BOWL, bowl);
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *thick = bk_hollow(bw, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 60, nullptr);
+    double thickTook = ms(t0);
+    BKShape *thin = bk_hollow(bw, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 20, nullptr);
+    BKShape *bar = bk_primitive(BK_BOX, slim);
+    double largest = 0;
+    t0 = std::chrono::steady_clock::now();
+    BKShape *wide = bk_cove(bar, &kb, body, 1, 1000, &largest, &miss);
+    double wideTook = ms(t0);
+    check("thousands of sides refused, 64 taken; walls too thick for the body refused at once, thinner ones made; a cove far wider than it refused at once",
+          !many && p64 && !thick && thickTook < 2000 && thin && !wide && wideTook < 2000 && near(largest, 1.49, 0.01),
+          fmt("walls refused in %.0f ms, the cove in %.0f ms (largest %.2f)", thickTook, wideTook, largest));
+    for (BKShape *x : {many, p64, bw, thick, thin, bar, wide}) bk_free(x);
   }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);

@@ -40,8 +40,15 @@ bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)
 // the surface's average way out there; carved when inverted), inflate (each point along its own normal), smooth (each
 // point toward its neighbours' middle), flatten (onto the plane through the points under it), pinch (drawn in toward the
 // brush's middle along the surface), crease (carved and pinched: a sharp groove; a ridge when inverted), detail (the
-// triangles only, made the detail size: the surface stays where it is). The brush weighs points by how near its middle
-// they are (none at its radius); `mirror` does the same across x = 0 as well.
+// triangles only, made the detail size: the surface stays where it is), clay (raised up to a plane a little above the
+// points under it, never past it), layer (raised to one height for the whole stroke, however often it passes),
+// blob (pushed out from a point under the brush: round blobs), scrape (what stands above the plane through the points
+// under it cut down to it; inverted, fill: what lies below it filled up), smudge (carried along the stroke's way),
+// snake hook (pulled along with the pointer, the points under it taken again at every step: horns and tentacles),
+// twist (turned round the brush's axis). The brush weighs points by how near its middle they are (none at its rim):
+// its tip (Tip) sets how (a core at full strength, the fade soft or crisp, the footprint an oval at an angle to the
+// stroke's way) and leans its push. `mirror` (bits: x, y, z) does the same across those planes through the body's
+// origin as well, in every combination of them.
 //
 // With a detail size set, every brush also makes the triangles it passes over that size: sides much longer than it asks
 // are halved, sides much shorter merged away where that keeps the surface sound, and sides between thin triangles turned
@@ -49,6 +56,15 @@ bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)
 // slots, a slot freed when its triangle or point goes and used again later.
 //
 // Every query and stroke comes out the same whatever order things are visited in.
+// A brush's tip: hardness, the part of its radius at full strength (0…1); rigidity, how crisp its fade from there to the
+// rim (0: soft and rounded, 1: a straight slope); oval, how wide its footprint is across as along (0.05…1), and angle,
+// how far that's turned from the stroke's way (degrees); tilt, how far its push leans from straight out toward the
+// stroke's way (degrees, ±85). As it is (all 0, oval 1), a brush weighs points as it always has.
+struct BrushTip {
+  double hardness = 0, rigidity = 0, oval = 1, angle = 0, tilt = 0;
+  bool plain() const { return hardness == 0 && rigidity == 0 && oval == 1; }
+};
+
 class Sculptor {
  public:
   Sculptor(std::vector<V3> pts, std::vector<uint32_t> tris);
@@ -60,9 +76,12 @@ class Sculptor {
   bool ray(V3 origin, V3 dir, V3 &at, V3 &normal) const;
   // A stroke: begun at a point (for grab, where the drag starts), dabs along its way (for grab, where the drag has got
   // to), ended. Pressure scales the strength of each dab and size its radius (both 1 for a mouse; grab takes neither).
-  enum Brush { Grab, Draw, Inflate, Smooth, Flatten, Pinch, Crease, Detail };
-  void begin(int brush, V3 at, double radius, double strength, bool mirror, bool invert);
-  void dab(V3 at, double pressure, double size = 1);
+  enum Brush { Grab, Draw, Inflate, Smooth, Flatten, Pinch, Crease, Detail, Clay, Layer, Blob, Scrape, Smudge, SnakeHook, Twist };
+  using Tip = BrushTip;
+  // `across`: the way the stroke is taken to go before it has moved (the view's right, say), for the oval and the tilt.
+  void begin(int brush, V3 at, double radius, double strength, int mirror, bool invert, const Tip &tip = Tip(), V3 across = {0, 0, 0});
+  // `tilt` (degrees), when a number, leans this dab's push instead of the tip's (a pen held at a slant).
+  void dab(V3 at, double pressure, double size = 1, double tilt = NAN);
   void end();
   bool undo();
   bool redo();
@@ -136,12 +155,22 @@ class Sculptor {
   bool stroking = false;
   int brush = 0;
   double radius = 1, strength = 0.5, strokeDetail = 0;
-  bool mirror = false, invert = false;
+  int mirror = 0;
+  bool invert = false;
+  Tip tip;
+  double tiltNow = 0;     // this dab's lean (degrees)
+  V3 way{0, 0, 0};        // the stroke's way (unit; `across` until it has moved)
+  double moving = 0;      // how far this dab is from the one before (smudge)
+  V3 hook{0, 0, 0};       // snake hook: how far this step pulls
   V3 start{0, 0, 0}, last{0, 0, 0};
   bool dabbed = false;
-  std::vector<uint32_t> grabbed;      // grab: the points under it at the start (or under its mirror), in order,
-  std::vector<double> grabWeight[2];  // how much each follows the drag, and the drag mirrored,
+  std::vector<uint32_t> grabbed;      // grab: the points under it at the start (or under a mirror of it), in order,
+  std::vector<double> grabWeight[8];  // how much each follows the drag, and each mirror of it,
   std::vector<V3> grabFrom;           // and where each was
+  // Layer: per point, the stroke it was first raised in, from where, along which way, and how high it's got.
+  std::vector<uint32_t> layerOf;
+  std::vector<V3> layerFrom, layerAlong;
+  std::vector<double> layerHeight;
   std::vector<uint32_t> pointTouched, triTouched;  // per slot: the stroke that last recorded it
   uint32_t strokeId = 0;
   Step step;
@@ -152,9 +181,9 @@ class Sculptor {
   std::vector<uint32_t> changed, changedTris;
   std::vector<uint32_t> dirtyList;
   // (Scratch, kept between dabs.)
-  std::vector<uint32_t> idx[2], sum, around, ring, work, front, fresh;
-  std::vector<double> wt[2];
-  std::vector<V3> off[2], offSum;
+  std::vector<uint32_t> idx[8], sum, merged, around, ring, work, front, fresh;
+  std::vector<double> wt[8];
+  std::vector<V3> off[8], offSum, offMerged;
   mutable std::vector<uint32_t> fan;
   mutable std::vector<V3> faceN;
   mutable std::vector<uint32_t> faceAt;
@@ -175,8 +204,16 @@ class Sculptor {
   void within(V3 c, double r, std::vector<uint32_t> &out, std::vector<double> &weight) const;
   // The corners of the triangles passing within `r` of c, their points, in order.
   void touching(V3 c, double r, std::vector<uint32_t> &out) const;
-  // How a dab at c would move the points under it (from where they are now).
-  void offsets(V3 c, double pressure, double radius, std::vector<uint32_t> &which, std::vector<double> &weight, std::vector<V3> &by) const;
+  // The mirrors in use (k: bits x, y, z flipped), in order; where they put a point.
+  int copies(int out[8]) const;
+  static V3 flip(V3 v, int k) { return {k & 1 ? -v.x : v.x, k & 2 ? -v.y : v.y, k & 4 ? -v.z : v.z}; }
+  // The points under a dab at c, and each one's weight, as the tip has it (the stroke's way there: dir).
+  void weigh(V3 c, double radius, V3 dir, std::vector<uint32_t> &which, std::vector<double> &weight, V3 &out) const;
+  static V3 wayAlong(V3 dir, V3 out);
+  void growLayer();
+  void anchorLayer();
+  // How a dab at c would move the points under it (from where they are now), its mirror k of the stroke.
+  void offsets(V3 c, double pressure, double radius, int k, std::vector<uint32_t> &which, std::vector<double> &weight, std::vector<V3> &by) const;
   void dabAt(V3 c, double pressure, double radius);
   // The triangles made the detail size round `seeds`' points (the sides for which inside(a, b) holds), at most `most`
   // changes; `mark`: a point made on a side between two points of `region` joins it. The points changed are left in

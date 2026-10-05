@@ -7,7 +7,8 @@
 //               M: the shape so far as a mesh body, its mesh at that detail as a sculpt holds it; R detail ; it remeshed for
 //               sculpting at that detail; D detail brush o(3) w(3) radius strength mirror invert g(3) [local] ; it remeshed
 //               and given a stroke: from where the ray o + t·w meets it, along g, the triangles under it made the local
-//               detail when given); G draft numbers… ; a human figure (BK_FIG_… order, fewer: the rest standard)
+//               detail when given, and the brush's tip after it); G draft numbers… ; a human figure (BK_FIG_… order, fewer: the
+//               rest standard)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -195,7 +196,8 @@ BKShape *build(const std::string &prog, std::string &why) {
     } else if (t == "D") {
       // The shape so far remeshed at detail d and given one stroke of a brush: begun where a ray (from o along w) meets
       // it, dabbed there and four times more along the drag g: D d brush ox oy oz wx wy wz radius strength mirror invert gx gy gz
-      // [local detail: the triangles under the brush made that size].
+      // [local detail: the triangles under the brush made that size [its tip: hardness rigidity oval angle tilt (the
+      // stroke taken to go along g from the start; mirror as BK_MIRROR_… bits)]].
       if (!need(15)) return fail("stroke without its numbers");
       if (st.empty()) return fail("stroke on nothing");
       const double same[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
@@ -208,7 +210,15 @@ BKShape *build(const std::string &prog, std::string &why) {
       BKShape *s = nullptr;
       if (why.empty()) {
         if (v.size() > 15) bk_sculpt_set_detail(sc, v[15]);
-        bk_sculpt_begin(sc, (int)v[1], hit, v[8], v[9], (int)v[10], (int)v[11]);
+        if (v.size() > 20) {
+          BKBrush b{};
+          b.brush = (int)v[1], b.radius = v[8], b.strength = v[9], b.mirror = (int)v[10], b.invert = (int)v[11];
+          b.hardness = v[16], b.rigidity = v[17], b.oval = v[18], b.angle = v[19], b.tilt = v[20];
+          b.across[0] = v[12], b.across[1] = v[13], b.across[2] = v[14];
+          bk_sculpt_begin_brush(sc, &b, hit);
+        } else {
+          bk_sculpt_begin(sc, (int)v[1], hit, v[8], v[9], (int)v[10], (int)v[11]);
+        }
         for (int k = 0; k <= 4; k++) {
           double at[3] = {hit[0] + v[12] * k / 4, hit[1] + v[13] * k / 4, hit[2] + v[14] * k / 4};
           bk_sculpt_dab(sc, at, 1, 1);

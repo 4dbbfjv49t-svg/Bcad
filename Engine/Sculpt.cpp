@@ -628,6 +628,22 @@ inline uint32_t prevC(uint32_t c) { return c % 3 == 0 ? c + 2 : c - 1; }
 // about 0.8 of it on average, so the same detail under the brush is as fine as a remesh.
 const double sideOfDetail = 0.88;
 
+// A point's weight at q, its distance from the brush's middle squared (the rim at 1): 1 within the core h (as a part of
+// the radius), then fading to 0 at the rim: soft, (1−u²)² across the fade (u: 0 at the core, 1 at the rim), or with
+// rigidity g that far toward the straight 1−u. (With h and g both 0, as within() has it.)
+double fall(double q, double h, double g) {
+  double u, u2;
+  if (h > 0) {
+    double rho = std::sqrt(q);
+    if (rho <= h) return 1;
+    u = (rho - h) / (1 - h), u2 = u * u;
+  } else {
+    u2 = q, u = g > 0 ? std::sqrt(q) : 0;
+  }
+  double f = 1 - u2, soft = f * f;
+  return g > 0 ? soft + g * ((1 - u) - soft) : soft;
+}
+
 // The cotangent of the angle at o between u and v (huge for one of 0 or half a turn): two facing a side add up to below 0
 // when those angles pass half a turn, the side then better turned the other way across its two triangles.
 double cotangent(V3 o, V3 u, V3 v) {
@@ -978,99 +994,225 @@ void Sculptor::touching(V3 c, double r, std::vector<uint32_t> &out) const {
   std::sort(out.begin(), out.end());
 }
 
-void Sculptor::begin(int b, V3 at, double r, double s, bool mir, bool inv) {
+int Sculptor::copies(int out[8]) const {
+  int m = 0;
+  for (int k = 0; k < 8; k++)
+    if ((k & ~mirror) == 0) out[m++] = k;
+  return m;
+}
+
+// The points within the radius as within() weighs them, and the surface's average way out under them; then, for a tip
+// that isn't plain, weighed again by it: measured in the frame of the stroke's way (dir) along the surface turned by the
+// angle and that way out, the oval's narrow side stretched to the round, faded from its core (points at or past its rim
+// left out).
+void Sculptor::weigh(V3 c, double r, V3 dir, std::vector<uint32_t> &which, std::vector<double> &w, V3 &out) const {
+  within(c, r, which, w);
+  out = V3{0, 0, 0};
+  for (size_t k = 0; k < which.size(); k++) out += n[which[k]] * w[k];
+  out = norm2(out) > 0 ? unit(out) : V3{0, 0, 0};
+  if (tip.plain() || which.empty()) return;
+  double r2 = r * r;
+  V3 e1{0, 0, 0}, e2{0, 0, 0};
+  if (tip.oval < 1) {
+    V3 t = wayAlong(dir, out), b = cross(out, t);
+    if (norm2(b) > 0) b = unit(b);
+    double a = tip.angle * (M_PI / 180), ca = trig::cos(a), sa = trig::sin(a);
+    e1 = t * ca + b * sa, e2 = b * ca - t * sa;
+  }
+  size_t kept = 0;
+  for (size_t k = 0; k < which.size(); k++) {
+    V3 d = p[which[k]] - c;
+    double q;
+    if (tip.oval < 1) {
+      double a1 = dot(d, e1), a2 = dot(d, e2) / tip.oval, a3 = dot(d, out);
+      q = (a1 * a1 + a2 * a2 + a3 * a3) / r2;
+    } else {
+      q = norm2(d) / r2;
+    }
+    if (!(q < 1)) continue;
+    which[kept] = which[k], w[kept++] = fall(q, tip.hardness, tip.rigidity);
+  }
+  which.resize(kept), w.resize(kept);
+}
+
+void Sculptor::begin(int b, V3 at, double r, double s, int mir, bool inv, const Tip &t, V3 acrossWay) {
   if (stroking) end();
   stroking = true, dabbed = false;
-  brush = b >= Grab && b <= Detail ? b : Draw;
+  brush = b >= Grab && b <= Twist ? b : Draw;
   radius = r > 1e-9 ? r : 1e-9, strength = std::min(1.0, std::max(0.0, s));
-  mirror = mir, invert = inv;
+  mirror = mir & 7, invert = inv;
+  auto kept = [](double v, double lo, double hi, double otherwise) { return std::isfinite(v) ? std::min(hi, std::max(lo, v)) : otherwise; };
+  tip.hardness = kept(t.hardness, 0, 1, 0), tip.rigidity = kept(t.rigidity, 0, 1, 0), tip.oval = kept(t.oval, 0.05, 1, 1);
+  tip.angle = std::isfinite(t.angle) ? std::fmod(t.angle, 360.0) : 0, tip.tilt = kept(t.tilt, -85, 85, 0);
+  tiltNow = tip.tilt;
+  way = std::isfinite(acrossWay.x) && std::isfinite(acrossWay.y) && std::isfinite(acrossWay.z) && norm2(acrossWay) > 0 ? unit(acrossWay) : V3{0, 0, 0};
+  moving = 0, hook = V3{0, 0, 0};
   strokeDetail = detail;
   start = last = at;
   if (++strokeId == 0) {
     std::fill(pointTouched.begin(), pointTouched.end(), 0), std::fill(triTouched.begin(), triTouched.end(), 0);
+    std::fill(layerOf.begin(), layerOf.end(), 0);
     strokeId = 1;
   }
   step = Step();
-  grabbed.clear(), grabWeight[0].clear(), grabWeight[1].clear(), grabFrom.clear();
+  grabbed.clear(), grabFrom.clear();
+  for (auto &g : grabWeight) g.clear();
   if (brush != Grab) return;
-  within(at, radius, idx[0], wt[0]);
-  if (mirror) within(V3{-at.x, at.y, at.z}, radius, idx[1], wt[1]);
-  else idx[1].clear(), wt[1].clear();
-  size_t a = 0, c = 0;
-  while (a < idx[0].size() || c < idx[1].size()) {
-    bool fromA = c == idx[1].size() || (a < idx[0].size() && idx[0][a] <= idx[1][c]);
-    bool fromC = a == idx[0].size() || (c < idx[1].size() && idx[1][c] <= idx[0][a]);
-    grabbed.push_back(fromA ? idx[0][a] : idx[1][c]);
-    grabWeight[0].push_back(fromA ? wt[0][a++] : 0.0);
-    grabWeight[1].push_back(fromC ? wt[1][c++] : 0.0);
-    grabFrom.push_back(p[grabbed.back()]);
+  // The points under it and under each of its mirrors, in order, and how much each follows the drag and each mirror of it.
+  int ks[8], m = copies(ks);
+  V3 out;
+  for (int j = 0; j < m; j++) {
+    weigh(flip(at, ks[j]), radius, flip(way, ks[j]), idx[j], wt[j], out);
+    merged.clear();
+    std::set_union(grabbed.begin(), grabbed.end(), idx[j].begin(), idx[j].end(), std::back_inserter(merged));
+    grabbed.swap(merged);
   }
+  for (int j = 0; j < m; j++) {
+    grabWeight[j].assign(grabbed.size(), 0.0);
+    for (size_t a = 0, c = 0; c < idx[j].size(); a++)
+      if (grabbed[a] == idx[j][c]) grabWeight[j][a] = wt[j][c++];
+  }
+  for (uint32_t v : grabbed) grabFrom.push_back(p[v]);
 }
 
-void Sculptor::offsets(V3 c, double pressure, double radius, std::vector<uint32_t> &which, std::vector<double> &w, std::vector<V3> &by) const {
-  within(c, radius, which, w);
+// Along the surface (across `out`), the stroke's way: dir as it lies on the surface, or (it straight out, or no way yet)
+// a way across chosen from `out` alone.
+V3 Sculptor::wayAlong(V3 dir, V3 out) {
+  V3 t = dir - out * dot(dir, out);
+  if (norm2(t) > 1e-20) return unit(t);
+  V3 a = std::fabs(out.x) <= std::fabs(out.y) && std::fabs(out.x) <= std::fabs(out.z) ? V3{1, 0, 0}
+         : std::fabs(out.y) <= std::fabs(out.z)                                       ? V3{0, 1, 0}
+                                                                                      : V3{0, 0, 1};
+  t = a - out * dot(a, out);
+  return norm2(t) > 0 ? unit(t) : V3{1, 0, 0};
+}
+
+void Sculptor::offsets(V3 c, double pressure, double radius, int k, std::vector<uint32_t> &which, std::vector<double> &w, std::vector<V3> &by) const {
+  // The surface's average way out under the brush, and its middle.
+  V3 out;
+  weigh(c, radius, flip(way, k), which, w, out);
   by.assign(which.size(), V3{0, 0, 0});
   if (which.empty() || brush == Detail) return;
   double s = strength * pressure * (invert ? -1 : 1);
-  // The surface's average way out under the brush, and its middle.
-  V3 out{0, 0, 0}, mid{0, 0, 0};
+  V3 mid{0, 0, 0};
   double total = 0;
-  for (size_t k = 0; k < which.size(); k++) out += n[which[k]] * w[k], mid += p[which[k]] * w[k], total += w[k];
-  out = norm2(out) > 0 ? unit(out) : V3{0, 0, 0};
+  for (size_t j = 0; j < which.size(); j++) mid += p[which[j]] * w[j], total += w[j];
   if (total > 0) mid = mid / total;
+  // The stroke's way along the surface there, and the brush's push: straight out, or leant toward that way.
+  V3 t = wayAlong(flip(way, k), out), push = out;
+  if (tiltNow != 0 && norm2(out) > 0) {
+    double a = tiltNow * (M_PI / 180);
+    push = out * trig::cos(a) + t * trig::sin(a);
+  }
   std::vector<uint32_t> &nb = const_cast<std::vector<uint32_t> &>(fan);
-  for (size_t k = 0; k < which.size(); k++) {
-    uint32_t i = which[k];
+  for (size_t j = 0; j < which.size(); j++) {
+    uint32_t i = which[j];
     V3 q = p[i];
     V3 in = c - q;
     in = in - out * dot(in, out);  // toward the brush's middle, along the surface
     switch (brush) {
-      case Draw: by[k] = out * (s * radius * 0.1 * w[k]); break;
-      case Inflate: by[k] = n[i] * (s * radius * 0.1 * w[k]); break;
+      case Draw: by[j] = push * (s * radius * 0.1 * w[j]); break;
+      case Inflate: by[j] = n[i] * (s * radius * 0.1 * w[j]); break;
       case Smooth: {
         neighbours(i, nb);
         if (nb.empty()) break;
         V3 m{0, 0, 0};
-        for (uint32_t j : nb) m += p[j];
-        by[k] = (m / (double)nb.size() - q) * std::min(1.0, std::fabs(s) * w[k]);
+        for (uint32_t u : nb) m += p[u];
+        by[j] = (m / (double)nb.size() - q) * std::min(1.0, std::fabs(s) * w[j]);
         break;
       }
-      case Flatten: by[k] = out * (-dot(q - mid, out) * std::max(-1.0, std::min(1.0, s * w[k]))); break;
-      case Pinch: by[k] = in * (s * 0.3 * w[k]); break;
-      case Crease: by[k] = out * (-s * radius * 0.08 * w[k]) + in * (std::fabs(s) * 0.3 * w[k]); break;
+      case Flatten: by[j] = push * (-dot(q - mid, push) * std::max(-1.0, std::min(1.0, s * w[j]))); break;
+      case Pinch: by[j] = in * (s * 0.3 * w[j]); break;
+      case Crease: by[j] = push * (-s * radius * 0.08 * w[j]) + in * (std::fabs(s) * 0.3 * w[j]); break;
+      case Clay: {
+        // Up to a plane a tenth of the radius (times the strength) above the points' middle, never past it.
+        double rise = dot(mid + push * (0.1 * radius * s) - q, push);
+        by[j] = push * ((s >= 0 ? std::max(0.0, rise) : std::min(0.0, rise)) * w[j]);
+        break;
+      }
+      case Layer: by[j] = V3{s * radius * 0.1 * w[j], 0, 0}; break;  // (a height, taken by dabAt)
+      case Blob: {
+        V3 from = q - (c - push * (0.5 * radius));
+        if (norm2(from) > 0) by[j] = unit(from) * (s * radius * 0.1 * w[j]);
+        break;
+      }
+      case Scrape: {
+        double above = dot(q - mid, push);
+        if (s >= 0 ? above > 0 : above < 0) by[j] = push * (-above * std::min(1.0, std::fabs(s) * w[j]));
+        break;
+      }
+      case Smudge: by[j] = t * (moving * s * w[j]); break;
+      case SnakeHook: by[j] = flip(hook, k) * (w[j] * std::min(1.0, 2 * std::fabs(s))); break;
+      case Twist: {
+        if (!(norm2(out) > 0)) break;
+        double a = 0.3 * s * w[j], ca = trig::cos(a), sa = trig::sin(a);
+        V3 v = q - c;
+        by[j] = v * ca + cross(push, v) * sa + push * (dot(push, v) * (1 - ca)) - v;
+        break;
+      }
     }
   }
 }
 
-// One dab: the triangles under it made the detail size first (with the detail on), then what it does at c and (with the
-// mirror) across x = 0, both from the points as they are, together.
+// One dab: the triangles under it made the detail size first (with the detail on), then what it does at c and at each of
+// its mirrors, all from the points as they are, together (where two reach the same point their moves add up; for layer
+// the higher height is taken).
 void Sculptor::dabAt(V3 c, double pressure, double r) {
+  int ks[8], m = copies(ks);
   if (strokeDetail > 0) {
-    V3 mc{-c.x, c.y, c.z};
-    touching(c, r, idx[0]);
-    if (mirror) touching(mc, r, idx[1]);
-    else idx[1].clear();
     sum.clear();
-    std::set_union(idx[0].begin(), idx[0].end(), idx[1].begin(), idx[1].end(), std::back_inserter(sum));
+    for (int j = 0; j < m; j++) {
+      touching(flip(c, ks[j]), r, idx[j]);
+      merged.clear();
+      std::set_union(sum.begin(), sum.end(), idx[j].begin(), idx[j].end(), std::back_inserter(merged));
+      sum.swap(merged);
+    }
     std::vector<uint32_t> seeds(sum);
     // (Their normals made again with the points the dab moves, but for the Detail brush, which moves none.)
-    retopo(seeds, [&](uint32_t a, uint32_t b) { return toSegment(c, p[a], p[b]) < r || (mirror && toSegment(mc, p[a], p[b]) < r); }, false, 8000,
-           brush != Detail);
+    retopo(seeds,
+           [&](uint32_t a, uint32_t b) {
+             for (int j = 0; j < m; j++)
+               if (toSegment(flip(c, ks[j]), p[a], p[b]) < r) return true;
+             return false;
+           },
+           false, 8000, brush != Detail);
+    if (brush == Layer) anchorLayer();
   } else {
     fresh.clear();
   }
   if (brush == Detail) return;
-  offsets(c, pressure, r, idx[0], wt[0], off[0]);
-  if (mirror) offsets(V3{-c.x, c.y, c.z}, pressure, r, idx[1], wt[1], off[1]);
-  else idx[1].clear(), off[1].clear();
-  sum.clear(), offSum.clear();
-  size_t a = 0, b = 0;
-  while (a < idx[0].size() || b < idx[1].size()) {
-    if (b == idx[1].size() || (a < idx[0].size() && idx[0][a] < idx[1][b])) sum.push_back(idx[0][a]), offSum.push_back(off[0][a++]);
-    else if (a == idx[0].size() || idx[1][b] < idx[0][a]) sum.push_back(idx[1][b]), offSum.push_back(off[1][b++]);
-    else sum.push_back(idx[0][a]), offSum.push_back(off[0][a++] + off[1][b++]);
+  for (int j = 0; j < m; j++) offsets(flip(c, ks[j]), pressure, r, ks[j], idx[j], wt[j], off[j]);
+  sum = idx[0], offSum = off[0];
+  bool higher = brush == Layer && !invert;
+  for (int j = 1; j < m; j++) {
+    merged.clear(), offMerged.clear();
+    size_t a = 0, b = 0;
+    while (a < sum.size() || b < idx[j].size()) {
+      if (b == idx[j].size() || (a < sum.size() && sum[a] < idx[j][b])) merged.push_back(sum[a]), offMerged.push_back(offSum[a++]);
+      else if (a == sum.size() || idx[j][b] < sum[a]) merged.push_back(idx[j][b]), offMerged.push_back(off[j][b++]);
+      else if (brush == Layer) {
+        double x = offSum[a++].x, y = off[j][b++].x;
+        merged.push_back(idx[j][b - 1]), offMerged.push_back(V3{higher ? std::max(x, y) : std::min(x, y), 0, 0});
+      } else {
+        merged.push_back(sum[a]), offMerged.push_back(offSum[a++] + off[j][b++]);
+      }
+    }
+    sum.swap(merged), offSum.swap(offMerged);
   }
-  for (size_t k = 0; k < sum.size(); k++) recordPoint(sum[k]), p[sum[k]] += offSum[k];
+  if (brush == Layer) {
+    // Each point raised to the height reached so far in this stroke along its way out where it started, never lower.
+    growLayer();
+    for (size_t k = 0; k < sum.size(); k++) {
+      uint32_t v = sum[k];
+      if (layerOf[v] != strokeId) layerOf[v] = strokeId, layerFrom[v] = p[v], layerAlong[v] = n[v], layerHeight[v] = 0;
+      double h = higher ? std::max(layerHeight[v], offSum[k].x) : std::min(layerHeight[v], offSum[k].x);
+      if (h == layerHeight[v]) continue;
+      layerHeight[v] = h;
+      recordPoint(v), p[v] = layerFrom[v] + layerAlong[v] * h;
+    }
+  } else {
+    for (size_t k = 0; k < sum.size(); k++) recordPoint(sum[k]), p[sum[k]] += offSum[k];
+  }
   if (!fresh.empty()) {
     std::vector<uint32_t> both;
     std::set_union(sum.begin(), sum.end(), fresh.begin(), fresh.end(), std::back_inserter(both));
@@ -1079,30 +1221,75 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
   moved(sum);
 }
 
-void Sculptor::dab(V3 at, double pressure, double size) {
+void Sculptor::growLayer() {
+  if (layerOf.size() >= p.size()) return;
+  layerOf.resize(p.size(), 0), layerFrom.resize(p.size()), layerAlong.resize(p.size()), layerHeight.resize(p.size(), 0);
+}
+
+// After the detail changed the triangles under a layer stroke: points it moved keep their height (where they started
+// moved with them); points it made take their raised neighbours' height and way (they lie between them, as high).
+void Sculptor::anchorLayer() {
+  growLayer();
+  for (uint32_t v : fresh)
+    if (ptAlive[v] && layerOf[v] == strokeId) layerFrom[v] = p[v] - layerAlong[v] * layerHeight[v];
+  for (uint32_t v : fresh) {
+    if (!ptAlive[v] || layerOf[v] == strokeId) continue;
+    neighbours(v, fan);
+    double h = 0;
+    V3 along{0, 0, 0};
+    int count = 0;
+    for (uint32_t u : fan)
+      if (layerOf[u] == strokeId) h += layerHeight[u], along += layerAlong[u], count++;
+    if (!count || !(norm2(along) > 0)) continue;
+    layerOf[v] = strokeId, layerHeight[v] = h / count, layerAlong[v] = unit(along);
+    layerFrom[v] = p[v] - layerAlong[v] * layerHeight[v];
+  }
+}
+
+void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
   if (!stroking) return;
   pressure = std::min(1.0, std::max(0.0, pressure));
+  tiltNow = std::isfinite(tilt) ? std::min(85.0, std::max(-85.0, tilt)) : tip.tilt;
   // (A pen pressed lightly may make the brush smaller, down to a twentieth.)
   double r = radius * std::min(1.0, std::max(0.05, size));
   if (brush == Grab) {
-    V3 d = at - start, md{-d.x, d.y, d.z};
-    for (size_t k = 0; k < grabbed.size(); k++) recordPoint(grabbed[k]), p[grabbed[k]] = grabFrom[k] + d * grabWeight[0][k] + md * grabWeight[1][k];
+    V3 d = at - start;
+    int ks[8], m = copies(ks);
+    for (size_t k = 0; k < grabbed.size(); k++) {
+      recordPoint(grabbed[k]);
+      V3 q = grabFrom[k] + d * grabWeight[0][k];
+      for (int j = 1; j < m; j++) q = q + flip(d, ks[j]) * grabWeight[j][k];
+      p[grabbed[k]] = q;
+    }
     moved(grabbed);
     last = at;
     return;
   }
   if (!dabbed) {
-    dabAt(at, pressure, r);
-    last = at, dabbed = true;
-    return;
+    dabbed = true;
+    // (The snake hook pulls from where the stroke began, on toward each dab.)
+    if (brush != SnakeHook) {
+      dabAt(at, pressure, r);
+      last = at;
+      return;
+    }
   }
-  // Every fifth of the radius along the way.
+  // Every fifth of the brush's length along its way (an oval's, held across the stroke, shorter than its radius).
   double gap = norm(at - last), spacing = 0.2 * r;
+  if (!(gap > 0)) return;
+  V3 dir = (at - last) / gap;
+  if (tip.oval < 1) {
+    double a = tip.angle * (M_PI / 180), ca = trig::cos(a), sa = trig::sin(a);
+    spacing *= tip.oval / std::sqrt(tip.oval * tip.oval * ca * ca + sa * sa);
+  }
   if (!(gap >= spacing)) return;
   int steps = (int)std::min(1000.0, std::floor(gap / spacing));
-  V3 way = (at - last) / gap;
-  for (int s = 1; s <= steps; s++) dabAt(last + way * (s * spacing), pressure, r);
-  last = last + way * (steps * spacing);
+  way = dir, moving = spacing;
+  for (int s = 1; s <= steps; s++) {
+    if (brush == SnakeHook) hook = dir * spacing, dabAt(last + dir * ((s - 1) * spacing), pressure, r);
+    else dabAt(last + dir * (s * spacing), pressure, r);
+  }
+  last = last + dir * (steps * spacing);
 }
 
 // The triangles under a dab (or a grabbed area) made the detail size, in rounds. Each round: the sides for which

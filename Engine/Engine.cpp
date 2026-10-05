@@ -239,12 +239,24 @@ void bk_sculpt_set_detail(BKSculpt *s, double size) {
 
 void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert) {
   if (!s || !at || !finite(at, 3) || !std::isfinite(radius) || !std::isfinite(strength)) return;
-  s->sculptor.begin(brush, {at[0], at[1], at[2]}, radius, strength, mirror != 0, invert != 0);
+  s->sculptor.begin(brush, {at[0], at[1], at[2]}, radius, strength, mirror != 0 ? BK_MIRROR_X : 0, invert != 0);
+}
+
+void bk_sculpt_begin_brush(BKSculpt *s, const BKBrush *b, const double *at) {
+  if (!s || !b || !at || !finite(at, 3) || !std::isfinite(b->radius) || !std::isfinite(b->strength)) return;
+  BrushTip tip;
+  tip.hardness = b->hardness, tip.rigidity = b->rigidity, tip.oval = b->oval, tip.angle = b->angle, tip.tilt = b->tilt;
+  s->sculptor.begin(b->brush, {at[0], at[1], at[2]}, b->radius, b->strength, b->mirror, b->invert != 0, tip, {b->across[0], b->across[1], b->across[2]});
 }
 
 void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size) {
   if (!s || !at || !finite(at, 3) || !std::isfinite(pressure) || !std::isfinite(size)) return;
   s->sculptor.dab({at[0], at[1], at[2]}, pressure, size);
+}
+
+void bk_sculpt_dab_tilted(BKSculpt *s, const double *at, double pressure, double size, double tilt) {
+  if (!s || !at || !finite(at, 3) || !std::isfinite(pressure) || !std::isfinite(size)) return;
+  s->sculptor.dab({at[0], at[1], at[2]}, pressure, size, tilt);
 }
 
 void bk_sculpt_end(BKSculpt *s) {
@@ -495,6 +507,19 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
       !finite(open, openCount * 6) || !finite(walls, wallCount * 6) || !finite(wallThickness, wallCount) || !std::isfinite(thickness)) {
     lastError = "hollow: walls must be numbers";
     return nullptr;
+  }
+  // Without openings, walls at least half as thick as the body is at its narrowest leave nothing inside: refused at once
+  // (working them out would take minutes).
+  if (openCount == 0) {
+    double thinnest = thickness;
+    for (int k = 0; k < wallCount; k++) thinnest = std::min(thinnest, wallThickness[k]);
+    V3 lo, hi;
+    placedBounds(s->shape, lo, hi);
+    double narrowest = std::min({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    if (!(thinnest < narrowest / 2)) {
+      lastError = "hollow: the walls don't fit this shape";
+      return nullptr;
+    }
   }
   Hollowing h;
   h.thickness = thickness;

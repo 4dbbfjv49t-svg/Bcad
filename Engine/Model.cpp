@@ -783,6 +783,8 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   for (int i : above[kind])
     if (p[i] < 0.001) return fail("sizes must be above zero");
   if (kind == BK_CONE && std::max(p[0], p[1]) < 0.001) return fail("a cone needs one end wider than zero");
+  // (The app takes up to 24; thousands of sides would take minutes to round.)
+  if ((kind == BK_PRISM || kind == BK_PYRAMID) && !(p[0] < 64.5)) return fail("a prism or pyramid has at most 64 sides");
 
   std::shared_ptr<Model> m;
   Affine pre;

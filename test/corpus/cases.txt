@@ -464,6 +464,16 @@ d_local_grab_arms|P 0 20 20 30 ; D 1 0 100 0 5 -1 0 0 6 0.5 1 0 10 0 0 0.5 ;||ma
 d_local_coarser|P 3 30 ; D 0.5 7 0 0 100 0 0 -1 6 0.5 0 0 0 0 0 2 ;||made 14095.44 2.819089
 d_local_crease_ridge|P 3 30 ; D 1 6 -6 0 100 0 0 -1 3 0.7 0 1 12 0 0 0.3 ;||made 14058.48 2.811696
 d_local_smooth_box|P 0 20 20 20 ; D 1 3 9 9 100 0 0 -1 5 1 0 0 0 0 0 0.5 ;||made 7970.681 1.594136
+# The brushes added later, with tips (after the local detail: hardness rigidity oval angle tilt) and mirrors (bits): clay,
+# layer mirrored three ways, a blob from an oval, fill, smudge leant over and mirrored two ways, a snake hook with local
+# detail, a twist with every tip setting.
+d_clay_ball|P 3 30 ; D 0.5 8 -4 0 100 0 0 -1 4 0.6 0 0 8 0 0 0 0.3 0.5 1 0 0 ;||made 14153.03 2.830605
+d_layer_box_mirrored|P 0 20 20 20 ; D 0.5 9 4 4 100 0 0 -1 3 0.5 7 0 4 0 0 0 0 0 1 0 0 ;||made 8017.697 1.603539
+d_blob_oval|P 3 30 ; D 0.5 10 0 0 100 0 0 -1 4 0.5 0 0 6 0 0 0 0 0 0.5 30 0 ;||made 14114.95 2.82299
+d_fill_ball|P 3 30 ; D 0.5 11 0 0 100 0 0 -1 6 1 0 1 4 0 0 0 0.2 0 1 0 0 ;||made 14115.79 2.823159
+d_smudge_leant|P 0 20 20 20 ; D 0.5 12 0 0 100 0 0 -1 4 0.8 3 0 6 0 0 0 0 0 1 0 30 ;||made 7992.569 1.598514
+d_snake_hook_local|P 3 30 ; D 1 13 0 0 100 0 0 -1 3 0.5 0 0 0 0 10 0.5 0 0 1 0 0 ;||made 14082.26 2.816453
+d_twist_tip|P 3 30 ; D 0.5 14 -3 0 100 0 0 -1 5 0.7 1 0 4 2 0 0 0.3 0.6 0.7 45 20 ;||made 14099.64 2.819929
 d_local_carved_hollow|P 3 30 ; D 1.5 1 0 0 100 0 0 -1 5 0.8 0 1 0 0 0 0.5 ;|H 2 0 0|made 4872.579 0.9745157
 
 # Human figures (G draft numbers…, as BK_FIG_…): a man standing, a woman walking, a draft in a T, a man sitting on a

@@ -183,6 +183,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Addresses, undefined behaviour, numbers too big for the integer they're put in, and the standard library's own checks.
+      SANITIZE: -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS
     steps:
       - uses: actions/checkout@v4
 
@@ -203,8 +206,7 @@ jobs:
       - name: Engine test under the address and undefined-behaviour sanitizers
         run: |
           export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 BCAD_UNTIMED=1
-          c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined -ffp-contract=off -I. \
-            test/engine.cpp Engine/*.cpp -o "$RUNNER_TEMP/engine-asan"
+          c++ -std=c++17 -O1 -g $SANITIZE -ffp-contract=off -I. test/engine.cpp Engine/*.cpp -o "$RUNNER_TEMP/engine-asan"
           "$RUNNER_TEMP/engine-asan" | grep -vE "^✓" | tail -60
 
       - name: Corpus under the address and undefined-behaviour sanitizers
@@ -212,10 +214,21 @@ jobs:
           # A sanitizer's finding ends the run with 86; any case not as expected, open or not printable with 1: both fail it.
           export ASAN_OPTIONS=detect_leaks=0:exitcode=86 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1:exitcode=86
           set +e
-          CORPUS_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" ./test/corpus.sh > "$RUNNER_TEMP/asan.txt" 2>&1
+          CORPUS_FLAGS="-O1 -g $SANITIZE" ./test/corpus.sh > "$RUNNER_TEMP/asan.txt" 2>&1
           code=$?
           tail -40 "$RUNNER_TEMP/asan.txt"
           [ $code -eq 0 ]
+
+      - name: Random and extreme numbers under the sanitizers
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+          c++ -std=c++17 -O1 -g $SANITIZE -ffp-contract=off -I. test/fuzz.cpp Engine/*.cpp -o "$RUNNER_TEMP/fuzz"
+          "$RUNNER_TEMP/fuzz"
+
+      - name: Several threads at once under the thread sanitizer
+        run: |
+          c++ -std=c++17 -O1 -g -fsanitize=thread -ffp-contract=off -I. test/threads.cpp Engine/*.cpp -o "$RUNNER_TEMP/threads" -lpthread
+          TSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/threads"
 
       - uses: actions/upload-artifact@v4
         if: always()
