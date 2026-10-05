@@ -112,6 +112,31 @@ BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s);
 // What's wrong with its links ("" when nothing): for tests.
 const char *bk_sculpt_check(const BKSculpt *s);
 
+// A human figure (Engine/Figure.hpp), mannequin-like, standing on z = 0 facing −y (its left at +x), centred on its box:
+// its numbers in this order (fewer: the rest standard for its sex). Sex 0 a man … 1 a woman; height in mm (standing
+// straight, sole to crown); build to head as parts of the standard for its sex (1 = standard); the rest the pose, in
+// degrees: the head's nod, turn and tilt; the torso's bend, twist and lean; each arm's raise (out to the side), forward
+// and elbow; each leg's hip (forward), out and knee. A mesh body, the same at any detail; a draft is coarser and
+// quicker, for showing while a number is dragged.
+enum {
+  BK_FIG_SEX, BK_FIG_HEIGHT, BK_FIG_BUILD, BK_FIG_MUSCLE, BK_FIG_SHOULDERS, BK_FIG_CHEST, BK_FIG_WAIST, BK_FIG_HIPS, BK_FIG_ARMS,
+  BK_FIG_LEGS, BK_FIG_HEAD, BK_FIG_NOD, BK_FIG_TURN, BK_FIG_TILT, BK_FIG_BEND, BK_FIG_TWIST, BK_FIG_LEAN, BK_FIG_LEFT_RAISE,
+  BK_FIG_LEFT_FORWARD, BK_FIG_LEFT_ELBOW, BK_FIG_RIGHT_RAISE, BK_FIG_RIGHT_FORWARD, BK_FIG_RIGHT_ELBOW, BK_FIG_LEFT_HIP,
+  BK_FIG_LEFT_OUT, BK_FIG_LEFT_KNEE, BK_FIG_RIGHT_HIP, BK_FIG_RIGHT_OUT, BK_FIG_RIGHT_KNEE, BK_FIG_COUNT
+};
+enum { BK_POSE_STAND, BK_POSE_T, BK_POSE_WALK, BK_POSE_SIT, BK_POSE_WAVE, BK_POSE_COUNT };
+// The standard numbers for a man (sex 0) or a woman (1), standing (BK_FIG_COUNT of them).
+void bk_figure_defaults(double sex, double *out);
+// The least and the most a number may be (out[0], out[1]).
+void bk_figure_range(int field, double *out);
+// A pose's numbers set (the body's kept); which pose the numbers are in (-1: none of them).
+void bk_figure_pose(int pose, double *params);
+int bk_figure_pose_of(const double *params, int count);
+BKShape *bk_figure(const double *params, int count, int draft);
+// Its box (out[0…2], as its mesh's to the bit) and the point between its hips on the ground (out[3…5], from the box's
+// middle), worked out at once without making it: 0 when the numbers aren't a figure's.
+int bk_figure_extent(const double *params, int count, double *out);
+
 // m = row-major 3x4 affine matrix (rotation·scale | translation).
 BKShape *bk_transform(const BKShape *s, const double *m);
 BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b);

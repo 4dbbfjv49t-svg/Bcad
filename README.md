@@ -14,7 +14,7 @@ On macOS 26 with Xcode 26: `./build.sh` (installs `/Applications/Bcad.app`), or 
 
 ## Test
 - `./test/engine.sh`: the engine against exact maths (Linux or macOS).
-- `./test/corpus.sh`: 451 saved cases; `--perturb` also tries each one moved, turned and rescaled.
+- `./test/corpus.sh`: 456 saved cases; `--perturb` also tries each one moved, turned and rescaled.
 - `./test/selftest.sh`: the app's own checks (macOS): kernel, files, editing, mouse.
 - `python3 test/printcheck.py DIR`: the self-test's print samples read as slicers read them (needs `lib3mf trimesh numpy`).
 - `./test/slicers.sh DIR`: the samples opened in Bambu Studio, PrusaSlicer and Cura's engine.

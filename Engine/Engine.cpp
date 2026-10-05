@@ -5,6 +5,7 @@
 #include "Engine/Bolts.hpp"
 #include "Engine/Distance.hpp"
 #include "Engine/Fasteners.hpp"
+#include "Engine/Figure.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Print.hpp"
 #include "Engine/Sculpt.hpp"
@@ -54,6 +55,42 @@ BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *
   auto m = meshModel(pts, tris, why);
   if (!m) return lastError = "mesh: " + why, nullptr;
   return new BKShape{shapeOf(m)};
+}
+
+void bk_figure_defaults(double sex, double *out) {
+  if (out) figureDefaults(sex, out);
+}
+
+void bk_figure_range(int field, double *out) {
+  if (out) figureRange(field, out[0], out[1]);
+}
+
+void bk_figure_pose(int pose, double *params) {
+  if (params) figurePose(pose, params);
+}
+
+int bk_figure_pose_of(const double *params, int count) {
+  FigureSpec s;
+  std::string why;
+  return figureSpec(params, count, s, why) ? figurePoseOf(s.v) : -1;
+}
+
+BKShape *bk_figure(const double *params, int count, int draft) {
+  FigureSpec spec;
+  Shape s;
+  std::string why;
+  if (!figureSpec(params, count, spec, why) || !figure(spec, draft != 0, s, why)) return lastError = why, nullptr;
+  return new BKShape{s};
+}
+
+int bk_figure_extent(const double *params, int count, double *out) {
+  FigureSpec spec;
+  std::string why;
+  if (!out || !figureSpec(params, count, spec, why)) return 0;
+  V3 size, anchor;
+  figureBox(spec, size, anchor);
+  for (int a = 0; a < 3; a++) out[a] = size[a], out[3 + a] = anchor[a];
+  return 1;
 }
 
 BKShape *bk_transform(const BKShape *s, const double *m) {

@@ -26,6 +26,15 @@ bool selfCrossing(const std::vector<V3> &pts, const std::vector<uint32_t> &tris)
 bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double t, std::vector<V3> &outPts,
                   std::vector<uint32_t> &outTris, std::string &why);
 
+// The surface where field(p) crosses 0 (inside where it's below 0), as one closed mesh of triangles facing out: marching
+// cubes on a grid of n points along each axis, h apart, centred on `mid` (the same either side of it to the bit; its
+// outermost points must all be outside). Only blocks of 4 steps a side that block(lo, hi) can't prove all inside (−1) or
+// all outside (+1) are worked out point by point. Where the surface crosses a grid edge is by a straight line between
+// its ends' values; the points are then evened out `passes` times. False with `why` when nothing's inside or it would
+// take more than about `most` triangles.
+bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)> &field, const std::function<int(V3, V3)> &block, int passes,
+                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most = 1500000);
+
 // A body being sculpted: its mesh (points shared, closed) shaped by strokes of a brush, each stroke undone and done again
 // as one. Brushes (as BK_BRUSH_…): grab (the points under it at the start carried along by the drag), draw (raised along
 // the surface's average way out there; carved when inverted), inflate (each point along its own normal), smooth (each

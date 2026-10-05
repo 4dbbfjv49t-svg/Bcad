@@ -2732,6 +2732,220 @@ int main() {
     bk_free(ball);
   }
 
+  // MARK: figures
+  // A man and a woman in every pose, full and as a draft: closed, one piece, taken as a mesh body, its box as worked out
+  // before it's made; standing exactly its height, its soles flat at the bottom, alike across its middle; posed as asked;
+  // the draft as the full one; as fine at any size; the same when made again; merged, cut, hollowed, printed and written
+  // as STEP; quick; refused when its numbers aren't a figure's.
+  {
+    printf("— figures\n");
+    auto vol = [](const BKShape *x) {
+      BKMesh *m = x ? bk_mesh(x, 0.05) : nullptr;
+      double v = m ? m->volume : 0;
+      bk_mesh_free(m);
+      return v;
+    };
+    auto numbers = [](double sex, int pose) {
+      std::vector<double> p(BK_FIG_COUNT);
+      bk_figure_defaults(sex, p.data());
+      if (pose >= 0) bk_figure_pose(pose, p.data());
+      return p;
+    };
+    auto box = [](const BKShape *s, double *bb) { return bk_bounds(s, I, bb); };
+    // Its mesh's every bit (points and triangles).
+    auto hash = [](const BKShape *s) {
+      BKPrintMesh *pm = bk_print_mesh(s);
+      uint64_t h = 1469598103934665603ull;
+      auto mix = [&](const void *d, size_t n) {
+        for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)d)[i]) * 1099511628211ull;
+      };
+      mix(pm->positions, 12 * (size_t)pm->vertexCount), mix(pm->indices, 12 * (size_t)pm->triangleCount);
+      bk_print_mesh_free(pm);
+      return h;
+    };
+    // Defaults, ranges and poses.
+    {
+      std::vector<double> man = numbers(0, -1), woman = numbers(1, -1);
+      bool inRange = true;
+      for (int i = 0; i < BK_FIG_COUNT; i++) {
+        double r[2];
+        bk_figure_range(i, r);
+        inRange = inRange && r[0] <= man[i] && man[i] <= r[1] && r[0] <= woman[i] && woman[i] <= r[1];
+      }
+      bool poses = bk_figure_pose_of(man.data(), BK_FIG_COUNT) == BK_POSE_STAND;
+      for (int p = 0; p < BK_POSE_COUNT; p++) poses = poses && bk_figure_pose_of(numbers(p % 2, p).data(), BK_FIG_COUNT) == p;
+      std::vector<double> t = numbers(0, BK_POSE_T);
+      check("figures: standard numbers in their ranges; each pose known again", inRange && poses && man[BK_FIG_HEIGHT] == 100 && woman[BK_FIG_HEIGHT] == 94 &&
+                                                                                    t[BK_FIG_LEFT_RAISE] == 90 && t[BK_FIG_RIGHT_RAISE] == 90);
+    }
+    // Every pose, both sexes, full and draft.
+    {
+      std::string notes;
+      int made = 0;
+      for (int sex = 0; sex < 2; sex++)
+        for (int pose = 0; pose < BK_POSE_COUNT; pose++)
+          for (int draft = 0; draft < 2; draft++) {
+            std::vector<double> p = numbers(sex, pose);
+            BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, draft);
+            double ext[6], bb[6], sv = 0;
+            std::string why = s ? "" : bk_last_error();
+            BKMesh *m = s ? bk_mesh(s, 0.05) : nullptr;
+            bool ok = s && m && closed(m, sv, why) && bk_figure_extent(p.data(), BK_FIG_COUNT, ext) && box(s, bb) == 1;
+            double off = 0;
+            for (int a = 0; ok && a < 3; a++) off = std::max(off, std::fabs(ext[a] - (bb[3 + a] - bb[a])));
+            ok = ok && off <= 1e-9 * p[BK_FIG_HEIGHT] && (draft || bk_piece_count(s) == 1);
+            // (As a mesh body of its own: its points and triangles taken again.)
+            if (ok && !draft) {
+              BKShape *again = bk_mesh_shape(m->positions, m->vertexCount, m->indices, m->triangleCount);
+              ok = again && near(vol(again), m->volume, 1e-4 * m->volume);
+              if (!again) why = bk_last_error();
+              bk_free(again);
+            }
+            if (!ok) notes += fmt("sex %.0f pose %.0f", sex, pose) + fmt(" draft %.0f: ", draft) + why + fmt(" box off %.3g", off) + " · ";
+            made += ok;
+            bk_mesh_free(m), bk_free(s);
+          }
+      check("figures: a man and a woman in every pose, full and draft: closed, one piece, taken as a mesh body, their box as worked out", made == 20, notes);
+    }
+    // Standing straight: exactly its height, soles flat on the bottom under both feet, alike across x = 0.
+    {
+      std::vector<double> p = numbers(0, -1);
+      for (int i = BK_FIG_NOD; i < BK_FIG_COUNT; i++) p[i] = 0;
+      BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      double bb[6];
+      box(s, bb);
+      BKMesh *m = bk_mesh(s, 0.05);
+      int left = 0, right = 0;
+      for (int i = 0; i < m->vertexCount; i++)
+        if (m->positions[3 * i + 2] <= (float)bb[2] + 1e-4f) (m->positions[3 * i] > 0 ? left : right)++;
+      double at[3] = {0, 0, 0}, nx[3] = {1, 0, 0};
+      BKShape *l = bk_split(s, at, nx, 0), *r = bk_split(s, at, nx, 1);
+      double vl = vol(l), vr = vol(r);
+      check("figures: standing straight, exactly its height, soles flat on the bottom, alike either side", near(bb[5] - bb[2], 100, 1e-9) && near(bb[0], -bb[3], 1e-9) &&
+                                                                                                                 left > 20 && right > 20 && near(vl, vr, 1e-4 * vl),
+            fmt("height %.12f, soles %.0f", bb[5] - bb[2], left) + fmt(" and %.0f points, halves %.3f", right, vl) + fmt(" and %.3f", vr));
+      bk_free(l), bk_free(r), bk_mesh_free(m), bk_free(s);
+    }
+    // Posed as asked: arms out to the sides about as wide as it's tall; sitting about three quarters as tall; one arm
+    // raised widening only its own side.
+    {
+      double stand[6], tpose[6], sit[6], one[6];
+      std::vector<double> p = numbers(0, BK_POSE_STAND);
+      bk_figure_extent(p.data(), BK_FIG_COUNT, stand);
+      bk_figure_extent(numbers(0, BK_POSE_T).data(), BK_FIG_COUNT, tpose);
+      bk_figure_extent(numbers(0, BK_POSE_SIT).data(), BK_FIG_COUNT, sit);
+      p[BK_FIG_RIGHT_RAISE] = 90;
+      bk_figure_extent(p.data(), BK_FIG_COUNT, one);
+      // (The box's +x side from the hips: the left arm's, unchanged.)
+      double leftWas = stand[0] / 2 - stand[3], leftIs = one[0] / 2 - one[3];
+      check("figures: posed as asked (arms out, sitting, one arm raised)", tpose[0] > 95 && tpose[0] < 115 && sit[2] > 70 && sit[2] < 85 &&
+                                                                              one[0] > stand[0] + 30 && near(leftIs, leftWas, 1e-9),
+            fmt("T %.1f wide, sitting %.1f tall", tpose[0], sit[2]) + fmt(", one arm %.1f wide (left side %.6f", one[0], leftIs) + fmt(" was %.6f)", leftWas));
+    }
+    // The draft as the full one; as fine at any size (as many triangles at 60 mm as at 600 mm); the same when made again.
+    {
+      std::vector<double> p = numbers(1, BK_POSE_WALK);
+      BKShape *full = bk_figure(p.data(), BK_FIG_COUNT, 0), *draft = bk_figure(p.data(), BK_FIG_COUNT, 1);
+      double vf = vol(full), vd = vol(draft), bf[6], bd[6];
+      box(full, bf), box(draft, bd);
+      bool sameBox = true;
+      for (int k = 0; k < 6; k++) sameBox = sameBox && bf[k] == bd[k];
+      check("figures: a draft as the full figure (its volume within 3%, the same box)", near(vd, vf, 0.03 * vf) && sameBox, fmt("%.1f vs %.1f mm³", vd, vf));
+      uint64_t first = hash(full);
+      // (Others made in between, so it's made again rather than kept.)
+      for (int k = 0; k < 9; k++) {
+        std::vector<double> q = numbers(k % 2, k % BK_POSE_COUNT);
+        q[BK_FIG_HEIGHT] = 50 + k;
+        bk_free(bk_figure(q.data(), BK_FIG_COUNT, 0));
+      }
+      BKShape *again = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      check("figures: the same to the bit when made again", hash(again) == first);
+      bk_free(again), bk_free(full), bk_free(draft);
+      p[BK_FIG_HEIGHT] = 60;
+      BKShape *small = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      p[BK_FIG_HEIGHT] = 600;
+      BKShape *large = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      BKMesh *ms = bk_mesh(small, 0.05), *ml = bk_mesh(large, 0.05);
+      check("figures: as fine at any size", std::abs(ms->triangleCount - ml->triangleCount) <= 0.02 * ml->triangleCount && ml->triangleCount > 30000 &&
+                                                ml->triangleCount < 120000,
+            fmt("%.0f and %.0f triangles", ms->triangleCount, ml->triangleCount));
+      bk_mesh_free(ms), bk_mesh_free(ml), bk_free(small), bk_free(large);
+    }
+    // Merged onto a base, a peg hole cut up into it, hollowed, printed and written as STEP.
+    {
+      std::vector<double> p = numbers(0, BK_POSE_STAND);
+      BKShape *man = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      double b[3] = {40, 40, 4}, c[2] = {4, 20}, bb[6];
+      box(man, bb);
+      BKShape *base0 = bk_primitive(BK_BOX, b), *peg0 = bk_primitive(BK_CYLINDER, c);
+      double down[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, bb[2] - 1.5}, up[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, bb[2] + 2};
+      BKShape *base = bk_transform(base0, down), *peg = bk_transform(peg0, up);
+      BKShape *onBase = bk_boolean(BK_UNION, man, base), *pegged = onBase ? bk_boolean(BK_SUBTRACT, onBase, peg) : nullptr;
+      BKShape *hollow = bk_hollow(man, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 1.2, nullptr);
+      BKPrintMesh *pm = pegged ? bk_print_mesh(pegged) : nullptr;
+      // (Its volume the mesh's own at the printers' detail, from its points as floats, as the file has them.)
+      BKMesh *fine = pegged ? bk_mesh(pegged, 0.01) : nullptr;
+      double vm = vol(man), vb = vol(onBase), vp = vol(pegged), vh = vol(hollow), vf = 0;
+      for (int t = 0; fine && t < fine->triangleCount; t++) {
+        const float *a = fine->positions + 3 * fine->indices[3 * t], *b = fine->positions + 3 * fine->indices[3 * t + 1], *c = fine->positions + 3 * fine->indices[3 * t + 2];
+        vf += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) + (double)a[1] * ((double)b[2] * c[0] - (double)b[0] * c[2]) +
+               (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+      }
+      bk_mesh_free(fine);
+      std::string path = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/bcad-figure-test.step";
+      const BKShape *one[1] = {pegged};
+      const char *named[1] = {"Man"};
+      bool wrote = pegged && bk_export_step(one, named, 1, path.c_str()) == 1;
+      check("figures: merged onto a base, a peg hole cut into it, hollowed, printed and written as STEP",
+            onBase && pegged && hollow && pm && pm->valid && near(pm->volume, vf, 1e-6 * vf) && vb > vm + 6000 && vp < vb - 30 && vh > 0.2 * vm && vh < 0.8 * vm && wrote,
+            fmt("volumes %.0f, on its base %.0f, pegged %.0f", vm, vb, vp) + fmt(", hollowed %.0f mm³, printed %.3f", vh, pm ? pm->volume : 0) + fmt(" (%.3f)", vf) +
+                (wrote ? "" : std::string(", STEP: ") + bk_last_error()));
+      bk_print_mesh_free(pm);
+      for (BKShape *x : {man, base0, peg0, base, peg, onBase, pegged, hollow}) bk_free(x);
+    }
+    // Quick: made in well under a second (a draft in a few hundredths), and at once when made again.
+    {
+      std::vector<double> p = numbers(1, BK_POSE_STAND);
+      p[BK_FIG_HEIGHT] = 77;
+      auto t0 = std::chrono::steady_clock::now();
+      BKShape *full = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      double tf = ms(t0);
+      p[BK_FIG_HEIGHT] = 78;
+      t0 = std::chrono::steady_clock::now();
+      BKShape *draft = bk_figure(p.data(), BK_FIG_COUNT, 1);
+      double td = ms(t0);
+      p[BK_FIG_HEIGHT] = 77;
+      t0 = std::chrono::steady_clock::now();
+      BKShape *kept = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      double tk = ms(t0);
+      check("figures: made quickly, a draft quicker still, and at once when made again", full && draft && kept && (!timed || (tf < 1000 && td < 120 && tk < 5)),
+            fmt("%.0f ms, draft %.0f ms, again %.2f ms", tf, td, tk));
+      bk_free(full), bk_free(draft), bk_free(kept);
+    }
+    // Refused: numbers that aren't a figure's.
+    {
+      std::vector<double> p = numbers(0, -1);
+      p[BK_FIG_HEIGHT] = NAN;
+      BKShape *a = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      std::string wa = a ? "" : bk_last_error();
+      p[BK_FIG_HEIGHT] = 5;
+      BKShape *b = bk_figure(p.data(), BK_FIG_COUNT, 0);
+      std::string wb = b ? "" : bk_last_error();
+      BKShape *c = bk_figure(nullptr, 3, 0);
+      std::string wc = c ? "" : bk_last_error();
+      double ext[6];
+      check("figures: numbers that aren't a figure's refused", !a && !b && !c && wa == "figure: sizes must be numbers" && wb == "figure: the height is out of its range" &&
+                                                                  wc == "figure: no numbers" && !bk_figure_extent(p.data(), BK_FIG_COUNT, ext),
+            wa + " · " + wb + " · " + wc);
+      // (Fewer numbers: the rest standard.)
+      double two[2] = {1, 80};
+      BKShape *d = bk_figure(two, 2, 1);
+      double bb[6];
+      check("figures: fewer numbers, the rest standard", d && box(d, bb) == 1 && near(bb[5] - bb[2], 80, 1e-9));
+      bk_free(d);
+    }
+  }
+
   // MARK: coverage
   // What the rest leaves out: distances (and the points they're between) on more shapes, sections across a corner, a face,
   // a whole body and a concave edge, edge picks of other shapes, boxes of treated shapes, picks that match nothing, the

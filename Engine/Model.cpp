@@ -687,7 +687,7 @@ std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<
   return m;
 }
 
-std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why) {
+std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why, bool uncrossed) {
   size_t nv = pts.size(), nt = tris.size() / 3;
   if (nv < 4 || nt < 4 || tris.size() % 3) return why = "a mesh needs 4 points and 4 triangles at least", nullptr;
   for (V3 q : pts)
@@ -743,7 +743,7 @@ std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<u
   double v = s.meshVolume();
   if (!(v > 0)) return why = "inside out", nullptr;
   // Passing through itself (a sculpt pulled through itself, pieces overlapping): the solid it encloses, its outer skin.
-  if (selfCrossing(s.p, s.tri)) {
+  if (!uncrossed && selfCrossing(s.p, s.tri)) {
     Solid r = resolved(s);
     double rv = r.meshVolume();
     if (r.tri.empty() || !(rv > 0)) return why = "it passes through itself", nullptr;

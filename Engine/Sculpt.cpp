@@ -33,8 +33,10 @@ struct Grid {
   V3 o;
   double h;
   int n[3];
+  // (Centred: o is the grid's middle, its points the same either side of it to the bit.)
+  bool centred = false;
   size_t index(int i, int j, int k) const { return (size_t)i + (size_t)n[0] * ((size_t)j + (size_t)n[1] * (size_t)k); }
-  double at(int axis, int i) const { return o[axis] + i * h; }
+  double at(int axis, int i) const { return centred ? o[axis] + (double)(2 * i - (n[axis] - 1)) * (0.5 * h) : o[axis] + i * h; }
 };
 
 // The grid's lines along axis a (one through each grid point of the plane across it, by its steps j along b = a + 1 and
@@ -468,7 +470,7 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
   // A grid half the wall apart (coarser where that would take more than 20 million points), over the box and a step
   // round it.
   V3 span = hi - lo;
-  double h = std::max(t / 2, std::cbrt((span.x + t) * (span.y + t) * (span.z + t) / 2e7));
+  double h = std::max(t / 2, trig::cbrt((span.x + t) * (span.y + t) * (span.z + t) / 2e7));
   Grid g;
   g.h = h;
   for (int a = 0; a < 3; a++) g.o[a] = lo[a] - h, g.n[a] = (int)std::ceil(span[a] / h) + 3;
@@ -533,6 +535,86 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
   return true;
 }
 
+bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)> &field, const std::function<int(V3, V3)> &block, int passes,
+                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most) {
+  outPts.clear(), outTris.clear();
+  if (!(h > 0) || !std::isfinite(h) || n[0] < 3 || n[1] < 3 || n[2] < 3) return why = "nothing to make", false;
+  Grid g;
+  g.o = mid, g.h = h, g.centred = true;
+  double cells = 1;
+  for (int a = 0; a < 3; a++) g.n[a] = n[a], cells *= n[a];
+  if (cells > 1e8) return why = "too fine for its size", false;
+  size_t N = (size_t)n[0] * n[1] * n[2];
+  // The field's value at each grid point worked out (NaN: not yet), and which are inside.
+  std::vector<double> val(N, std::numeric_limits<double>::quiet_NaN());
+  std::vector<uint64_t> in((N + 63) / 64, 0);
+  auto point = [&](int i, int j, int k) { return V3{g.at(0, i), g.at(1, j), g.at(2, k)}; };
+  auto value = [&](int i, int j, int k) {
+    double &v = val[g.index(i, j, k)];
+    if (std::isnan(v)) v = field(point(i, j, k));
+    return v;
+  };
+  // In blocks of four steps a side: those proved all inside or all outside taken as that, the rest worked out point by
+  // point (after, so a point a block shares with one worked out has its own value).
+  const int B = 4;
+  int nb[3];
+  for (int a = 0; a < 3; a++) nb[a] = (n[a] - 1 + B - 1) / B;
+  std::vector<int8_t> verdict((size_t)nb[0] * nb[1] * nb[2]);
+  auto span = [&](int b, int a, int &lo, int &hi) { lo = b * B, hi = std::min(n[a] - 1, lo + B); };
+  for (int bk = 0, id = 0; bk < nb[2]; bk++)
+    for (int bj = 0; bj < nb[1]; bj++)
+      for (int bi = 0; bi < nb[0]; bi++, id++) {
+        int i0, i1, j0, j1, k0, k1;
+        span(bi, 0, i0, i1), span(bj, 1, j0, j1), span(bk, 2, k0, k1);
+        verdict[id] = (int8_t)block(point(i0, j0, k0), point(i1, j1, k1));
+        if (verdict[id] >= 0) continue;
+        for (int k = k0; k <= k1; k++)
+          for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++) {
+              size_t q = g.index(i, j, k);
+              in[q >> 6] |= 1ull << (q & 63);
+            }
+      }
+  for (int bk = 0, id = 0; bk < nb[2]; bk++)
+    for (int bj = 0; bj < nb[1]; bj++)
+      for (int bi = 0; bi < nb[0]; bi++, id++) {
+        if (verdict[id]) continue;
+        int i0, i1, j0, j1, k0, k1;
+        span(bi, 0, i0, i1), span(bj, 1, j0, j1), span(bk, 2, k0, k1);
+        for (int k = k0; k <= k1; k++)
+          for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++) {
+              size_t q = g.index(i, j, k);
+              if (value(i, j, k) < 0) in[q >> 6] |= 1ull << (q & 63);
+              else in[q >> 6] &= ~(1ull << (q & 63));
+            }
+      }
+  auto inside = [&](int i, int j, int k) {
+    size_t q = g.index(i, j, k);
+    return (in[q >> 6] >> (q & 63) & 1) != 0;
+  };
+  size_t mixed = 0, inner = 0;
+  for (int k = 0; k + 1 < n[2]; k++)
+    for (int j = 0; j + 1 < n[1]; j++)
+      for (int i = 0; i + 1 < n[0]; i++) {
+        int m = 0;
+        for (int c = 0; c < 8; c++) m |= (int)inside(i + (c & 1), j + (c >> 1 & 1), k + (c >> 2 & 1)) << c;
+        mixed += m != 0 && m != 255, inner += m != 0;
+      }
+  if (!inner) return why = "nothing inside", false;
+  if (4 * mixed > most) return why = "too fine: about " + std::to_string(4 * mixed) + " triangles", false;
+  march(g, inside,
+        [&](int i, int j, int k, int a, bool) {
+          int up[3] = {i, j, k};
+          up[a]++;
+          double f0 = value(i, j, k), f1 = value(up[0], up[1], up[2]);
+          double f = f0 != f1 ? f0 / (f0 - f1) : 0.5;
+          return std::min(0.98, std::max(0.02, f));
+        },
+        4 * mixed, outPts, outTris);
+  relax(outPts, outTris, passes);
+  return true;
+}
 
 // Sculpting.
 

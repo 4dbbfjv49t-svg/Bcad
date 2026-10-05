@@ -228,7 +228,8 @@ std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<El
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
 // A body that is a closed mesh as given (points, and triangles counter-clockwise seen from outside); null with `why` when
 // it isn't one: open, a side run the same way twice, turned inside out, a corner out of range, a point not a number.
-std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why);
+// (`uncrossed`: already known not to pass through itself, so not looked at again.)
+std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::string &why, bool uncrossed = false);
 // A shape of a model, or of two shapes merged (op as BK_UNION …).
 Shape shapeOf(std::shared_ptr<const Model> m, const Affine &place = Affine());
 Shape merged(int op, const Shape &a, const Shape &b);

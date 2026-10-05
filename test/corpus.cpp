@@ -7,7 +7,7 @@
 //               M: the shape so far as a mesh body, its mesh at that detail as a sculpt holds it; R detail ; it remeshed for
 //               sculpting at that detail; D detail brush o(3) w(3) radius strength mirror invert g(3) [local] ; it remeshed
 //               and given a stroke: from where the ray o + t·w meets it, along g, the triangles under it made the local
-//               detail when given)
+//               detail when given); G draft numbers… ; a human figure (BK_FIG_… order, fewer: the rest standard)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -120,6 +120,12 @@ BKShape *build(const std::string &prog, std::string &why) {
       p.resize(std::max<size_t>(p.size(), 8), 0);
       BKShape *s = bk_primitive((int)v[0], p.data());
       if (!s) return fail(std::string("prim: ") + bk_last_error());
+      st.push_back(s);
+    } else if (t == "G") {
+      // A human figure: draft or not, then its numbers as BK_FIG_… (fewer: the rest standard for its sex).
+      if (!need(1)) return fail("figure without its numbers");
+      BKShape *s = bk_figure(v.data() + 1, (int)v.size() - 1, (int)v[0]);
+      if (!s) return fail(bk_last_error());
       st.push_back(s);
     } else if (t == "N") {
       // A bolt or nut: kind, thread, length (0: the usual one), clearance; the other sizes standard for it.
