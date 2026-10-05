@@ -4,7 +4,7 @@ import simd
 
 // The brushes, numbered as the engine knows them (BK_BRUSH_…).
 enum SculptBrush: Int, CaseIterable {
-    case grab, draw, inflate, smooth, flatten, pinch, crease
+    case grab, draw, inflate, smooth, flatten, pinch, crease, detail
 
     var name: String {
         switch self {
@@ -15,6 +15,7 @@ enum SculptBrush: Int, CaseIterable {
         case .flatten: "Flatten"
         case .pinch: "Pinch"
         case .crease: "Crease"
+        case .detail: "Detail"
         }
     }
 
@@ -27,6 +28,7 @@ enum SculptBrush: Int, CaseIterable {
         case .flatten: "Levels the surface"
         case .pinch: "Draws the surface together · ⌥ spreads it"
         case .crease: "Cuts a sharp groove · ⌥ makes a ridge"
+        case .detail: "Makes the triangles under it the Detail size · the surface stays where it is"
         }
     }
 
@@ -39,16 +41,17 @@ struct SculptRing: Equatable {
     var normal: SIMD3<Double>
 }
 
-// A body being sculpted: the engine's mesh of it as it is now (its points and normals change with every stroke, its
-// triangles never), the strokes made on it to undo, and which points changed, in order, for the view to catch up with.
+// A body being sculpted: the engine's mesh of it as it is now (its points and normals change with every stroke; with a
+// detail set under the brush its triangles too, points and triangles coming and going in slots), the strokes made on it
+// to undo, and which points and triangles changed, in order, for the view to catch up with.
 final class SculptSession {
     private let ptr: OpaquePointer
     // The detail it was made at (mm), and its largest side.
     let detail: Double
     let size: Double
-    let vertexCount: Int
-    let triangleCount: Int
-    // Points changed, in the order they changed; how many changes came before the first of them.
+    // Changes, in the order they happened: a point's slot, or a triangle's with `triangleMark` added; how many changes
+    // came before the first of them.
+    static let triangleMark: UInt32 = 1 << 31
     private var log: [UInt32] = []
     private var logStart = 0
     var logEnd: Int { logStart + log.count }
@@ -60,8 +63,6 @@ final class SculptSession {
         guard let made else { return nil }
         ptr = made
         self.detail = detail
-        vertexCount = d.pointCount
-        triangleCount = d.triangleCount
         var lo = SIMD3<Float>(repeating: .infinity)
         var hi = -lo
         var i = 0
@@ -76,7 +77,12 @@ final class SculptSession {
 
     deinit { bk_sculpt_free(ptr) }
 
-    // 3 floats per point each; 3 point numbers per triangle.
+    // Slots for points and for triangles (they only grow; a free triangle's corners are all 0), and the triangles in use.
+    var vertexCount: Int { Int(bk_sculpt_vertex_count(ptr)) }
+    var triangleCount: Int { Int(bk_sculpt_triangle_count(ptr)) }
+    var liveTriangles: Int { Int(bk_sculpt_live_triangle_count(ptr)) }
+
+    // 3 floats per point each; 3 point numbers per triangle (read again after every change: they move as they grow).
     var positions: UnsafePointer<Float> { bk_sculpt_positions(ptr) }
     var normals: UnsafePointer<Float> { bk_sculpt_normals(ptr) }
     var indices: UnsafePointer<UInt32> { bk_sculpt_indices(ptr) }
@@ -88,6 +94,9 @@ final class SculptSession {
         guard bk_sculpt_ray(ptr, oo, dd, &at, &n) == 1 else { return nil }
         return SculptRing(at: SIMD3(at[0], at[1], at[2]), normal: SIMD3(n[0], n[1], n[2]))
     }
+
+    // The size the strokes begun after make the triangles under them (mm; 0: leaves them as they are).
+    func setDetail(_ d: Double) { bk_sculpt_set_detail(ptr, d) }
 
     func begin(_ b: SculptBrush, at p: SIMD3<Double>, radius: Double, strength: Double, mirror: Bool, invert: Bool) {
         let a = [p.x, p.y, p.z]
@@ -120,49 +129,62 @@ final class SculptSession {
     }
 
     private func sync() {
-        let n = Int(bk_sculpt_sync(ptr))
-        guard n > 0, let c = bk_sculpt_changed(ptr) else { return }
+        let n = Int(bk_sculpt_sync(ptr)), m = Int(bk_sculpt_changed_triangle_count(ptr))
+        guard n + m > 0 else { return }
         // (Long after, the view takes it all again rather than every change one by one.)
-        if log.count + n > 2 * vertexCount {
+        if log.count + n + m > 2 * (vertexCount + triangleCount) {
             logStart += log.count
             log.removeAll(keepingCapacity: true)
         }
-        log.append(contentsOf: UnsafeBufferPointer(start: c, count: n))
+        if n > 0, let c = bk_sculpt_changed(ptr) { log.append(contentsOf: UnsafeBufferPointer(start: c, count: n)) }
+        if m > 0, let t = bk_sculpt_changed_triangles(ptr) {
+            log.append(contentsOf: UnsafeBufferPointer(start: t, count: m).lazy.map { $0 | Self.triangleMark })
+        }
     }
 
-    // The points changed since a reader's place among the changes; nil when those are forgotten (it reads all again).
+    // What changed since a reader's place among the changes; nil when those are forgotten (it reads all again).
     func changes(since k: Int) -> ArraySlice<UInt32>? {
         guard k >= logStart, k <= logEnd else { return nil }
         return log[(k - logStart)...]
     }
 
-    // Its mesh as the document keeps it.
+    // Its mesh as the document keeps it: the points in use and the triangles, renumbered.
     func data() -> SculptData {
-        SculptData(positions: Array(UnsafeBufferPointer(start: positions, count: 3 * vertexCount)),
-                   indices: Array(UnsafeBufferPointer(start: indices, count: 3 * triangleCount)))
+        guard let c = bk_sculpt_mesh(ptr) else { return SculptData(positions: [], indices: []) }
+        defer { bk_sculpt_mesh_free(c) }
+        return SculptData(positions: Array(UnsafeBufferPointer(start: c.pointee.positions, count: 3 * Int(c.pointee.vertexCount))),
+                          indices: Array(UnsafeBufferPointer(start: c.pointee.indices, count: 3 * Int(c.pointee.triangleCount))))
     }
 
     // Shown as its body's mesh (one smooth face) until the kernel's own takes its place.
     func mesh() -> Mesh {
         var m = Mesh()
-        let p = positions, n = normals
-        m.vertices = (0..<vertexCount).map { SIMD4(p[3 * $0], p[3 * $0 + 1], p[3 * $0 + 2], 0) }
-        m.normals = (0..<vertexCount).map { SIMD4(n[3 * $0], n[3 * $0 + 1], n[3 * $0 + 2], 0) }
-        m.indices = Array(UnsafeBufferPointer(start: indices, count: 3 * triangleCount))
+        let d = data(), p = d.positions
+        let count = p.count / 3
+        m.vertices = (0..<count).map { SIMD4(p[3 * $0], p[3 * $0 + 1], p[3 * $0 + 2], 0) }
+        m.indices = d.indices
+        // Each point's normal (its triangles' own, by their areas), and the volume.
+        var sums = [SIMD3<Float>](repeating: .zero, count: count)
+        var signed = 0.0
+        var t = 0
+        while t + 2 < m.indices.count {
+            let i = Int(m.indices[t]), j = Int(m.indices[t + 1]), k = Int(m.indices[t + 2])
+            let a = m.vertices[i].xyz, b = m.vertices[j].xyz, c = m.vertices[k].xyz
+            let f = cross(b - a, c - a)
+            sums[i] += f
+            sums[j] += f
+            sums[k] += f
+            signed += Double(dot(a, cross(b, c))) / 6
+            t += 3
+        }
+        m.normals = sums.map { f -> SIMD4<Float> in length(f) > 0 ? SIMD4(normalize(f), 0) : .zero }
         var lo = SIMD3<Float>(repeating: .infinity)
         var hi = -lo
         for v in m.vertices {
             lo = simd_min(lo, v.xyz)
             hi = simd_max(hi, v.xyz)
         }
-        var signed = 0.0
-        var t = 0
-        while t + 2 < m.indices.count {
-            let a = m.vertices[Int(m.indices[t])].xyz, b = m.vertices[Int(m.indices[t + 1])].xyz, c = m.vertices[Int(m.indices[t + 2])].xyz
-            signed += Double(dot(a, cross(b, c))) / 6
-            t += 3
-        }
-        if vertexCount > 0 {
+        if count > 0 {
             m.low = SIMD3<Double>(lo)
             m.high = SIMD3<Double>(hi)
         }

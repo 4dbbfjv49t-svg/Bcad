@@ -1936,13 +1936,16 @@ final class Workbench: DesignHost {
     var thread = Fastener(kind: .hex, size: 4)
     // Sculpt: the body being shaped and the engine's live mesh of it (strokes change it at once; the document has it only
     // on Done, and it's shown in the body's place meanwhile), the sessions a Remesh replaced and those an undo of one
-    // put aside, the brush and its sizes, the detail Remesh makes it again at, and whether that's under way.
+    // put aside, the brush and its sizes, the detail Remesh makes it again at (and every brush makes the triangles under
+    // it, with `sculptLocal`), how many triangles it has, and whether that's under way.
     var sculptBody: UUID?
     var sculpt: SculptSession?
     @ObservationIgnored private var sculptPast: [SculptSession] = []
     @ObservationIgnored private var sculptAhead: [SculptSession] = []
     var sculptStrokes = 0
     var sculptDetail = 1.0
+    var sculptLocal = false
+    var sculptTriangles = 0
     var sculptBusy = false
     var sculptBrush = SculptBrush.draw
     var sculptRadius = 3.0
@@ -3151,7 +3154,14 @@ final class Workbench: DesignHost {
         sculpt = s
         sculptDetail = s.detail
         sculptRing = nil
+        countSculpt()
         sceneVersion += 1
+    }
+
+    // (Only when it changed: the bar isn't drawn again for every dab.)
+    private func countSculpt() {
+        let n = sculpt?.liveTriangles ?? 0
+        if n != sculptTriangles { sculptTriangles = n }
     }
 
     // Makes `node` (or a sculpted body's own mesh, `from`) ready to sculpt at `detail`, its stretch taken in, on the
@@ -3199,20 +3209,25 @@ final class Workbench: DesignHost {
         let brush = smooth ? .smooth : sculptBrush
         // A new stroke after undoing a Remesh: that Remesh can't be done again.
         sculptAhead = []
+        // The triangles under it made the Detail size with the switch on (the Detail brush does only that).
+        s.setDetail(sculptLocal || brush == .detail ? sculptDetail : 0)
         s.begin(brush, at: p, radius: sculptRadius, strength: sculptStrength, mirror: sculptMirror, invert: invert)
         s.dab(p, pressure: pressure, size: size)
+        countSculpt()
         sceneVersion += 1
         return brush
     }
 
     func sculptDab(at p: SIMD3<Double>, pressure: Double = 1, size: Double = 1) {
         sculpt?.dab(p, pressure: pressure, size: size)
+        countSculpt()
         sceneVersion += 1
     }
 
     func sculptEnd() {
         sculpt?.end()
         sculptStrokes += 1
+        countSculpt()
         sceneVersion += 1
     }
 
@@ -3221,6 +3236,7 @@ final class Workbench: DesignHost {
         guard let s = sculpt, !sculptBusy else { return }
         if s.undo() {
             sculptStrokes += 1
+            countSculpt()
             sceneVersion += 1
         } else if let before = sculptPast.popLast() {
             sculptAhead.append(s)
@@ -3232,6 +3248,7 @@ final class Workbench: DesignHost {
         guard let s = sculpt, !sculptBusy else { return }
         if s.redo() {
             sculptStrokes += 1
+            countSculpt()
             sceneVersion += 1
         } else if let after = sculptAhead.popLast() {
             sculptPast.append(s)

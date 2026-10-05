@@ -250,25 +250,27 @@ final class Renderer: NSObject, MTKViewDelegate {
         return g
     }
 
-    // The live mesh of the body being sculpted, in two sets of buffers taken in turn: the points changed since a set was
-    // last written go into the one the GPU isn't reading, and that one is drawn (the other catches up on its next turn).
+    // The live mesh of the body being sculpted, in two sets of buffers taken in turn: what changed since a set was last
+    // written (points, and triangles as the brush makes and merges them) goes into the one the GPU isn't reading, and
+    // that one is drawn (the other catches up on its next turn). With room to grow: made new, half as large again, when
+    // the mesh outgrows it.
     private final class SculptGPU {
         // (Held weakly: a session made later may sit where a freed one was, and mustn't be taken for it.)
         weak var owner: SculptSession?
-        let vertexCount: Int
-        let pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer
-        let count: Int
+        let pointRoom: Int, triangleRoom: Int
+        let pos: [MTLBuffer], nrm: [MTLBuffer], idx: [MTLBuffer]
+        var count = [0, 0]  // each set's triangle slots, 3 each
         var applied = [-1, -1]  // how far into the session's changes each set is (-1: nothing in it yet)
         var current = 0
         let reading = Readers()
 
-        init(owner: SculptSession, pos: [MTLBuffer], nrm: [MTLBuffer], idx: MTLBuffer, count: Int) {
+        init(owner: SculptSession, pointRoom: Int, triangleRoom: Int, pos: [MTLBuffer], nrm: [MTLBuffer], idx: [MTLBuffer]) {
             self.owner = owner
-            vertexCount = owner.vertexCount
+            self.pointRoom = pointRoom
+            self.triangleRoom = triangleRoom
             self.pos = pos
             self.nrm = nrm
             self.idx = idx
-            self.count = count
         }
     }
 
@@ -291,14 +293,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var sculptGPU: SculptGPU?
 
     private func sculptBody(_ s: SculptSession, _ cmd: MTLCommandBuffer) -> GPUBody? {
-        if sculptGPU?.owner !== s || sculptGPU?.vertexCount != s.vertexCount {
+        let points = s.vertexCount, triangles = s.triangleCount
+        if sculptGPU?.owner !== s || points > (sculptGPU?.pointRoom ?? 0) || triangles > (sculptGPU?.triangleRoom ?? 0) {
             sculptGPU = nil
-            let n = s.vertexCount * 16
-            guard n > 0, s.triangleCount > 0,
-                  let p0 = device.makeBuffer(length: n, options: .storageModeShared), let p1 = device.makeBuffer(length: n, options: .storageModeShared),
-                  let n0 = device.makeBuffer(length: n, options: .storageModeShared), let n1 = device.makeBuffer(length: n, options: .storageModeShared),
-                  let ib = device.makeBuffer(bytes: s.indices, length: s.triangleCount * 12, options: .storageModeShared) else { return nil }
-            sculptGPU = SculptGPU(owner: s, pos: [p0, p1], nrm: [n0, n1], idx: ib, count: 3 * s.triangleCount)
+            let pr = points * 3 / 2, tr = triangles * 3 / 2
+            func make(_ length: Int) -> MTLBuffer? { device.makeBuffer(length: length, options: .storageModeShared) }
+            guard points > 0, triangles > 0, let p0 = make(pr * 16), let p1 = make(pr * 16), let n0 = make(pr * 16), let n1 = make(pr * 16),
+                  let i0 = make(tr * 12), let i1 = make(tr * 12) else { return nil }
+            sculptGPU = SculptGPU(owner: s, pointRoom: pr, triangleRoom: tr, pos: [p0, p1], nrm: [n0, n1], idx: [i0, i1])
         }
         guard let g = sculptGPU else { return nil }
         let next = 1 - g.current
@@ -314,23 +316,35 @@ final class Renderer: NSObject, MTKViewDelegate {
         g.reading.add(k, 1)
         let r = g.reading
         cmd.addCompletedHandler { _ in r.add(k, -1) }
-        return GPUBody(stamp: 0, dark: Skin.shared.dark, pos: g.pos[k], nrm: g.nrm[k], idx: g.idx, count: g.count, edges: nil, edgeCount: 0)
+        return GPUBody(stamp: 0, dark: Skin.shared.dark, pos: g.pos[k], nrm: g.nrm[k], idx: g.idx[k], count: g.count[k], edges: nil, edgeCount: 0)
     }
 
     private func write(_ s: SculptSession, into g: SculptGPU, _ k: Int) {
-        let pos = g.pos[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: s.vertexCount)
-        let nrm = g.nrm[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: s.vertexCount)
-        let p = s.positions, n = s.normals
+        let points = s.vertexCount, triangles = s.triangleCount
+        let pos = g.pos[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: g.pointRoom)
+        let nrm = g.nrm[k].contents().bindMemory(to: SIMD4<Float>.self, capacity: g.pointRoom)
+        let idx = g.idx[k].contents().bindMemory(to: UInt32.self, capacity: 3 * g.triangleRoom)
+        let p = s.positions, n = s.normals, t = s.indices
         func put(_ i: Int) {
             pos[i] = SIMD4(p[3 * i], p[3 * i + 1], p[3 * i + 2], 0)
             nrm[i] = SIMD4(n[3 * i], n[3 * i + 1], n[3 * i + 2], 0)
         }
-        if g.applied[k] >= 0, let changed = s.changes(since: g.applied[k]), changed.count < s.vertexCount {
-            for i in changed { put(Int(i)) }
+        func putTriangle(_ i: Int) {
+            idx[3 * i] = t[3 * i]
+            idx[3 * i + 1] = t[3 * i + 1]
+            idx[3 * i + 2] = t[3 * i + 2]
+        }
+        let mark = SculptSession.triangleMark
+        if g.applied[k] >= 0, let changed = s.changes(since: g.applied[k]), changed.count < points + triangles {
+            for c in changed {
+                if c & mark != 0 { putTriangle(Int(c & ~mark)) } else { put(Int(c)) }
+            }
         } else {
-            for i in 0..<s.vertexCount { put(i) }
+            for i in 0..<points { put(i) }
+            for i in 0..<triangles { putTriangle(i) }
         }
         g.applied[k] = s.logEnd
+        g.count[k] = 3 * triangles
     }
 
     // The brush where the pointer is on the surface, and (with the mirror on) where it works across it.

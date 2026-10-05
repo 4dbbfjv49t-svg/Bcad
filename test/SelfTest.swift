@@ -1347,6 +1347,7 @@ enum SelfTest {
         // Sculpt: a stretched box made ready to sculpt (its stretch taken into its mesh) and made again coarser; strokes
         // through the pointer on the 3D view (Draw raises the top, Grab with the mirror pulls up both ends alike, a drag
         // beside the body turns the view instead), each taken back with ⌘Z and done again with ⇧⌘Z, and the Remesh too;
+        // strokes making the triangles under them finer (Under the brush, and the Detail brush);
         // Done (one step to undo, the body now that mesh, its scale taken in), saved and opened again the same (as a
         // version 2 file); Esc after a stroke leaves a body as it was.
         do {
@@ -1459,6 +1460,7 @@ enum SelfTest {
                 cg.setDoubleValueField(.tabletEventPointPressure, value: pressure)
                 return NSEvent(cgEvent: cg)
             }
+            lib.sculptLocal = false
             let pen = tablet(0.25).map { CadView.pen($0, lib.settings) }, mouse = CadView.pen(event(.leftMouseDown, .zero, []), lib.settings)
             let h0 = top(-8, 5)
             lib.sculptBegin(at: SIMD3(-8, 5, h0), smooth: false, invert: false, pressure: pen?.pressure ?? 1)
@@ -1472,6 +1474,31 @@ enum SelfTest {
             check("a tablet pen's pressure: pressed at a quarter, a quarter as strong (a mouse, full)", abs((pen?.pressure ?? 0) - 0.25) < 0.01 &&
                   pen?.size == 1 && mouse == (1, 1) && firm > 0.05 && abs(light / firm - 0.25) < 0.02 && abs(top(-8, 5) - h0) < 1e-4,
                   "pen \(String(describing: pen)), \(light) of \(firm)")
+
+            // Under the brush: with the switch on, a stroke makes the triangles it passes over the Detail size (more of them
+            // there; ⌘Z takes them back exactly, ⇧⌘Z makes them again); the Detail brush does only that, the surface staying
+            // where it is (the switch off: it needs none).
+            lib.sculptLocal = true
+            lib.sculptDetail = 0.4
+            let coarse = lib.sculptTriangles, h1 = top(4, -4)
+            lib.sculptBegin(at: SIMD3(4, -4, h1), smooth: false, invert: false)
+            lib.sculptDab(at: SIMD3(6, -4, top(6, -4)))
+            lib.sculptEnd()
+            let fine = lib.sculptTriangles
+            lib.undo()
+            let unrefined = lib.sculptTriangles, flatAgain = abs(top(4, -4) - h1) < 1e-4
+            lib.redo()
+            check("Under the brush: a stroke makes the triangles it passes over finer; ⌘Z takes them back, ⇧⌘Z makes them again",
+                  fine > coarse + 100 && unrefined == coarse && flatAgain && lib.sculptTriangles == fine && top(4, -4) > h1 + 0.1,
+                  "\(coarse) → \(fine) → \(unrefined) → \(lib.sculptTriangles)")
+            lib.sculptLocal = false
+            lib.sculptBrush = .detail
+            let h2 = top(-5, -3), before = lib.sculptTriangles
+            lib.sculptBegin(at: SIMD3(-5, -3, h2), smooth: false, invert: false)
+            lib.sculptEnd()
+            check("the Detail brush makes the triangles under it finer, the surface where it was", lib.sculptTriangles > before + 100 &&
+                  abs(top(-5, -3) - h2) < 0.02, "\(before) → \(lib.sculptTriangles), \(h2) → \(top(-5, -3))")
+            lib.sculptBrush = .draw
 
             let shaped = lib.sculpt?.data()
             lib.commitSculpt()

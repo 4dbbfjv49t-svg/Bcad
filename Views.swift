@@ -589,8 +589,8 @@ struct ModeBar: View {
             .disabled(lib.editBody == nil)
     }
 
-    // The brushes and the mirror; the brush's size and strength, the detail to make it again at, Remesh, how many
-    // triangles it has, Done.
+    // The brushes and the mirror; the brush's size and strength, the detail to make it again at (and, switched on, to
+    // make the triangles under every brush), Remesh, how many triangles it has, Done.
     @ViewBuilder private var sculpt: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
@@ -609,12 +609,14 @@ struct ModeBar: View {
                 MMField(value: lib.sculptStrength * 100, unit: "%", range: 1...100, width: 52) { lib.sculptStrength = $0 / 100 }
                 Text(L("Detail")).foregroundStyle(Ink.text.opacity(0.55))
                 MMField(value: lib.sculptDetail, unit: L("mm"), range: 0.05...20, width: 58) { lib.sculptDetail = $0 }
+                Chip(text: L("Under the brush"), chosen: lib.sculptLocal, tint: lib.accent2) { lib.sculptLocal.toggle() }
+                    .help(L("Every brush makes the triangles it passes over the Detail size: finer where you work, the rest as it is"))
                 Button(L("Remesh")) { lib.remeshSculpt() }
                     .buttonStyle(PillStyle(tint: lib.accent2))
                     .frame(width: 90)
                     .disabled(lib.sculptBusy || lib.sculpt == nil)
-                if let s = lib.sculpt {
-                    Text(L("{n} triangles", ["n": s.triangleCount])).foregroundStyle(Ink.text.opacity(0.55)).monospacedDigit()
+                if lib.sculpt != nil {
+                    Text(L("{n} triangles", ["n": lib.sculptTriangles])).foregroundStyle(Ink.text.opacity(0.55)).monospacedDigit()
                         .contentTransition(.numericText())
                 }
                 Button(L("Done")) { lib.commitSculpt() }
