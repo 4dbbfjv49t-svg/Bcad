@@ -74,29 +74,43 @@ BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail);
 void bk_sculpt_mesh_free(BKSculptMesh *m);
 
 // A sculpted body being shaped (Engine/Sculpt.hpp): made from its mesh, read back at any time as floats (positions and
-// normals 3 per point; the triangles never change). Strokes of a brush, each undone and redone as one: begun where it
+// normals 3 per point; the triangles change only with a detail size set, below). Strokes of a brush, each undone and redone as one: begun where it
 // starts on the surface, dabbed along its way (a pen's pressure scaling each dab's strength, and its size the radius:
 // 0…1, both 1 for a mouse), ended. Radius in mm; strength 0…1; mirror does the same across x = 0; invert carves instead
 // of raising (and so on). NULL when the mesh is broken.
-enum { BK_BRUSH_GRAB, BK_BRUSH_DRAW, BK_BRUSH_INFLATE, BK_BRUSH_SMOOTH, BK_BRUSH_FLATTEN, BK_BRUSH_PINCH, BK_BRUSH_CREASE };
+enum { BK_BRUSH_GRAB, BK_BRUSH_DRAW, BK_BRUSH_INFLATE, BK_BRUSH_SMOOTH, BK_BRUSH_FLATTEN, BK_BRUSH_PINCH, BK_BRUSH_CREASE, BK_BRUSH_DETAIL };
 typedef struct BKSculpt BKSculpt;
 BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount);
 void bk_sculpt_free(BKSculpt *s);
 // Where the ray (origin, direction: 3 each) first meets the surface: 1 with the point and the surface's normal there.
 int bk_sculpt_ray(const BKSculpt *s, const double *origin, const double *direction, double *at, double *normal);
+// With a detail size (mm; 0: off), every stroke begun after also makes the triangles it passes over that size (as fine
+// as a remesh at that detail): long sides halved, short ones merged away, thin triangles' sides turned (grab: when its
+// drag ends). BK_BRUSH_DETAIL does only
+// that, leaving the surface where it is. The mesh's points and triangles are then kept in slots that come and go: counts
+// and arrays below are per slot (a free triangle slot's corners all 0), and grow.
+void bk_sculpt_set_detail(BKSculpt *s, double size);
 void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert);
 void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size);
 void bk_sculpt_end(BKSculpt *s);
 int bk_sculpt_undo(BKSculpt *s);  // 1 when there was a stroke to undo
 int bk_sculpt_redo(BKSculpt *s);
-// Brings the floats up to date: how many points moved or turned since last asked, and which (in order, until next asked).
+// Brings the floats up to date: how many points moved or turned since last asked, and which (in order, until next asked);
+// the same for the triangles' slots.
 int bk_sculpt_sync(BKSculpt *s);
 const uint32_t *bk_sculpt_changed(const BKSculpt *s);
+int bk_sculpt_changed_triangle_count(const BKSculpt *s);
+const uint32_t *bk_sculpt_changed_triangles(const BKSculpt *s);
 int bk_sculpt_vertex_count(const BKSculpt *s);
 int bk_sculpt_triangle_count(const BKSculpt *s);
+int bk_sculpt_live_triangle_count(const BKSculpt *s);
 const float *bk_sculpt_positions(const BKSculpt *s);
 const float *bk_sculpt_normals(const BKSculpt *s);
 const uint32_t *bk_sculpt_indices(const BKSculpt *s);
+// The mesh as it is now, its points in use renumbered (free with bk_sculpt_mesh_free): what a body is made of.
+BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s);
+// What's wrong with its links ("" when nothing): for tests.
+const char *bk_sculpt_check(const BKSculpt *s);
 
 // m = row-major 3x4 affine matrix (rotation·scale | translation).
 BKShape *bk_transform(const BKShape *s, const double *m);

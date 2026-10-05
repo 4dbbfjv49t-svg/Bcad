@@ -2435,6 +2435,303 @@ int main() {
     bk_free(box), bk_free(ball);
   }
 
+  // MARK: local detail
+  // The triangles under the brush made the detail size (dynamic topology): a coarse ball refined under the Detail brush,
+  // the surface where it was and nothing further touched; a second pass changing nothing; as fine as a remesh at that
+  // detail; a fine ball made coarser; Draw, the mirror and Grab with it; strokes undone and done again to the bit, and the
+  // same whatever was undone before; quick; a long run of random strokes, undos and redos keeping the mesh sound.
+  {
+    printf("— local detail\n");
+    using bce::V3;
+    struct Shape {
+      std::vector<V3> p;
+      std::vector<uint32_t> t;
+      bool operator==(const Shape &o) const { return t == o.t && p.size() == o.p.size() && std::equal(p.begin(), p.end(), o.p.begin(), [](V3 a, V3 b) { return a == b; }); }
+    };
+    auto ready = [](const BKShape *x, double detail) {
+      BKSculptMesh *r = x ? bk_remesh(x, I, detail) : nullptr;
+      BKSculpt *s = r ? bk_sculpt_new(r->positions, r->vertexCount, r->indices, r->triangleCount) : nullptr;
+      bk_sculpt_mesh_free(r);
+      return s;
+    };
+    auto now = [](const BKSculpt *s) {
+      Shape m;
+      BKSculptMesh *c = bk_sculpt_mesh(s);
+      for (int i = 0; i < c->vertexCount; i++) m.p.push_back({c->positions[3 * i], c->positions[3 * i + 1], c->positions[3 * i + 2]});
+      m.t.assign(c->indices, c->indices + 3 * c->triangleCount);
+      bk_sculpt_mesh_free(c);
+      return m;
+    };
+    // Sound: its links whole, and taken as a body.
+    auto sound = [](const BKSculpt *s, std::string &why) {
+      why = bk_sculpt_check(s);
+      if (!why.empty()) return false;
+      BKSculptMesh *c = bk_sculpt_mesh(s);
+      BKShape *x = bk_mesh_shape(c->positions, c->vertexCount, c->indices, c->triangleCount);
+      if (!x) why = bk_last_error();
+      bool ok = x != nullptr;
+      bk_free(x), bk_sculpt_mesh_free(c);
+      return ok;
+    };
+    auto volumeOf = [](const BKSculpt *s) {
+      BKSculptMesh *c = bk_sculpt_mesh(s);
+      BKShape *x = bk_mesh_shape(c->positions, c->vertexCount, c->indices, c->triangleCount);
+      BKMesh *m = x ? bk_mesh(x, 0.05) : nullptr;
+      double v = m ? m->volume : 0;
+      bk_mesh_free(m), bk_free(x), bk_sculpt_mesh_free(c);
+      return v;
+    };
+    auto stroke = [](BKSculpt *s, int brush, V3 from, std::vector<V3> to, double radius, double strength = 0.5, bool mirror = false, bool invert = false) {
+      double a[3] = {from.x, from.y, from.z};
+      bk_sculpt_begin(s, brush, a, radius, strength, mirror, invert);
+      for (V3 q : to) {
+        double b[3] = {q.x, q.y, q.z};
+        bk_sculpt_dab(s, b, 1, 1);
+      }
+      bk_sculpt_end(s);
+      bk_sculpt_sync(s);
+    };
+    auto onTop = [](const BKSculpt *s, double x, double y) {
+      double o[3] = {x, y, 100}, d[3] = {0, 0, -1}, at[3] = {x, y, NAN}, n[3];
+      bk_sculpt_ray(s, o, d, at, n);
+      return V3{at[0], at[1], at[2]};
+    };
+    // Triangles (by their middles) within r of c, and their mean area.
+    auto under = [](const Shape &m, V3 c, double r, double *area = nullptr) {
+      int count = 0;
+      double sum = 0;
+      for (size_t k = 0; k < m.t.size(); k += 3) {
+        V3 a = m.p[m.t[k]], b = m.p[m.t[k + 1]], d = m.p[m.t[k + 2]];
+        if (bce::norm((a + b + d) / 3 - c) >= r) continue;
+        count++, sum += bce::norm(bce::cross(b - a, d - a)) / 2;
+      }
+      if (area) *area = count ? sum / count : 0;
+      return count;
+    };
+    double d30[1] = {30};
+    BKShape *ball = bk_primitive(BK_SPHERE, d30);
+    const double L = 0.5, sideOf = 0.88, hi = L * sideOf * 4 / 3;
+    std::string why;
+
+    // The Detail brush on a coarse ball.
+    BKSculpt *s1 = ready(ball, 2);
+    Shape was = now(s1);
+    double v0 = volumeOf(s1);
+    bk_sculpt_set_detail(s1, L);
+    V3 c = onTop(s1, 0, 0);
+    stroke(s1, BK_BRUSH_DETAIL, c, {c}, 5);
+    Shape fine = now(s1);
+    bool ok1 = sound(s1, why);
+    double longest = 0, wasOff = 0, isOff = 0;
+    for (size_t k = 0; k < fine.t.size(); k += 3)
+      for (int q = 0; q < 3; q++) {
+        V3 a = fine.p[fine.t[k + q]], b = fine.p[fine.t[k + (q + 1) % 3]];
+        if (bce::norm(a - c) < 5 - hi && bce::norm(b - c) < 5 - hi) longest = std::max(longest, bce::norm(a - b));
+      }
+    auto far = [&](const Shape &m) {
+      std::vector<V3> v;
+      for (V3 q : m.p)
+        if (bce::norm(q - c) > 5 + 2 * hi) v.push_back(q);
+      std::sort(v.begin(), v.end(), [](V3 a, V3 b) { return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z; });
+      return v;
+    };
+    std::vector<V3> farWas = far(was), farIs = far(fine);
+    bool kept = farWas.size() == farIs.size() && std::equal(farWas.begin(), farWas.end(), farIs.begin(), [](V3 a, V3 b) { return a == b; });
+    for (V3 q : was.p) wasOff = std::max(wasOff, std::fabs(bce::norm(q) - 15));
+    for (V3 q : fine.p) isOff = std::max(isOff, std::fabs(bce::norm(q) - 15));
+    double v1 = volumeOf(s1);
+    check("local detail: the Detail brush makes a coarse ball's triangles under it the detail, on the surface, nothing further touched",
+          ok1 && fine.t.size() > was.t.size() * 5 / 4 && longest <= hi * 1.0001 && kept && isOff <= wasOff + 0.05 && near(v1, v0, 0.003 * v0),
+          (ok1 ? "" : why + " · ") + fmt("%.0f → %.0f triangles, longest side %.4f", was.t.size() / 3, fine.t.size() / 3, longest) +
+              fmt(", off the ball %.4f (was %.4f)", isOff, wasOff) + fmt(", volume %.2f → %.2f", v0, v1));
+    // Again: nothing more to do.
+    stroke(s1, BK_BRUSH_DETAIL, c, {c}, 5);
+    check("local detail: a second pass over the same place changes nothing", now(s1) == fine);
+    // As fine as a remesh at the same detail (by the triangles' mean area under the brush).
+    BKSculpt *rem = ready(ball, L);
+    double areaHere = 0, areaThere = 0;
+    under(fine, c, 3, &areaHere), under(now(rem), c, 3, &areaThere);
+    check("local detail: as fine as a remesh at the same detail", rem && areaHere > 0.7 * areaThere && areaHere < 1.4 * areaThere,
+          fmt("mean triangle %.4f mm² under the brush, %.4f in a remesh", areaHere, areaThere));
+    bk_sculpt_free(rem);
+
+    // A fine ball made coarser.
+    BKSculpt *s2 = ready(ball, 0.4);
+    V3 c2 = onTop(s2, 0, 0);
+    int before = under(now(s2), c2, 4);
+    bk_sculpt_set_detail(s2, 2);
+    stroke(s2, BK_BRUSH_DETAIL, c2, {c2}, 6);
+    int after = under(now(s2), c2, 4);
+    check("local detail: a finer surface made coarser", sound(s2, why) && after < before / 2, why + fmt("%.0f → %.0f triangles under the brush", before, after));
+
+    // Draw with the detail: raised as without it, its triangles refined.
+    BKSculpt *s3 = ready(ball, 2);
+    size_t t3 = now(s3).t.size();
+    bk_sculpt_set_detail(s3, L);
+    V3 c3 = onTop(s3, 0, 0);
+    stroke(s3, BK_BRUSH_DRAW, c3, {c3}, 4);
+    double rose = onTop(s3, 0, 0).z - c3.z;
+    check("local detail: Draw raises the surface and refines it", sound(s3, why) && rose > 0.1 && now(s3).t.size() > t3, why + fmt("rose %.3f", rose));
+
+    // The mirror: both sides refined alike.
+    BKSculpt *s4 = ready(ball, 2);
+    bk_sculpt_set_detail(s4, L);
+    V3 c4 = onTop(s4, 6, 0), m4{-c4.x, c4.y, c4.z};
+    int here0 = under(now(s4), c4, 3), there0 = under(now(s4), m4, 3);
+    stroke(s4, BK_BRUSH_DRAW, c4, {c4}, 4, 0.5, true);
+    Shape s4now = now(s4);
+    int here = under(s4now, c4, 3), there = under(s4now, m4, 3);
+    check("local detail: with the mirror, both sides refined alike", sound(s4, why) && here > 2 * here0 && there > 2 * there0 && std::abs(here - there) <= 0.15 * here,
+          why + fmt("%.0f and %.0f triangles (were %.0f", here, there, here0) + fmt(" and %.0f)", there0));
+
+    // Grab: the triangles kept while dragging, the stretched part refined when it ends.
+    BKSculpt *s5 = ready(ball, 1.5);
+    bk_sculpt_set_detail(s5, 0.75);
+    V3 c5 = onTop(s5, 0, 0);
+    int t5 = bk_sculpt_live_triangle_count(s5);
+    double a5[3] = {c5.x, c5.y, c5.z}, b5[3] = {c5.x, c5.y, c5.z + 4}, e5[3] = {c5.x, c5.y, c5.z + 8};
+    bk_sculpt_begin(s5, BK_BRUSH_GRAB, a5, 4, 0.5, 0, 0);
+    bk_sculpt_dab(s5, b5, 1, 1);
+    bk_sculpt_sync(s5);
+    int mid5 = bk_sculpt_live_triangle_count(s5);
+    bk_sculpt_dab(s5, e5, 1, 1);
+    bk_sculpt_end(s5);
+    bk_sculpt_sync(s5);
+    Shape g5 = now(s5);
+    double longest5 = 0, hi5 = 0.75 * sideOf * 4 / 3;
+    for (size_t k = 0; k < g5.t.size(); k += 3)
+      for (int q = 0; q < 3; q++) {
+        V3 a = g5.p[g5.t[k + q]], b = g5.p[g5.t[k + (q + 1) % 3]];
+        if (a.z > c5.z + 1 && b.z > c5.z + 1) longest5 = std::max(longest5, bce::norm(a - b));
+      }
+    check("local detail: Grab keeps the triangles while dragging, then refines what it stretched",
+          sound(s5, why) && mid5 == t5 && (int)g5.t.size() / 3 > t5 && longest5 <= hi5 * 1.0001,
+          why + fmt("%.0f, %.0f, then %.0f triangles", t5, mid5, g5.t.size() / 3) + fmt(", longest stretched side %.3f", longest5));
+
+    // Undone and done again to the bit (points and triangles), and the same whatever was undone before.
+    BKSculpt *s6 = ready(ball, 1.5), *s7 = ready(ball, 1.5);
+    Shape m0 = now(s6);
+    bk_sculpt_set_detail(s6, L), bk_sculpt_set_detail(s7, L);
+    V3 c6 = onTop(s6, 0, 0), d6 = onTop(s6, 4, 3);
+    stroke(s6, BK_BRUSH_DETAIL, c6, {c6, c6 + V3{2, 0, 0}}, 4);
+    stroke(s6, BK_BRUSH_DRAW, d6, {d6, d6 + V3{0, 2, 0}}, 3);
+    stroke(s6, BK_BRUSH_CREASE, c6, {c6, c6 + V3{-2, 1, 0}}, 3, 0.8, true, true);
+    Shape m1 = now(s6);
+    bool undid = true, redid = true;
+    for (int k = 0; k < 3; k++) undid = undid && bk_sculpt_undo(s6) == 1 && sound(s6, why);
+    bk_sculpt_sync(s6);
+    undid = undid && now(s6) == m0;
+    for (int k = 0; k < 3; k++) redid = redid && bk_sculpt_redo(s6) == 1 && sound(s6, why);
+    bk_sculpt_sync(s6);
+    redid = redid && now(s6) == m1;
+    stroke(s7, BK_BRUSH_DETAIL, c6, {c6, c6 + V3{2, 0, 0}}, 4);
+    bk_sculpt_undo(s7);
+    stroke(s7, BK_BRUSH_DRAW, d6, {d6, d6 + V3{0, 2, 0}}, 3);
+    BKSculpt *s8 = ready(ball, 1.5);
+    bk_sculpt_set_detail(s8, L);
+    stroke(s8, BK_BRUSH_DRAW, d6, {d6, d6 + V3{0, 2, 0}}, 3);
+    check("local detail: strokes undone and done again to the bit, points and triangles", undid && redid, why);
+    check("local detail: a stroke comes out the same whatever was undone before it", now(s7) == now(s8));
+
+    // Quick: a dab with the mirror on 60,000 points, keeping the detail and refining it.
+    BKSculpt *s9 = ready(ball, 0.35);
+    double each[2] = {0, 0};
+    int grown = 0;
+    for (int pass = 0; pass < 2 && s9; pass++) {
+      bk_sculpt_set_detail(s9, pass ? 0.2 : 0.35);
+      V3 a = onTop(s9, -12 + 6 * pass, 0);
+      double a0[3] = {a.x, a.y, a.z}, down[3] = {0, 0, -1};
+      int t0 = bk_sculpt_live_triangle_count(s9);
+      auto t1 = std::chrono::steady_clock::now();
+      bk_sculpt_begin(s9, BK_BRUSH_DRAW, a0, 4, 0.5, 1, 0);
+      for (int k = 0; k < 50; k++) {
+        double ox[3] = {a.x + 0.5 * k, 0, 100}, h[3], n[3];
+        if (bk_sculpt_ray(s9, ox, down, h, n)) bk_sculpt_dab(s9, h, 1, 1);
+        bk_sculpt_sync(s9);
+      }
+      bk_sculpt_end(s9);
+      each[pass] = ms(t1) / 50;
+      if (pass) grown = bk_sculpt_live_triangle_count(s9) - t0;
+    }
+    check("local detail: a dab with the mirror on 60,000 points quick, keeping the detail and refining it",
+          s9 && sound(s9, why) && grown > 0 && (!timed || (each[0] < 4 && each[1] < 15)),
+          why + fmt("%.2f ms, and %.2f ms refining", each[0], each[1]) + fmt(" (%.0f triangles more)", grown));
+
+    // Random strokes of every brush (with and without the detail, the mirror, inverted), undos and redos: sound after each;
+    // then all undone (the ball as it was) and all done again (as it was after).
+    BKSculpt *sx = ready(ball, 1.5);
+    Shape start = now(sx);
+    uint64_t seed = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&]() {
+      seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+      return seed;
+    };
+    auto unit01 = [&]() { return (double)(rnd() >> 11) / 9007199254740992.0; };
+    const double details[4] = {0, 0.4, 0.8, 2.5};
+    int strokes = 0, undos = 0, redos = 0, bad = -1;
+    std::string badWhy;
+    for (int op = 0; op < 90 && sx && bad < 0; op++) {
+      double u = unit01();
+      if (u < 0.15) bk_sculpt_undo(sx), undos++;
+      else if (u < 0.25) bk_sculpt_redo(sx), redos++;
+      else {
+        V3 dir{unit01() - 0.5, unit01() - 0.5, unit01() - 0.5};
+        if (bce::norm(dir) < 1e-3) dir = {0, 0, 1};
+        dir = bce::unit(dir);
+        double o[3] = {dir.x * 100, dir.y * 100, dir.z * 100}, w[3] = {-dir.x, -dir.y, -dir.z}, h[3], n[3];
+        if (!bk_sculpt_ray(sx, o, w, h, n)) continue;
+        int brush = (int)(rnd() % 8);
+        bk_sculpt_set_detail(sx, details[rnd() % 4]);
+        double radius = 1 + unit01() * 5, strength = 0.1 + unit01() * 0.9;
+        // (Each drawn in turn: the order a call's arguments are worked out in isn't fixed.)
+        int mirrored = (int)(rnd() % 2);
+        int inverted = (int)(rnd() % 2);
+        bk_sculpt_begin(sx, brush, h, radius, strength, mirrored, inverted);
+        int dabs = 1 + (int)(rnd() % 6);
+        for (int k = 0; k < dabs; k++) {
+          double q[3];
+          for (int a = 0; a < 3; a++) q[a] = h[a] + (unit01() - 0.5) * (brush == BK_BRUSH_GRAB ? 12 : 4);
+          double pressure = 0.3 + unit01() * 0.7;
+          double size = 0.5 + unit01() * 0.5;
+          bk_sculpt_dab(sx, q, pressure, size);
+        }
+        bk_sculpt_end(sx);
+        strokes++;
+      }
+      bk_sculpt_sync(sx);
+      if (!(op % 10 == 9 ? sound(sx, why) : (why = bk_sculpt_check(sx)).empty())) bad = op, badWhy = why;
+    }
+    // (Strokes left undone done again first: all undone and done again ends there.)
+    while (sx && bk_sculpt_redo(sx)) {
+    }
+    Shape last = sx ? now(sx) : Shape();
+    while (sx && bk_sculpt_undo(sx)) {
+      std::string w = bk_sculpt_check(sx);
+      if (!w.empty() && bad < 0) bad = 1000, badWhy = w;
+    }
+    bool backToStart = sx && now(sx) == start;
+    while (sx && bk_sculpt_redo(sx)) {
+    }
+    bool backToLast = sx && now(sx) == last;
+    check("local detail: random strokes, undos and redos keep the mesh sound; all undone and done again to the bit",
+          bad < 0 && backToStart && backToLast,
+          (bad >= 0 ? fmt("broken at %.0f: ", bad) + badWhy + " · " : std::string()) + fmt("%.0f strokes, %.0f undos, ", strokes, undos) +
+              fmt("%.0f redos, %.0f triangles at the end", redos, last.t.size() / 3));
+
+    // Refused: a mesh that isn't closed; taken: two pieces touching at a point (that point made two).
+    std::vector<float> tet = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 2};
+    std::vector<uint32_t> two = {0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3, 3, 5, 4, 3, 4, 6, 3, 6, 5, 4, 5, 6};
+    BKSculpt *bow = bk_sculpt_new(tet.data(), 7, two.data(), 8);
+    BKSculpt *open = bk_sculpt_new(tet.data(), 7, two.data(), 7);
+    std::string openWhy = open ? "" : bk_last_error();
+    check("local detail: an open mesh refused; two pieces touching at a point taken, that point made two",
+          bow && bk_sculpt_vertex_count(bow) == 8 && std::string(bk_sculpt_check(bow)).empty() && !open && openWhy == "sculpt: the mesh isn't closed",
+          openWhy);
+
+    for (BKSculpt *x : {s1, s2, s3, s4, s5, s6, s7, s8, s9, sx, bow, open}) bk_sculpt_free(x);
+    bk_free(ball);
+  }
+
   // MARK: coverage
   // What the rest leaves out: distances (and the points they're between) on more shapes, sections across a corner, a face,
   // a whole body and a concave edge, edge picks of other shapes, boxes of treated shapes, picks that match nothing, the

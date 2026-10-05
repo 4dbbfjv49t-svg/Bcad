@@ -5,8 +5,9 @@
 //   program:    P kind sizes… ;   N kind thread length clearance ;   T m00 m01 m02 tx m10 … tz ;   B op ;
 //               S px py pz nx ny nz side ;   M detail ;   (N: a bolt or nut, its other sizes standard; length 0 the usual one;
 //               M: the shape so far as a mesh body, its mesh at that detail as a sculpt holds it; R detail ; it remeshed for
-//               sculpting at that detail; D detail brush o(3) w(3) radius strength mirror invert g(3) ; it remeshed and given a
-//               stroke: from where the ray o + t·w meets it, along g)
+//               sculpting at that detail; D detail brush o(3) w(3) radius strength mirror invert g(3) [local] ; it remeshed
+//               and given a stroke: from where the ray o + t·w meets it, along g, the triangles under it made the local
+//               detail when given)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -187,7 +188,8 @@ BKShape *build(const std::string &prog, std::string &why) {
       if (!s) return fail(why);
     } else if (t == "D") {
       // The shape so far remeshed at detail d and given one stroke of a brush: begun where a ray (from o along w) meets
-      // it, dabbed there and four times more along the drag g: D d brush ox oy oz wx wy wz radius strength mirror invert gx gy gz.
+      // it, dabbed there and four times more along the drag g: D d brush ox oy oz wx wy wz radius strength mirror invert gx gy gz
+      // [local detail: the triangles under the brush made that size].
       if (!need(15)) return fail("stroke without its numbers");
       if (st.empty()) return fail("stroke on nothing");
       const double same[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
@@ -199,15 +201,17 @@ BKShape *build(const std::string &prog, std::string &why) {
       if (sc && !bk_sculpt_ray(sc, &v[2], &v[5], hit, n)) why = "stroke: the ray misses";
       BKShape *s = nullptr;
       if (why.empty()) {
+        if (v.size() > 15) bk_sculpt_set_detail(sc, v[15]);
         bk_sculpt_begin(sc, (int)v[1], hit, v[8], v[9], (int)v[10], (int)v[11]);
         for (int k = 0; k <= 4; k++) {
           double at[3] = {hit[0] + v[12] * k / 4, hit[1] + v[13] * k / 4, hit[2] + v[14] * k / 4};
           bk_sculpt_dab(sc, at, 1, 1);
         }
         bk_sculpt_end(sc);
-        bk_sculpt_sync(sc);
-        s = bk_mesh_shape(bk_sculpt_positions(sc), bk_sculpt_vertex_count(sc), bk_sculpt_indices(sc), bk_sculpt_triangle_count(sc));
+        BKSculptMesh *made = bk_sculpt_mesh(sc);
+        s = bk_mesh_shape(made->positions, made->vertexCount, made->indices, made->triangleCount);
         if (!s) why = bk_last_error();
+        bk_sculpt_mesh_free(made);
       }
       bk_sculpt_free(sc);
       bk_free(st.back());

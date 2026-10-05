@@ -146,17 +146,24 @@ void bk_sculpt_mesh_free(BKSculptMesh *m) {
 
 struct BKSculpt {
   Sculptor sculptor;
+  // As floats, per slot (a free triangle slot's corners all 0); what the last sync found changed.
   std::vector<float> positions, normals;
-  std::vector<uint32_t> changed;
+  std::vector<uint32_t> indices, changed, changedTris;
   BKSculpt(std::vector<V3> p, std::vector<uint32_t> t) : sculptor(std::move(p), std::move(t)) {
-    positions.resize(3 * sculptor.points().size()), normals.resize(positions.size());
+    if (!sculptor.ok()) return;
     for (uint32_t i = 0; i < sculptor.points().size(); i++) put(i);
+    for (uint32_t i = 0; i < sculptor.triangles().size() / 3; i++) putTriangle(i);
   }
   void put(uint32_t i) {
+    if (positions.size() < 3 * sculptor.points().size()) positions.resize(3 * sculptor.points().size()), normals.resize(positions.size());
     V3 a = sculptor.points()[i], b = sculptor.normals()[i];
     float *q = &positions[3 * i], *m = &normals[3 * i];
     q[0] = (float)a.x, q[1] = (float)a.y, q[2] = (float)a.z;
     m[0] = (float)b.x, m[1] = (float)b.y, m[2] = (float)b.z;
+  }
+  void putTriangle(uint32_t t) {
+    if (indices.size() < sculptor.triangles().size()) indices.resize(sculptor.triangles().size());
+    for (int k = 0; k < 3; k++) indices[3 * t + k] = sculptor.triangleAlive(t) ? sculptor.triangles()[3 * t + k] : 0;
   }
 };
 
@@ -170,7 +177,12 @@ BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t 
   std::vector<uint32_t> t(indices, indices + 3 * (size_t)triangleCount);
   for (uint32_t v : t)
     if (v >= (uint32_t)vertexCount) return lastError = "sculpt: a triangle's corner is missing", nullptr;
-  return new BKSculpt(std::move(p), std::move(t));
+  BKSculpt *s = new BKSculpt(std::move(p), std::move(t));
+  if (!s->sculptor.ok()) {
+    delete s;
+    return lastError = "sculpt: the mesh isn't closed", nullptr;
+  }
+  return s;
 }
 
 void bk_sculpt_free(BKSculpt *s) { delete s; }
@@ -182,6 +194,10 @@ int bk_sculpt_ray(const BKSculpt *s, const double *origin, const double *directi
   if (at) at[0] = a.x, at[1] = a.y, at[2] = a.z;
   if (normal) normal[0] = n.x, normal[1] = n.y, normal[2] = n.z;
   return 1;
+}
+
+void bk_sculpt_set_detail(BKSculpt *s, double size) {
+  if (s) s->sculptor.setDetail(std::isfinite(size) ? size : 0);
 }
 
 void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert) {
@@ -204,15 +220,40 @@ int bk_sculpt_sync(BKSculpt *s) {
   if (!s) return 0;
   s->changed = s->sculptor.takeChanged();
   for (uint32_t i : s->changed) s->put(i);
+  s->changedTris = s->sculptor.takeChangedTriangles();
+  for (uint32_t t : s->changedTris) s->putTriangle(t);
   return (int)s->changed.size();
 }
 
 const uint32_t *bk_sculpt_changed(const BKSculpt *s) { return s ? s->changed.data() : nullptr; }
-int bk_sculpt_vertex_count(const BKSculpt *s) { return s ? (int)s->sculptor.points().size() : 0; }
-int bk_sculpt_triangle_count(const BKSculpt *s) { return s ? (int)s->sculptor.triangles().size() / 3 : 0; }
+int bk_sculpt_changed_triangle_count(const BKSculpt *s) { return s ? (int)s->changedTris.size() : 0; }
+const uint32_t *bk_sculpt_changed_triangles(const BKSculpt *s) { return s ? s->changedTris.data() : nullptr; }
+int bk_sculpt_vertex_count(const BKSculpt *s) { return s ? (int)s->positions.size() / 3 : 0; }
+int bk_sculpt_triangle_count(const BKSculpt *s) { return s ? (int)s->indices.size() / 3 : 0; }
+int bk_sculpt_live_triangle_count(const BKSculpt *s) { return s ? (int)s->sculptor.liveTriangles() : 0; }
 const float *bk_sculpt_positions(const BKSculpt *s) { return s ? s->positions.data() : nullptr; }
 const float *bk_sculpt_normals(const BKSculpt *s) { return s ? s->normals.data() : nullptr; }
-const uint32_t *bk_sculpt_indices(const BKSculpt *s) { return s ? s->sculptor.triangles().data() : nullptr; }
+const uint32_t *bk_sculpt_indices(const BKSculpt *s) { return s ? s->indices.data() : nullptr; }
+
+const char *bk_sculpt_check(const BKSculpt *s) {
+  static thread_local std::string why;
+  why = s ? s->sculptor.check() : "no sculpt";
+  return why.c_str();
+}
+
+BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s) {
+  if (!s) return nullptr;
+  std::vector<V3> pts;
+  std::vector<uint32_t> tris;
+  s->sculptor.compact(pts, tris);
+  BKSculptMesh *out = new BKSculptMesh();
+  out->vertexCount = (int)pts.size(), out->triangleCount = (int)tris.size() / 3;
+  std::vector<float> pos(3 * pts.size());
+  for (size_t i = 0; i < pts.size(); i++) pos[3 * i] = (float)pts[i].x, pos[3 * i + 1] = (float)pts[i].y, pos[3 * i + 2] = (float)pts[i].z;
+  out->positions = mallocCopy(pos);
+  out->indices = mallocCopy(tris);
+  return out;
+}
 
 BKMesh *bk_mesh(const BKShape *s, double deflection) {
   if (!s) return nullptr;
