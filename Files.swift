@@ -341,6 +341,8 @@ extension Node {
             let d = s.data, n = UInt32(d.pointCount)
             return s.detail.isFinite && s.detail > 0 && d.triangleCount > 0 && d.positions.allSatisfy { $0.isFinite && abs($0) <= 10_000 } &&
                 d.indices.allSatisfy { $0 < n }
+        case .figure(let f):
+            return f.valid
         }
     }
 }

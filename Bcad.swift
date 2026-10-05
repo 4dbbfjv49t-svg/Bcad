@@ -409,6 +409,134 @@ extension Fastener {
     }
 }
 
+// What a later plan may hold back (the human figure is part of the larger one).
+enum Features {
+    static let figures = true
+}
+
+// A human figure, mannequin-like: a man or a woman, its sizes and pose as numbers (BcadKernel.h, BK_FIG_…). The kernel
+// makes it one mesh body standing on its soles, facing −y, centred on its own origin like a primitive.
+struct Figure: Hashable, Sendable {
+    // In the kernel's order (BK_FIG_SEX … BK_FIG_RIGHT_KNEE); files keep each by its name.
+    enum Field: Int, CaseIterable, Sendable {
+        case sex, height, build, muscle, shoulders, chest, waist, hips, arms, legs, head, nod, turn, tilt, bend, twist, lean
+        case leftRaise, leftForward, leftElbow, rightRaise, rightForward, rightElbow, leftHip, leftOut, leftKnee, rightHip, rightOut, rightKnee
+
+        // As files keep it (never to change).
+        var name: String {
+            ["sex", "height", "build", "muscle", "shoulders", "chest", "waist", "hips", "arms", "legs", "head", "nod", "turn", "tilt", "bend",
+             "twist", "lean", "leftRaise", "leftForward", "leftElbow", "rightRaise", "rightForward", "rightElbow", "leftHip", "leftOut",
+             "leftKnee", "rightHip", "rightOut", "rightKnee"][rawValue]
+        }
+        // Body sizes as parts of the standard for its sex (shown in %); the pose in degrees.
+        var share: Bool { (Field.build.rawValue...Field.head.rawValue).contains(rawValue) }
+        var range: ClosedRange<Double> {
+            var o = [0.0, 0.0]
+            bk_figure_range(Int32(rawValue), &o)
+            return o[0]...o[1]
+        }
+        // The same number on the other side (itself for the head and torso).
+        var other: Field {
+            let r = rawValue
+            switch r {
+            case Field.leftRaise.rawValue...Field.leftElbow.rawValue, Field.leftHip.rawValue...Field.leftKnee.rawValue: return Field(rawValue: r + 3)!
+            case Field.rightRaise.rawValue...Field.rightElbow.rawValue, Field.rightHip.rawValue...Field.rightKnee.rawValue: return Field(rawValue: r - 3)!
+            default: return self
+            }
+        }
+    }
+
+    // In the kernel's order (BK_POSE_STAND …).
+    enum Pose: Int, CaseIterable, Sendable {
+        case stand, t, walk, sit, wave
+
+        var label: String { ["Stand", "T-pose", "Walk", "Sit", "Wave"][rawValue] }
+    }
+
+    // All BK_FIG_COUNT of them.
+    private(set) var values: [Double]
+
+    init(woman: Bool = false) {
+        values = Self.defaults(woman ? 1 : 0)
+    }
+
+    private static func defaults(_ sex: Double) -> [Double] {
+        var v = [Double](repeating: 0, count: Int(BK_FIG_COUNT))
+        bk_figure_defaults(sex, &v)
+        return v
+    }
+
+    var woman: Bool { values[Field.sex.rawValue] >= 0.5 }
+
+    // Kept within what it may be.
+    subscript(_ f: Field) -> Double {
+        get { values[f.rawValue] }
+        set {
+            let r = f.range
+            if newValue.isFinite { values[f.rawValue] = min(r.upperBound, max(r.lowerBound, newValue)) }
+        }
+    }
+
+    func setting(_ f: Field, _ v: Double) -> Figure {
+        var n = self
+        n[f] = v
+        return n
+    }
+
+    // In a pose, its body as it is.
+    func posed(_ p: Pose) -> Figure {
+        var n = self
+        bk_figure_pose(Int32(p.rawValue), &n.values)
+        return n
+    }
+
+    // The pose it's in, if it's one of them.
+    var pose: Pose? { Pose(rawValue: Int(bk_figure_pose_of(values, Int32(values.count)))) }
+
+    // Its box (to the bit its mesh's) and the point between its hips on the ground, from the box's middle.
+    var box: (size: SIMD3<Double>, anchor: SIMD3<Double>) {
+        var o = [Double](repeating: 0, count: 6)
+        guard bk_figure_extent(values, Int32(values.count), &o) == 1 else { return (SIMD3(1, 1, 1), .zero) }
+        return (SIMD3(o[0], o[1], o[2]), SIMD3(o[3], o[4], o[5]))
+    }
+
+    // Whether the kernel takes these numbers.
+    var valid: Bool {
+        var o = [Double](repeating: 0, count: 6)
+        return values.count == Int(BK_FIG_COUNT) && bk_figure_extent(values, Int32(values.count), &o) == 1
+    }
+
+    @MainActor var name: String { woman ? L("Woman") : L("Man") }
+
+    // The detail its mesh is made at (mm): what sculpting it starts from.
+    var detail: Double { self[.height] / 160 }
+}
+
+extension Figure: Codable {
+    private struct Key: CodingKey {
+        let stringValue: String
+        init(_ s: String) { stringValue = s }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        var intValue: Int? { nil }
+        init?(intValue: Int) { nil }
+    }
+
+    // Each number by its name; one a file doesn't have (from an earlier version) is the standard for its sex.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        let sex = try c.decodeIfPresent(Double.self, forKey: Key(Field.sex.name)) ?? 0
+        values = Self.defaults(sex.isFinite ? min(1, max(0, sex)) : 0)
+        for f in Field.allCases {
+            if let v = try c.decodeIfPresent(Double.self, forKey: Key(f.name)) { values[f.rawValue] = v }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        for f in Field.allCases { try c.encode(values[f.rawValue], forKey: Key(f.name)) }
+    }
+}
+
 struct Placement: Codable, Hashable, Sendable {
     var move = SIMD3<Double>(0, 0, 0)
     var turn = SIMD3<Double>(0, 0, 0)
@@ -517,20 +645,26 @@ indirect enum Node: Codable, Hashable, Sendable {
     case cove(of: Node, picks: [Pick], radius: Double)
     // A sculpted body: its mesh as shaped by hand.
     case sculpt(Sculpt)
+    // A human figure.
+    case figure(Figure)
 
-    // Whether a sculpted body is in it (a file holding one is one an earlier Bcad can't open).
-    var sculpted: Bool {
+    // The document version a file holding it needs: 2 with a sculpted body in it, 3 with a figure (files an earlier
+    // Bcad can't open).
+    var fileVersion: Int {
         switch self {
-        case .sculpt: true
-        case .group(_, let parts): parts.contains { $0.node.sculpted }
-        default: inner?.sculpted ?? false
+        case .sculpt: 2
+        case .figure: 3
+        case .group(_, let parts): parts.map(\.node.fileVersion).max() ?? 1
+        default: inner?.fileVersion ?? 1
         }
     }
 
-    // How many triangles the sculpted bodies in it have between them (a STEP file holds each as a face of its own).
+    // How many triangles the mesh bodies in it have between them (a STEP file holds each as a face of its own); a
+    // figure's, as many as one usually has.
     var sculptTriangles: Int {
         switch self {
         case .sculpt(let s): s.data.triangleCount
+        case .figure: 70_000
         case .group(_, let parts): parts.reduce(0) { $0 + $1.node.sculptTriangles }
         default: inner?.sculptTriangles ?? 0
         }
@@ -612,11 +746,13 @@ indirect enum Node: Codable, Hashable, Sendable {
         }
     }
 
-    // The bounding size of a primitive or a fastener, which sit centred on their own origin; none for a merged shape.
+    // The bounding size of a primitive, a fastener or a figure, which sit centred on their own origin; none for a merged
+    // shape.
     func extent(fit: Fit) -> SIMD3<Double>? {
         switch self {
         case .primitive(let p): p.extent
         case .fastener(let f): f.extent(fit: fit)
+        case .figure(let f): f.box.size
         default: nil
         }
     }
@@ -756,8 +892,8 @@ struct MergeLink: Codable, Hashable, Sendable {
 
 struct Document: Codable, Equatable, Sendable {
     // The newest version of the document Bcad reads: one a newer Bcad wrote is said to be that, not damaged. 2: sculpted
-    // bodies.
-    static let version = 2
+    // bodies; 3: figures.
+    static let version = 3
     var version = Document.version
     var bodies: [Solid] = []
 
@@ -775,10 +911,10 @@ extension Document {
         bodies = try c.decode([Solid].self, forKey: .bodies)
     }
 
-    // Version 2 only when it holds a sculpted body: any other file stays one an earlier Bcad opens.
+    // A later version only when it holds what needs it: any other file stays one an earlier Bcad opens.
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(bodies.contains { $0.node.sculpted || ($0.link?.shell.sculpted ?? false) } ? 2 : 1, forKey: .version)
+        try c.encode(bodies.map { max($0.node.fileVersion, $0.link?.shell.fileVersion ?? 1) }.max() ?? 1, forKey: .version)
         try c.encode(bodies, forKey: .bodies)
     }
 }
@@ -1097,9 +1233,26 @@ final class Kernel: @unchecked Sendable {
         }
         let ref = ShapeRef(p)
         guard keep else { return ref }
-        if cache.count > 400 { cache.removeAll() }
+        if cache.count > 400 { cache.removeAll(); figures.removeAll() }
         cache[k] = ref
+        // A figure is a few megabytes: only the last few made are kept (each number typed in makes another).
+        if case .figure = node {
+            figures.removeAll { $0 == k }
+            figures.append(k)
+            if figures.count > 8 { cache[figures.removeFirst()] = nil }
+        }
         return ref
+    }
+
+    private var figures: [Key] = []
+
+    // A figure's quick draft, shown while one of its numbers is dragged (the engine keeps its last few).
+    func draft(_ f: Figure) -> Mesh? {
+        guard let p = bk_figure(f.values, Int32(f.values.count), 1) else { return nil }
+        defer { bk_free(p) }
+        guard let m = bk_mesh(p, 0.05) else { return nil }
+        defer { bk_mesh_free(m) }
+        return Mesh(m)
     }
 
     // A kernel result; when there is none, the kernel's reason is recorded.
@@ -1127,6 +1280,8 @@ final class Kernel: @unchecked Sendable {
             return made(d.positions.withUnsafeBufferPointer { p in
                 d.indices.withUnsafeBufferPointer { i in bk_mesh_shape(p.baseAddress, Int32(d.pointCount), i.baseAddress, Int32(d.triangleCount)) }
             })
+        case .figure(let f):
+            return made(bk_figure(f.values, Int32(f.values.count), 0))
         case .group(let op, let parts):
             // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
@@ -2398,6 +2553,98 @@ final class Workbench: DesignHost {
         addFastener(thread) { [weak self] in self?.choose(.thread) }
     }
 
+    // MARK: figures
+
+    // A man standing on the bed, with the Figure tab open to change him.
+    func addFigure(woman: Bool = false) {
+        guard Features.figures else { return }
+        let f = Figure(woman: woman)
+        tryThen([.figure(f)]) { [weak self] in
+            self?.add(.figure(f), name: f.name)
+            self?.choose(.thread)
+        }
+    }
+
+    // The Figure tab: a pose changed on one side changes the other the same (mirrored); otherwise, the side shown.
+    var figureMirror = true
+    var figureRight = false
+
+    // A figure's number set to v (and the same number on its other side, while the pose is mirrored).
+    func figure(_ id: UUID, _ field: Figure.Field, _ v: Double) -> Figure? {
+        guard let b = body(id), case .figure(var f) = b.node.base else { return nil }
+        f[field] = v
+        if figureMirror { f[field.other] = v }
+        return f
+    }
+
+    // The one figure selected, if that's what is selected.
+    var figureChosen: (id: UUID, figure: Figure)? {
+        guard selection.count == 1, let b = primary, case .figure(let f) = b.node.base else { return nil }
+        return (b.id, f)
+    }
+
+    // A figure with new numbers: its node, where it's placed so that the point between its feet stays where it was, and
+    // its name (a man made a woman is called one, unless he was given a name of his own).
+    private func refigured(_ b: Solid, _ f: Figure) -> (node: Node, move: SIMD3<Double>, name: String)? {
+        guard case .figure(let was) = b.node.base, f != was else { return nil }
+        let move = b.place.move + b.place.rotation * (b.place.scale * (was.box.anchor - f.box.anchor))
+        return (followed(b.node, to: .figure(f)), move, b.name == was.name ? f.name : b.name)
+    }
+
+    // New numbers typed in, chosen or a pose: one step to undo.
+    func setFigure(_ id: UUID, _ f: Figure) {
+        guard let b = body(id), let r = refigured(b, f) else { return }
+        begin()
+        mutate(id) { $0.node = r.node; $0.place.move = r.move; $0.name = r.name }
+        rebuildScene()
+    }
+
+    // A number dragged: the whole drag one step to undo; a draft shown as it goes, the full figure made as it ends.
+    func beginFigureDrag() { begin() }
+
+    func dragFigure(_ id: UUID, _ f: Figure) {
+        guard let b = body(id), let r = refigured(b, f) else { return }
+        mutate(id) { $0.node = r.node; $0.place.move = r.move; $0.name = r.name }
+        // (A figure cut or hollowed shows as it was until the drag ends: its draft would leave that out.)
+        if r.node == .figure(f) {
+            draftWanted = (id, f)
+            nextDraft()
+        }
+        sceneVersion += 1
+    }
+
+    func endFigureDrag() {
+        draftWanted = nil
+        undoLastIfUnchanged()
+        rebuildScene()
+    }
+
+    // The draft asked for last (the steps in between are skipped) and whether the kernel is making one.
+    @ObservationIgnored private var draftWanted: (id: UUID, figure: Figure)?
+    @ObservationIgnored private var drafting = false
+
+    private func nextDraft() {
+        guard !drafting, let want = draftWanted else { return }
+        let (id, f) = want
+        draftWanted = nil
+        drafting = true
+        let generation = self.generation
+        Kernel.shared.queue.async {
+            let mesh = Kernel.shared.draft(f)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.drafting = false
+                    // Shown while the figure is still this one and its full mesh isn't in yet.
+                    if self.generation == generation, let mesh, let b = self.body(id), b.node == .figure(f), self.built[id] != b.node {
+                        self.meshes[id] = mesh
+                        self.sceneVersion += 1
+                    }
+                    self.nextDraft()
+                }
+            }
+        }
+    }
+
     @ObservationIgnored private var dropQueue: Set<UUID> = []
     private func dropSoon(_ ids: [UUID]) { if settings.dropToBed { dropQueue.formUnion(ids) } }
 
@@ -2931,6 +3178,10 @@ final class Workbench: DesignHost {
             return .primitive(p)
         case .fastener(let f):
             return .fastener(f.setting(.length, max(1, (f.length * s.z * 100).rounded() / 100)))
+        case .figure(let f) where abs(s.x - s.z) < 1e-9 && abs(s.y - s.z) < 1e-9:
+            // Grown evenly: taller (stretched one way only, it keeps the stretch).
+            let r = Figure.Field.height.range
+            return .figure(f.setting(.height, min(r.upperBound, max(r.lowerBound, (f[.height] * s.z * 100).rounded() / 100))))
         default:
             return nil
         }
@@ -3086,7 +3337,9 @@ final class Workbench: DesignHost {
             return
         }
         let size = meshes[b.id].map { simd_reduce_max($0.size * simd_abs(b.place.scale)) } ?? 20
-        let detail = Workbench.round2(min(5, max(0.05, size / 60)))
+        var detail = Workbench.round2(min(5, max(0.05, size / 60)))
+        // A figure at the detail it's made at, so its face and hands keep their shape.
+        if case .figure(let f) = b.node.base { detail = Workbench.round2(min(5, max(0.05, f.detail * simd_reduce_max(simd_abs(b.place.scale))))) }
         made(b.id, b.node, scale: b.place.scale, detail: detail) { [weak self] n in
             self?.openSculpt(b.id, n)
             self?.flash(L("{body} is now a mesh to shape: its exact sizes and roundings become part of its surface", ["body": b.name]))
@@ -3740,6 +3993,7 @@ final class Workbench: DesignHost {
         if problems.contains("bevel") { return L("This bevel doesn't fit these edges — try smaller sizes") }
         if problems.contains("bend") { return L("The tube is too thick for this torus's tightest bend") }
         if problems.contains(where: { $0.hasPrefix("bolt") || $0.hasPrefix("nut") }) { return L("These sizes don't fit this bolt or nut") }
+        if problems.contains(where: { $0.hasPrefix("figure") }) { return L("This figure can't be made with these numbers") }
         if problems.contains("empty") { return L("Nothing is left of this shape") }
         if problems.contains("hollow") { return L("These walls don't fit this shape — try thinner walls") }
         if problems.contains("failed") { return L("This couldn't be worked out at these sizes — try a slightly different size") }
@@ -4173,6 +4427,7 @@ struct BcadApp: App {
                 Button(L("Drop onto the bed")) { lib.dropToBed() }
                 Divider()
                 Button(L("Add thread")) { lib.addThread() }.keyboardShortcut("b")
+                if Features.figures { Button(L("Add human")) { lib.addFigure() } }
             }
         }
     }

@@ -258,6 +258,13 @@ struct ShapeBar: View {
     var body: some View {
         HStack(spacing: 8) {
             ForEach(ShapeGroup.allCases, id: \.self) { g in ShapeGroupButton(group: g, open: $open) }
+            if Features.figures {
+                Rectangle().fill(Ink.text.opacity(0.18)).frame(width: 1, height: 22).padding(.horizontal, 2)
+                Button { lib.addFigure() } label: { Image(systemName: "figure.stand") }
+                    .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 36))
+                    .help(L("Human"))
+                    .accessibilityLabel(L("Human"))
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -796,6 +803,7 @@ struct ObjectRow: View {
         case .fastener(let f): Image(systemName: f.nut ? "circle.hexagonpath" : "screwdriver")
         case .group: Image(systemName: "square.on.square")
         case .sculpt: Image(systemName: "hand.draw")
+        case .figure: Image(systemName: "figure.stand")
         default: Image(systemName: "cube")
         }
     }
@@ -963,6 +971,8 @@ struct LayerRow: View {
             SettingLine(title: f.name) { EmptyView() }
         case .sculpt(let sc):
             SettingLine(title: L("Sculpted"), detail: L("{n} triangles", ["n": sc.data.triangleCount])) { EmptyView() }
+        case .figure(let f):
+            SettingLine(title: f.name) { EmptyView() }
         }
     }
 
@@ -1121,19 +1131,23 @@ struct ScreenSwitch: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        // With a figure selected, the last screen is its Figure tab.
+        let figure = lib.figureChosen != nil
         HStack(spacing: 2) {
             ForEach(Screen.allCases, id: \.self) { sc in
                 let on = sc == current
                 VStack(spacing: 2) {
                     Group {
-                        if let icon = sc.icon {
+                        if sc == .thread && figure {
+                            Image(systemName: "figure.stand").font(.ui(size: 15, weight: .bold))
+                        } else if let icon = sc.icon {
                             Image(systemName: icon).font(.ui(size: 15, weight: .bold))
                         } else {
                             ThreadGlyph().stroke(style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round)).frame(width: 14, height: 16)
                         }
                     }
                     .frame(height: 18)
-                    Text(L(sc.title)).font(.ui(size: 11.5, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
+                    Text(title(sc, figure)).font(.ui(size: 11.5, weight: .bold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
                 }
                 .foregroundStyle(on ? Color.black : (hover == sc ? lib.accent : Ink.text.opacity(0.75)))
                 .frame(maxWidth: .infinity)
@@ -1155,7 +1169,7 @@ struct ScreenSwitch: View {
                     waves += 1
                     lib.choose(sc)
                 }
-                .help(key(sc).map { L(sc.title) + " (\($0))" } ?? L(sc.title))
+                .help(key(sc).map { title(sc, figure) + " (\($0))" } ?? title(sc, figure))
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
                 .accessibilityAction(.default) { lib.choose(sc) }
@@ -1165,6 +1179,8 @@ struct ScreenSwitch: View {
         .background(shape.fill(Ink.text.opacity(0.06)))
         .pressWave(waves, shape: shape, tint: lib.accent)
     }
+
+    private func title(_ sc: Screen, _ figure: Bool) -> String { sc == .thread && figure ? L("Figure") : L(sc.title) }
 
     private func key(_ sc: Screen) -> String? {
         let s = lib.settings
@@ -1232,7 +1248,11 @@ struct ScreenContent: View {
             case .angles:
                 AnglesScreen()
             case .thread:
-                ThreadScreen(items: items)
+                if let c = lib.figureChosen {
+                    FigureScreen(id: c.id, f: c.figure)
+                } else {
+                    ThreadScreen(items: items)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1611,6 +1631,137 @@ struct ThreadScreen: View {
                 .buttonStyle(PillStyle(tint: lib.accent))
                 .contentTransition(.interpolate)
         }
+    }
+}
+
+// A selected figure's body and pose. A chip or a number typed in is one step to undo; so is a slider's whole drag, which
+// shows a quick draft as it goes.
+struct FigureScreen: View {
+    @Environment(Workbench.self) private var lib
+    let id: UUID
+    let f: Figure
+
+    var body: some View {
+        let right = !lib.figureMirror && lib.figureRight
+        VStack(alignment: .leading, spacing: 6) {
+            Segmented(options: [false, true], label: { $0 ? L("Woman") : L("Man") }, icon: { $0 ? "figure.stand.dress" : "figure.stand" },
+                      current: f.woman) { w in lib.setFigure(id, f.setting(.sex, w ? 1 : 0)) }
+            SizeLine(title: L("Body height"), axis: 2, value: f[.height], unit: L("mm"), range: Figure.Field.height.range) { v in
+                lib.setFigure(id, f.setting(.height, v))
+            }
+            SettingsTitle(text: L("Body") + " · %")
+            row(.build, L("Build"))
+            row(.muscle, L("Muscle"))
+            row(.shoulders, L("Shoulders"))
+            row(.chest, f.woman ? L("Bust") : L("Chest"))
+            row(.waist, L("Waist"))
+            row(.hips, L("Hips"))
+            row(.arms, L("Arm length"))
+            row(.legs, L("Leg length"))
+            row(.head, L("Head size"))
+            SettingsTitle(text: L("Pose"))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                ForEach(Figure.Pose.allCases, id: \.self) { p in
+                    Chip(text: L(p.label), chosen: f.pose == p) { lib.setFigure(id, f.posed(p)) }
+                }
+            }
+            ToggleLine(title: L("Mirror pose"), detail: L("Both sides move together"), on: lib.figureMirror) { lib.figureMirror.toggle() }
+            if !lib.figureMirror {
+                Segmented(options: [false, true], label: { $0 ? L("Right") : L("Left") }, icon: { $0 ? "r.circle" : "l.circle" },
+                          current: lib.figureRight) { lib.figureRight = $0 }
+                    .transition(.haze)
+            }
+            SettingsTitle(text: L("Head and neck") + " · °")
+            row(.nod, L("Nod"))
+            row(.turn, L("Turn"))
+            row(.tilt, L("Tilt"))
+            SettingsTitle(text: L("Torso") + " · °")
+            row(.bend, L("Bend"))
+            row(.twist, L("Twist"))
+            row(.lean, L("Lean"))
+            SettingsTitle(text: L("Arm") + " · °")
+            row(right ? .rightRaise : .leftRaise, L("Sideways"))
+            row(right ? .rightForward : .leftForward, L("Forward"))
+            row(right ? .rightElbow : .leftElbow, L("Elbow"))
+            SettingsTitle(text: L("Leg") + " · °")
+            row(right ? .rightOut : .leftOut, L("Sideways"))
+            row(right ? .rightHip : .leftHip, L("Forward"))
+            row(right ? .rightKnee : .leftKnee, L("Knee"))
+        }
+        .animation(Neon.spring, value: lib.figureMirror)
+    }
+
+    // Body sizes shown in percent, the pose in degrees.
+    private func row(_ field: Figure.Field, _ title: String) -> some View {
+        let k = field.share ? 100.0 : 1, r = field.range
+        return FigureSlider(title: title, value: f[field] * k, range: r.lowerBound * k...r.upperBound * k, unit: field.share ? "%" : "°",
+                            begin: { lib.beginFigureDrag() },
+                            change: { v in if let n = lib.figure(id, field, v / k) { lib.dragFigure(id, n) } },
+                            end: { lib.endFigureDrag() },
+                            set: { v in if let n = lib.figure(id, field, v / k) { lib.setFigure(id, n) } })
+    }
+}
+
+// A number on a track, dragged in whole steps, with its value to type beside it.
+struct FigureSlider: View {
+    @Environment(Workbench.self) private var lib
+    let title: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let unit: String
+    let begin: () -> Void
+    let change: (Double) -> Void
+    let end: () -> Void
+    let set: (Double) -> Void
+    @State private var dragging = false
+    @State private var hover = false
+
+    var body: some View {
+        let t = lib.accent
+        let f = CGFloat(min(1, max(0, (value - range.lowerBound) / max(1e-9, range.upperBound - range.lowerBound))))
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.ui(size: 12.5, weight: .medium, design: .rounded))
+                .foregroundStyle(Ink.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 76, alignment: .leading)
+            GeometryReader { g in
+                let knob: CGFloat = dragging ? 16 : (hover ? 14 : 12), room = max(1, g.size.width - knob), thick: CGFloat = hover || dragging ? 6 : 4
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Ink.text.opacity(0.12)).frame(height: thick)
+                    Capsule().fill(t.opacity(0.75)).frame(width: knob / 2 + f * room, height: thick)
+                    SliderKnob(size: knob, tint: t, active: dragging).offset(x: f * room)
+                }
+                .frame(width: g.size.width, height: g.size.height)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        if !dragging {
+                            dragging = true
+                            begin()
+                        }
+                        let k = Double(min(1, max(0, (v.location.x - knob / 2) / room)))
+                        change((range.lowerBound + k * (range.upperBound - range.lowerBound)).rounded())
+                    }
+                    .onEnded { _ in
+                        dragging = false
+                        end()
+                    })
+            }
+            .frame(height: 22)
+            .environment(\.layoutDirection, .leftToRight)
+            .onHover { h in withAnimation(Neon.hover(h)) { hover = h } }
+            .animation(Neon.pop, value: dragging)
+            .accessibilityElement()
+            .accessibilityLabel(title)
+            .accessibilityValue(MMField.format(value, digits: 0) + " " + unit)
+            .accessibilityAdjustableAction { d in set(min(range.upperBound, max(range.lowerBound, value.rounded() + (d == .increment ? 1 : -1)))) }
+            MMField(value: value, unit: unit, range: range, width: 44, digits: 0, label: title, set: set)
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 36)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Ink.text.opacity(0.05)))
     }
 }
 
