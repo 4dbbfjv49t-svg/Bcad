@@ -20,7 +20,13 @@ Expire now, Next day and Reset). The App Store build uses StoreKit. The free pla
 Keychain. Privacy policy: `docs/privacy.md`.
 
 ## Build
-On macOS 26 with Xcode 26: `./build.sh` (installs `/Applications/Bcad.app`), or `./build.sh path/to/Bcad.app`.
+On macOS 26 with Xcode 26 (installs `/Applications/Bcad.app`, or the `.app` path given):
+- `./build.sh`: for development; plans are bought in the test store (no real payment).
+- `./build.sh --personal`: your own copy, everything unlocked, no plans (`com.bohdan.bcad.personal`).
+- `./build.sh --appstore`: as the Mac App Store has it: sandboxed, hardened runtime, plans through StoreKit
+  (`com.bohdan.bcad`). To publish, `appstore/prepare.sh` makes the Xcode project; see `appstore/README.md`.
+
+The version is in `VERSION`; the build number comes from `BUILD_NUMBER` (CI's run number).
 
 ## Test
 - `./test/engine.sh`: the engine against exact maths (Linux or macOS).

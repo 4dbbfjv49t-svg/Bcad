@@ -2223,7 +2223,7 @@ struct SettingsPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 SettingsHead(langOpen: $langOpen, styleOpen: $styleOpen)
-                PlanSettings()
+                if !lib.plans.unlocked { PlanSettings() }
                 SettingsTitle(text: L("Shortcuts"))
                 ForEach(Action.allCases, id: \.self) { a in
                     ShortcutLine(title: a.label, on: s.isOn(a), toggle: { lib.toggleShortcut(a) }) { KeyField(action: a) }

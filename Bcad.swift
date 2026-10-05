@@ -1767,6 +1767,8 @@ struct Store: Codable {
     var look: SkinSettings?
     var shapes: [String: String]?
     var recent: [String]?
+    // A bookmark for each recent file (by its path), so a sandboxed Bcad can open it again in a later run.
+    var recentMarks: [String: Data]?
 }
 
 // Unsaved work set aside: the document, and the file it came from or the name it was given.
@@ -1776,6 +1778,8 @@ struct Recovery: Codable, Sendable {
     var name: String?
     // The document's id this session (the free plan knows today's file by it).
     var docID: UUID?
+    // A bookmark to its file, so a sandboxed Bcad can still save to it after the crash.
+    var fileMark: Data?
 }
 
 enum Paths {
@@ -1783,6 +1787,26 @@ enum Paths {
     static let state = dir.appendingPathComponent("state.json")
     static let recovery = dir.appendingPathComponent("unsaved.json")
     static let testStore = dir.appendingPathComponent("test-store.json")
+}
+
+// Files reached again in a later run: inside the App Store's sandbox only through a bookmark made while Bcad could reach
+// them (elsewhere a bookmark simply finds the file again, moved or renamed).
+enum Marks {
+    static func make(_ url: URL) -> Data? {
+        (try? url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil))
+            ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
+    }
+
+    // The file a bookmark leads to, its access begun (to be ended with stopAccessingSecurityScopedResource), and a new
+    // bookmark when the old one is out of date.
+    static func resolve(_ data: Data) -> (url: URL, fresh: Data?)? {
+        var stale = false
+        let url = (try? URL(resolvingBookmarkData: data, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &stale))
+            ?? (try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale))
+        guard let url else { return nil }
+        _ = url.startAccessingSecurityScopedResource()
+        return (url, stale ? make(url) : nil)
+    }
 }
 
 enum Mode: Equatable {
@@ -2135,6 +2159,7 @@ final class Workbench: DesignHost {
     var shapes: [String: String] = [:]
     // Files opened or saved lately, the latest first.
     var recent: [URL] = []
+    @ObservationIgnored private(set) var recentMarks: [String: Data] = [:]
 
     @ObservationIgnored private var undoStack: [Document] = []
     @ObservationIgnored private var redoStack: [Document] = []
@@ -2201,11 +2226,12 @@ final class Workbench: DesignHost {
         Skin.shared.apply(s?.look ?? SkinSettings())
         shapes = (s?.shapes ?? [:]).filter { g, k in ShapeGroup(rawValue: g).map { $0.members.dropFirst().contains { $0.rawValue == k } } ?? false }
         recent = (s?.recent ?? []).prefix(10).map { URL(fileURLWithPath: $0) }
+        recentMarks = s?.recentMarks ?? [:]
     }
 
     func save() {
         let s = Store(style: style, language: L10n.shared.id, brightness: brightness, settings: settings, look: Skin.shared.values, shapes: shapes,
-                      recent: recent.map(\.path))
+                      recent: recent.map(\.path), recentMarks: recentMarks)
         try? FileManager.default.createDirectory(at: Paths.dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: Paths.state, options: .atomic) }
     }
@@ -2214,25 +2240,43 @@ final class Workbench: DesignHost {
 
     func noteRecent(_ url: URL) {
         recent = Array(([url] + recent.filter { $0.standardizedFileURL != url.standardizedFileURL }).prefix(10))
+        if let mark = Marks.make(url) { recentMarks[url.path] = mark }
+        let kept = Set(recent.map(\.path))
+        recentMarks = recentMarks.filter { kept.contains($0.key) }
         scheduleSave()
     }
 
+    // A recent file reached through its bookmark (wherever it has moved), and kept within reach while it's open.
     func openRecent(_ url: URL) {
         confirmDiscard { go in
             guard go else { return }
-            guard FileManager.default.fileExists(atPath: url.path) else {
+            let found = self.recentMarks[url.path].flatMap { Marks.resolve($0) }
+            let target = found?.url ?? url
+            guard FileManager.default.fileExists(atPath: target.path) else {
+                found?.url.stopAccessingSecurityScopedResource()
                 self.recent.removeAll { $0 == url }
                 self.scheduleSave()
                 self.flash(L("This file can't be found"))
                 return
             }
-            self.open(url)
+            if target.path != url.path { self.recent.removeAll { $0 == url } }
+            self.open(target)
+            if self.fileURL == target { self.reach(found?.url) } else { found?.url.stopAccessingSecurityScopedResource() }
         }
     }
 
     func clearRecent() {
         recent = []
+        recentMarks = [:]
         scheduleSave()
+    }
+
+    // The file reached through a bookmark for the document open now (the one before is let go).
+    @ObservationIgnored private var reaching: URL?
+
+    private func reach(_ url: URL?) {
+        if let reaching, reaching != url { reaching.stopAccessingSecurityScopedResource() }
+        reaching = url
     }
 
     // MARK: unsaved work
@@ -2248,11 +2292,16 @@ final class Workbench: DesignHost {
         }
     }
 
+    // The bookmark set aside with unsaved work, made once for each file.
+    @ObservationIgnored private var markFor: (url: URL, data: Data)?
+
     func keepUnsaved() {
         guard dirty else { dropUnsaved(); return }
         guard doc != keptAside else { return }
         keptAside = doc
-        let r = Recovery(doc: doc, file: fileURL?.path, name: docName, docID: docID), url = recoveryURL
+        if let f = fileURL, markFor?.url != f { markFor = Marks.make(f).map { (url: f, data: $0) } }
+        let mark = fileURL.flatMap { f in markFor?.url == f ? markFor?.data : nil }
+        let r = Recovery(doc: doc, file: fileURL?.path, name: docName, docID: docID, fileMark: mark), url = recoveryURL
         Self.recoveryQueue.async {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             if let data = try? JSONEncoder().encode(r) { try? data.write(to: url, options: .atomic) }
@@ -2270,8 +2319,13 @@ final class Workbench: DesignHost {
         let url = recoveryURL
         guard let data = Self.recoveryQueue.sync(execute: { try? Data(contentsOf: url) }),
               let r = try? JSONDecoder().decode(Recovery.self, from: data), r.doc.valid, !r.doc.bodies.isEmpty else { return false }
-        let file = r.file.map { URL(fileURLWithPath: $0) }
+        var file = r.file.map { URL(fileURLWithPath: $0) }
         resetEditing()
+        // (Its file reached through the bookmark, as a sandboxed Bcad must.)
+        if let mark = r.fileMark, let found = Marks.resolve(mark) {
+            file = found.url
+            reach(found.url)
+        }
         if let id = r.docID { docID = id }
         doc = r.doc
         saved = file.flatMap { try? ThreeMF.read($0).doc } ?? Document()
@@ -4185,7 +4239,17 @@ final class Workbench: DesignHost {
             flash(L("A file named “{name}” already exists", ["name": to.lastPathComponent]))
             return
         }
-        guard Darwin.rename(url.path, to.path) == 0 else { flash(L("Couldn't rename the file")); return }
+        guard Darwin.rename(url.path, to.path) == 0 else {
+            let why = errno
+            // In the App Store's sandbox Bcad may write only the files it was given: the new name goes through the Save
+            // panel (the file under its old name stays).
+            if why == EPERM || why == EACCES {
+                saveDocument(as: true, name: t, in: url.deletingLastPathComponent(), message: L("Save under the new name (the file under its old name stays)"))
+            } else {
+                flash(L("Couldn't rename the file"))
+            }
+            return
+        }
         fileURL = to
         if !plans.plan.unlimitedFiles { plans.allowance.moved(docID, to: to) }
     }
@@ -4237,6 +4301,7 @@ final class Workbench: DesignHost {
     private func resetEditing() {
         generation += 1
         docID = UUID()
+        reach(nil)
         flight?.cancel()
         angleEdit = nil
         angleOpening = false
@@ -4291,6 +4356,8 @@ final class Workbench: DesignHost {
             built = [:]
             requestFit = true
             rebuildScene()
+            // CI's check that saving works where Bcad runs (inside the App Store's sandbox too): the file is saved back.
+            if ProcessInfo.processInfo.environment["BCAD_CHECK_SAVE"] == "1" { saveDocument() }
         } catch FileError.notBcad {
             flash(L("This 3MF wasn't made by Bcad and can't be edited"))
         } catch FileError.newer {
@@ -4301,14 +4368,19 @@ final class Workbench: DesignHost {
     }
 
     // The file is written on the kernel's thread, so the window stays live; `done` learns whether it worked.
-    func saveDocument(as: Bool = false, done: @escaping (Bool) -> Void = { _ in }) {
-        guard plans.ready else { plans.whenReady { [weak self] in self?.saveDocument(as: `as`, done: done) }; return }
+    func saveDocument(as: Bool = false, name: String? = nil, in folder: URL? = nil, message: String? = nil, done: @escaping (Bool) -> Void = { _ in }) {
+        guard plans.ready else {
+            plans.whenReady { [weak self] in self?.saveDocument(as: `as`, name: name, in: folder, message: message, done: done) }
+            return
+        }
         guard mayWrite() else { done(false); return }
         var url = fileURL
         if url == nil || `as` {
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
-            panel.nameFieldStringValue = title + ".3mf"
+            panel.nameFieldStringValue = (name ?? title) + ".3mf"
+            if let folder { panel.directoryURL = folder }
+            if let message { panel.message = message }
             guard panel.runModal() == .OK, let u = panel.url else { done(false); return }
             url = u
         }
@@ -4341,6 +4413,7 @@ final class Workbench: DesignHost {
                 MainActor.assumeIsolated {
                     self.ended(note)
                     // Another document opened or begun meanwhile stays as it is: the file saved was the one before it.
+                    Self.fileLog.notice("\(written ? "Saved" : "Couldn't save", privacy: .public) \(url.lastPathComponent, privacy: .public)")
                     if written {
                         self.wrote(id, name: url.deletingPathExtension().lastPathComponent, file: url, bodies: Allowance.fingerprint(doc))
                         if self.generation == generation {
@@ -4495,7 +4568,7 @@ struct BcadApp: App {
                 Button(L("Export STEP…")) { lib.export(step: true) }.keyboardShortcut("e", modifiers: [.command, .option])
             }
             CommandGroup(replacing: .appSettings) {
-                Button(L("Plans…")) { lib.openPlans() }
+                if !lib.plans.unlocked { Button(L("Plans…")) { lib.openPlans() } }
                 Button(L("Settings…")) { lib.toggleSettings() }.keyboardShortcut(",")
             }
             CommandGroup(replacing: .undoRedo) {

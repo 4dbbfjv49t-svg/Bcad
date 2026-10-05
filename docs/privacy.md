@@ -8,6 +8,7 @@ Bcad collects no personal data.
   only learns from the App Store which plan is active.
 - **The free plan's daily file:** Bcad keeps today's date and the name of the document saved or exported today in your
   Mac's Keychain, so the one-document-a-day limit holds. It never leaves your Mac.
-- **Settings** (language, look, recent files) are kept in `~/Library/Application Support/Bcad/` on your Mac.
+- **Settings** (language, look, recent files) and unsaved work are kept on your Mac, in the app's own container
+  (`~/Library/Containers/com.bohdan.bcad/`).
 
 Questions: open an issue in the Bcad repository.

@@ -1,0 +1,4 @@
+# Made by appstore/prepare.sh
+appstore/Bcad.xcodeproj/
+appstore/Resources/
+appstore/Info.plist

@@ -11152,5 +11152,26 @@
   "ja": {
    "other": "{n}日間"
   }
+ },
+ "Save under the new name (the file under its old name stays)": {
+  "uk": "Збережіть під новою назвою (файл зі старою назвою залишиться)",
+  "cs": "Uložte pod novým názvem (soubor se starým názvem zůstane)",
+  "de": "Unter dem neuen Namen sichern (die Datei mit dem alten Namen bleibt erhalten)",
+  "es": "Guarda con el nombre nuevo (el archivo con el nombre antiguo se conserva)",
+  "fr": "Enregistrez sous le nouveau nom (le fichier à l'ancien nom reste)",
+  "it": "Salva con il nuovo nome (il file con il vecchio nome resta)",
+  "hu": "Mentés az új néven (a régi nevű fájl megmarad)",
+  "nl": "Bewaar onder de nieuwe naam (het bestand met de oude naam blijft bestaan)",
+  "nb": "Lagre under det nye navnet (filen med det gamle navnet blir værende)",
+  "pl": "Zapisz pod nową nazwą (plik o starej nazwie pozostanie)",
+  "ro": "Salvează cu noul nume (fișierul cu vechiul nume rămâne)",
+  "fi": "Tallenna uudella nimellä (vanhalla nimellä oleva tiedosto säilyy)",
+  "sv": "Spara med det nya namnet (filen med det gamla namnet finns kvar)",
+  "kk": "Жаңа атаумен сақтаңыз (ескі атаулы файл қалады)",
+  "ka": "შეინახეთ ახალი სახელით (ძველი სახელის ფაილი დარჩება)",
+  "ar": "احفظ بالاسم الجديد (يبقى الملف بالاسم القديم)",
+  "hi": "नए नाम से सहेजें (पुराने नाम वाली फ़ाइल बनी रहेगी)",
+  "zh-Hans": "以新名称保存（旧名称的文件会保留）",
+  "ja": "新しい名前で保存（古い名前のファイルは残ります）"
  }
 }

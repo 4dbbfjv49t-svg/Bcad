@@ -294,6 +294,22 @@ enum ShopOutcome: Equatable, Sendable {
     }
 }
 
+// MARK: - Personal build
+
+// Everything, for good: the personal build has no plans to buy.
+@MainActor final class UnlockedShop: Shop {
+    static let studio = ActivePlan(product: Catalog.id(.studio, .yearly), plan: .studio, billing: .yearly, expires: nil, trial: false, renews: true,
+                                   next: nil)
+    let isTest = false
+
+    func start(_ changed: @escaping @MainActor () -> Void) {}
+    func products() async throws -> [ShopProduct] { [] }
+    func active() async -> ActivePlan? { Self.studio }
+    func trialEligible() async -> Bool { false }
+    func buy(_ id: String) async -> ShopOutcome { .nothing }
+    func restore() async -> ShopOutcome { .done }
+}
+
 // MARK: - App Store
 
 // StoreKit 2. Works once the app is signed and its products are in App Store Connect; until then it finds no products.
@@ -617,8 +633,8 @@ final class KeychainClaimStore: ClaimStore {
 
 // MARK: - Plans
 
-// The plan in force and what the Plans card shows. Development builds and the self-test use the test store; the App
-// Store build (-D APPSTORE), StoreKit.
+// The plan in force and what the Plans card shows. Development builds and the self-test use the test store; the personal
+// build (-D UNLOCKED) is always Studio; the App Store build (-D APPSTORE) uses StoreKit.
 @Observable @MainActor final class Plans {
     let shop: any Shop
     let allowance: Allowance
@@ -658,6 +674,8 @@ final class KeychainClaimStore: ClaimStore {
         let shop = TestShop(catalog: TestShop.load(), clock: clock, file: nil)
         shop.give(Catalog.id(.studio, .yearly))
         return Plans(shop: shop, allowance: Allowance(store: MemoryClaimStore(), clock: clock), clock: clock)
+        #elseif UNLOCKED
+        return Plans(shop: UnlockedShop(), allowance: Allowance(store: MemoryClaimStore(), clock: clock), clock: clock)
         #elseif APPSTORE
         return Plans(shop: AppStoreShop(), allowance: Allowance(store: KeychainClaimStore(service: "Bcad"), clock: clock), clock: clock)
         #else
@@ -667,6 +685,8 @@ final class KeychainClaimStore: ClaimStore {
     }
 
     var test: TestShop? { shop as? TestShop }
+    // The personal build: always Studio, nothing about plans shown.
+    var unlocked: Bool { shop is UnlockedShop }
 
     // At launch: changes made elsewhere followed, the plan looked at again when Bcad comes to the front. Until the store
     // answers, at most 5 seconds, the plan is taken as free.
@@ -683,6 +703,10 @@ final class KeychainClaimStore: ClaimStore {
 
     func refresh() {
         stamp += 1
+        if unlocked {
+            apply(UnlockedShop.studio, false)
+            return
+        }
         if let t = test {
             apply(t.activeNow(), !t.ledger.trialUsed)
             if products.isEmpty {

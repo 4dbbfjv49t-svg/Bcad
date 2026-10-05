@@ -1,6 +1,10 @@
 #!/bin/zsh
-# Builds /Applications/Bcad.app (or the given .app) on Bcad's own geometry engine (Engine/). ./build.sh --selftest builds
-# and runs the kernel/file self-test instead.
+# Builds /Applications/Bcad.app (or the given .app) on Bcad's own geometry engine (Engine/):
+#   ./build.sh             for development (plans bought in a test store with no real payment)
+#   ./build.sh --personal  your own copy: everything unlocked, no plans
+#   ./build.sh --appstore  as the Mac App Store has it: sandboxed, hardened runtime, plans through StoreKit (sign and
+#                          upload it from the Xcode project, see appstore/README.md)
+#   ./build.sh --selftest  builds and runs the kernel/file self-test instead
 set -euo pipefail
 
 # Interface languages, in the order of the in-app menu (English first).
@@ -8,13 +12,23 @@ LANGS=(en uk cs de es fr it hu nl nb pl ro fi sv kk ka ar hi zh-Hans ja)
 
 cd "$(dirname "$0")"
 SELFTEST=0
+MODE=dev
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --selftest) SELFTEST=1 ;;
+    --personal) MODE=personal ;;
+    --appstore) MODE=appstore ;;
     *) echo "✗ Unknown option $1"; exit 1 ;;
   esac
   shift
 done
+VERSION="$(tr -d '[:space:]' < VERSION)"
+BUILD="${BUILD_NUMBER:-1}"
+case $MODE in
+  personal) BUNDLE_ID=com.bohdan.bcad.personal ;;
+  appstore) BUNDLE_ID=com.bohdan.bcad ;;
+  *) BUNDLE_ID=local.bohdan.bcad ;;
+esac
 TARGET="${1:-/Applications/Bcad.app}"
 if [[ "$TARGET" != *.app ]]; then
   echo "✗ Target must end with .app"
@@ -41,7 +55,14 @@ for f in Engine/*.cpp; do
   KERNEL+=("$WORK/${f:t:r}.o")
 done
 SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift Sculpt.swift Plans.swift)
-if (( SELFTEST )); then SOURCES+=(test/SelfTest.swift); FLAGS+=(-D SELFTEST); fi
+if (( SELFTEST )); then
+  SOURCES+=(test/SelfTest.swift)
+  FLAGS+=(-D SELFTEST)
+elif [[ $MODE == personal ]]; then
+  FLAGS+=(-D UNLOCKED)
+elif [[ $MODE == appstore ]]; then
+  FLAGS+=(-D APPSTORE)
+fi
 
 echo "▸ Compiling"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$SDK" -target arm64-apple-macos26.0 $FLAGS \
@@ -65,61 +86,21 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$WORK/icon.iconset" -o "$WORK/AppIcon.icns"
 
-cat > "$WORK/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key><string>Bcad</string>
-  <key>CFBundleIdentifier</key><string>local.bohdan.bcad</string>
-  <key>CFBundleName</key><string>Bcad</string>
-  <key>CFBundleDisplayName</key><string>Bcad</string>
-  <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>26.0</string>
-  <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>NSPrincipalClass</key><string>NSApplication</string>
-  <key>NSSupportsAutomaticTermination</key><false/>
-  <key>NSSupportsSuddenTermination</key><false/>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key><string>3MF model</string>
-      <key>CFBundleTypeRole</key><string>Editor</string>
-      <key>LSHandlerRank</key><string>Alternate</string>
-      <key>CFBundleTypeExtensions</key><array><string>3mf</string></array>
-    </dict>
-  </array>
-</dict>
-</plist>
-PLIST
+sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" Info.plist.in > "$WORK/Info.plist"
 plutil -insert CFBundleLocalizations -json "[$(printf '"%s",' "${LANGS[@]}" | sed 's/,$//')]" "$WORK/Info.plist"
 plutil -lint "$WORK/Info.plist" >/dev/null
 
 echo "▸ Localizing"
-python3 - "$WORK" "${LANGS[@]}" <<'PY'
-import json, os, sys
-work = sys.argv[1]
-table = json.load(open('i18n.json'))
-esc = lambda v: v.replace('\\', '\\\\').replace('"', '\\"')
-for lang in sys.argv[2:]:
-    folder = os.path.join(work, 'lproj', f'{lang}.lproj')
-    os.makedirs(folder, exist_ok=True)
-    text = '3MF model' if lang == 'en' else table.get('3MF model', {}).get(lang, '3MF model')
-    open(os.path.join(folder, 'InfoPlist.strings'), 'w', encoding='utf-16').write(f'"3MF model" = "{esc(text)}";\n')
-PY
+python3 appstore/plist_strings.py "$WORK/lproj" "${LANGS[@]}"
 for f in "$WORK"/lproj/*.lproj/InfoPlist.strings; do plutil -lint "$f" >/dev/null; done
 
-echo "▸ Updating $TARGET"
-if pgrep -xq Bcad; then
+echo "▸ Updating $TARGET ($MODE, $BUNDLE_ID $VERSION ($BUILD))"
+running() { pgrep -xq Bcad && [[ "$(osascript -e "application id \"$BUNDLE_ID\" is running" 2>/dev/null)" == true ]]; }
+if running; then
   # A normal quit, so Bcad asks about unsaved changes; choosing Cancel there stops the build.
-  osascript -e 'tell application id "local.bohdan.bcad" to quit' >/dev/null 2>&1 || true
-  for i in {1..20}; do pgrep -xq Bcad || break; sleep 0.5; done
-  if pgrep -xq Bcad; then
+  osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+  for i in {1..20}; do running || break; sleep 0.5; done
+  if running; then
     echo "✗ Bcad is still open. Quit it and build again."
     exit 1
   fi
@@ -130,8 +111,12 @@ cp "$WORK/Bcad" "$TARGET/Contents/MacOS/Bcad"
 cp "$WORK/Info.plist" "$TARGET/Contents/Info.plist"
 cp "$WORK/AppIcon.icns" "$TARGET/Contents/Resources/AppIcon.icns"
 cp i18n.json "$TARGET/Contents/Resources/i18n.json"
-# The test store's products and prices (development builds sell nothing for real).
-cp Bcad.storekit "$TARGET/Contents/Resources/Bcad.storekit"
+case $MODE in
+  # The test store's products and prices (development builds sell nothing for real).
+  dev) cp Bcad.storekit "$TARGET/Contents/Resources/Bcad.storekit" ;;
+  # What the app does with data, as the App Store asks.
+  appstore) cp appstore/PrivacyInfo.xcprivacy "$TARGET/Contents/Resources/PrivacyInfo.xcprivacy" ;;
+esac
 cp -R "$WORK"/lproj/*.lproj "$TARGET/Contents/Resources/"
 # Nothing but the system's own libraries.
 if otool -L "$TARGET/Contents/MacOS/Bcad" | awk 'NR > 1 && $1 !~ /^(\/usr\/lib\/|\/System\/)/' | grep -q .; then
@@ -139,6 +124,11 @@ if otool -L "$TARGET/Contents/MacOS/Bcad" | awk 'NR > 1 && $1 !~ /^(\/usr\/lib\/
   otool -L "$TARGET/Contents/MacOS/Bcad"
   exit 1
 fi
-codesign --force -s - "$TARGET"
+if [[ $MODE == appstore ]]; then
+  # Sandboxed with the hardened runtime, signed for this Mac only: the App Store copy is signed from Xcode with your account.
+  codesign --force --options runtime --entitlements appstore/Bcad.entitlements -s - "$TARGET"
+else
+  codesign --force -s - "$TARGET"
+fi
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET" 2>/dev/null || true
 echo "✓ $TARGET"

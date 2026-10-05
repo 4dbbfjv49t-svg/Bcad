@@ -67,82 +67,36 @@ jobs:
           name: print-samples
           path: ${{ runner.temp }}/tmp/bcad-selftest/print-samples
 
-      - name: Build app
+      - name: Build the apps (for you, and for the App Store)
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           start=$(date +%s)
-          ./build.sh "$RUNNER_TEMP/out/Bcad.app"
-          echo "build took $(( $(date +%s) - start )) s"
-          du -sh "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS/Bcad"
-          ls -la "$RUNNER_TEMP/out/Bcad.app/Contents" "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS"
-          otool -L "$RUNNER_TEMP/out/Bcad.app/Contents/MacOS/Bcad"
-          if [ -e "$RUNNER_TEMP/out/Bcad.app/Contents/Frameworks" ]; then echo "✗ libraries bundled"; exit 1; fi
-          codesign -dv "$RUNNER_TEMP/out/Bcad.app" 2>&1 || true
-          codesign --verify --strict "$RUNNER_TEMP/out/Bcad.app" && echo "signature ok"
-          ditto -c -k --keepParent "$RUNNER_TEMP/out/Bcad.app" "$RUNNER_TEMP/out/Bcad.app.zip"
-
-      - name: Launch and open a file
-        run: |
-          APP="$RUNNER_TEMP/out/Bcad.app"
-          FILE="$TMPDIR/bcad-selftest/test.3mf"
-          R="$RUNNER_TEMP/results"
-          mkdir -p "$R/shots"
-          ls -la "$FILE"
-          swiftc -O test/windows.swift -o "$RUNNER_TEMP/windows"
-          rm -f ~/Library/Logs/DiagnosticReports/*Bcad* 2>/dev/null || true
-          START=$(date "+%Y-%m-%d %H:%M:%S")
+          ./build.sh --personal "$RUNNER_TEMP/out/personal/Bcad.app"
+          ./build.sh --appstore "$RUNNER_TEMP/out/appstore/Bcad.app"
+          echo "builds took $(( $(date +%s) - start )) s"
           fail=0
-          snap() {
-            sleep "$2"
-            screencapture -x "$R/shots/$1.png" || echo "screencapture failed"
-          }
-          # Running, with a window on screen, and the file opened as often as asked by now.
-          expect() {
-            local windows opened
-            windows=$("$RUNNER_TEMP/windows" Bcad)
-            opened=$(log show --start "$START" --style compact --predicate 'subsystem == "Bcad"' 2>/dev/null | grep -c "Opened test.3mf" || true)
-            if pgrep -x Bcad >/dev/null && [ "$windows" -ge 1 ] && [ "$opened" -ge "$2" ]; then
-              echo "✓ $1: running, $windows window(s), opened $opened time(s)"
-            else
-              echo "✗ $1: running $(pgrep -x Bcad >/dev/null && echo yes || echo no), $windows window(s), opened $opened time(s), wanted $2"
-              fail=1
-            fi
-          }
-          quit() {
-            pkill -TERM -x Bcad || true
-            for i in $(seq 1 50); do pgrep -x Bcad >/dev/null || break; sleep 0.2; done
-            pkill -KILL -x Bcad 2>/dev/null || true
-          }
+          for m in personal appstore; do
+            A="$RUNNER_TEMP/out/$m/Bcad.app"
+            du -sh "$A"
+            if [ -e "$A/Contents/Frameworks" ]; then echo "✗ $m: libraries bundled"; fail=1; fi
+            codesign --verify --strict "$A" && echo "✓ $m: signature ok" || fail=1
+            plutil -p "$A/Contents/Info.plist" | grep -E "CFBundleIdentifier|CFBundleShortVersionString|CFBundleVersion|NSHumanReadableCopyright"
+          done
+          A="$RUNNER_TEMP/out/appstore/Bcad.app"
+          codesign -d --entitlements - --xml "$A" 2>/dev/null | plutil -p - | tee "$RUNNER_TEMP/entitlements.txt"
+          grep -q '"com.apple.security.app-sandbox" => true' "$RUNNER_TEMP/entitlements.txt" && echo "✓ sandboxed" || { echo "✗ not sandboxed"; fail=1; }
+          codesign -dv "$A" 2>&1 | grep -q "runtime" && echo "✓ hardened runtime" || { echo "✗ no hardened runtime"; fail=1; }
+          plutil -lint "$A/Contents/Resources/PrivacyInfo.xcprivacy" && echo "✓ privacy manifest" || fail=1
+          [ ! -e "$A/Contents/Resources/Bcad.storekit" ] && echo "✓ no test store inside" || { echo "✗ test store bundled"; fail=1; }
+          exit $fail
 
-          echo "▸ 1 launch empty"
-          open --stdout "$R/1.out" --stderr "$R/1.err" "$APP"
-          snap 1-empty 15
-          expect "launched" 0
-
-          echo "▸ 2 open the file in the running app"
-          open -a "$APP" "$FILE"
-          snap 2-open-running-10s 10
-          snap 2-open-running-40s 30
-          expect "a file opened in the running app" 1
-          quit
-
-          echo "▸ 3 cold launch with the file (Finder double-click)"
-          open -a "$APP" --stdout "$R/3.out" --stderr "$R/3.err" "$FILE"
-          snap 3-cold-10s 10
-          snap 3-cold-40s 30
-          expect "launched with a file" 2
-
-          echo "▸ 4 open the same file again"
-          open -a "$APP" "$FILE"
-          snap 4-reopen-30s 30
-          expect "the same file opened again" 3
-          quit
-
-          log show --start "$START" --style compact --predicate 'process == "Bcad"' > "$R/unified.log" 2>&1 || true
-          tail -100 "$R/unified.log"
-          mkdir -p "$R/crashes"
-          if cp ~/Library/Logs/DiagnosticReports/*Bcad* "$R/crashes/" 2>/dev/null; then echo "✗ Bcad crashed"; fail=1; else echo "✓ no crash reports"; fi
-          ls -la "$R" "$R/shots" "$R/crashes"
-          for f in "$R"/*.out "$R"/*.err; do echo "── $f"; cat "$f"; done
+      - name: Launch and open a file (the App Store app in its sandbox, saving back; the app for you)
+        run: |
+          FILE="$TMPDIR/bcad-selftest/test.3mf"
+          fail=0
+          test/launch.sh "$RUNNER_TEMP/out/appstore/Bcad.app" "$FILE" "$RUNNER_TEMP/results" appstore save || fail=1
+          test/launch.sh "$RUNNER_TEMP/out/personal/Bcad.app" "$FILE" "$RUNNER_TEMP/results" personal || fail=1
           exit $fail
 
       - name: Thumbnails
@@ -150,7 +104,7 @@ jobs:
         continue-on-error: true
         run: |
           shopt -s nullglob
-          for f in "$RUNNER_TEMP"/results/shots/*.png; do
+          for f in "$RUNNER_TEMP"/results/*/shots/*.png; do
             sips -Z 900 -s format jpeg -s formatOptions 45 "$f" --out "${f%.png}.jpg" >/dev/null
             echo "=== THUMB $(basename "${f%.png}") ==="
             base64 -i "${f%.png}.jpg" | tr -d '\n'
@@ -158,10 +112,45 @@ jobs:
             echo "=== END ==="
           done
 
+      - name: Xcode project for the App Store (made and built, unsigned)
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          brew install xcodegen
+          appstore/prepare.sh "$RUNNER_TEMP/out/personal/Bcad.app/Contents/MacOS/Bcad"
+          start=$(date +%s)
+          xcodebuild -project appstore/Bcad.xcodeproj -scheme Bcad -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/xcode" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/results/xcodebuild.log" 2>&1 \
+            || { tail -80 "$RUNNER_TEMP/results/xcodebuild.log"; exit 1; }
+          echo "xcodebuild took $(( $(date +%s) - start )) s"
+          grep -E "warning:|BUILD" "$RUNNER_TEMP/results/xcodebuild.log" | sort -u | tail -40
+          X="$RUNNER_TEMP/xcode/Build/Products/Release/Bcad.app"
+          lipo -archs "$X/Contents/MacOS/Bcad"
+          lipo -archs "$X/Contents/MacOS/Bcad" | grep -q arm64 && lipo -archs "$X/Contents/MacOS/Bcad" | grep -q x86_64 && echo "✓ Apple silicon and Intel"
+          ls "$X/Contents/Resources" | head -40
+
+      - name: Packages to download
+        run: |
+          OUT="$RUNNER_TEMP/out"
+          ditto -c -k --keepParent "$OUT/personal/Bcad.app" "$OUT/Bcad-for-me.zip"
+          P="$OUT/Bcad-for-App-Store"
+          mkdir -p "$P/Bcad source"
+          git archive --format=tar HEAD | tar -x -C "$P/Bcad source"
+          cp -R appstore/Bcad.xcodeproj appstore/Resources appstore/Info.plist "$P/Bcad source/appstore/"
+          cp appstore/README.md "$P/HOW TO PUBLISH.md"
+          ditto "$OUT/appstore/Bcad.app" "$P/Bcad.app"
+          ditto -c -k --keepParent "$P" "$OUT/Bcad-for-App-Store.zip"
+          ls -la "$OUT"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Bcad.app
-          path: ${{ runner.temp }}/out/Bcad.app.zip
+          name: Bcad-for-me
+          path: ${{ runner.temp }}/out/Bcad-for-me.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bcad-for-App-Store
+          path: ${{ runner.temp }}/out/Bcad-for-App-Store.zip
 
       - uses: actions/upload-artifact@v4
         if: always()

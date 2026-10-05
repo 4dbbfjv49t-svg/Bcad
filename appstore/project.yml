@@ -1,0 +1,71 @@
+# The App Store build as an Xcode project (XcodeGen). Made by appstore/prepare.sh; open Bcad.xcodeproj, choose your Team
+# under Signing & Capabilities, then Product → Archive → Distribute App (see README.md).
+name: Bcad
+options:
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: ${BCAD_VERSION}
+    CURRENT_PROJECT_VERSION: ${BCAD_BUILD}
+targets:
+  Bcad:
+    type: application
+    platform: macOS
+    sources:
+      - path: ../Bcad.swift
+      - path: ../Design.swift
+      - path: ../Viewport.swift
+      - path: ../Views.swift
+      - path: ../Files.swift
+      - path: ../Sculpt.swift
+      - path: ../Plans.swift
+      - path: ../Engine
+      - path: ../BcadKernel.h
+        buildPhase: none
+      - path: ../i18n.json
+        buildPhase: resources
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Resources
+      - path: Bcad.entitlements
+        buildPhase: none
+      - path: Info.plist
+        buildPhase: none
+      - path: ../Bcad.storekit
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: Bcad
+        PRODUCT_BUNDLE_IDENTIFIER: com.bohdan.bcad
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Bcad.entitlements
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_USER_SELECTED_FILES: readwrite
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: ../BcadKernel.h
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: APPSTORE
+        HEADER_SEARCH_PATHS: $(SRCROOT)/..
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        # No fused multiply-adds: the engine gives the same results as on every other machine.
+        OTHER_CPLUSPLUSFLAGS: $(inherited) -ffp-contract=off
+        GCC_OPTIMIZATION_LEVEL: "3"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        DEAD_CODE_STRIPPING: YES
+        COMBINE_HIDPI_IMAGES: YES
+schemes:
+  Bcad:
+    build:
+      targets:
+        Bcad: all
+    run:
+      config: Release
+      # Plans bought in Xcode's local test store (no account needed).
+      storeKitConfiguration: ../Bcad.storekit
+    archive:
+      config: Release

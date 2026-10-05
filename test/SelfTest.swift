@@ -482,6 +482,15 @@ enum SelfTest {
         try? FileManager.default.copyItem(at: recoveryCopy, to: recovery)
         let restored = lib.restoreUnsaved()
         check("unsaved work comes back after a crash", droppedOnOpen && restored && lib.doc == unsavedDoc && lib.dirty && lib.fileURL == u3)
+        // A file opened is remembered by a bookmark too (a sandboxed Bcad reaches it again only so), and so is the file of
+        // work set aside.
+        func same(_ a: URL?, _ b: URL) -> Bool { a?.standardizedFileURL.resolvingSymlinksInPath().path == b.standardizedFileURL.resolvingSymlinksInPath().path }
+        let recentBack = lib.recentMarks[u3.path].flatMap { Marks.resolve($0)?.url }
+        let setAside = (try? Data(contentsOf: recoveryCopy)).flatMap { try? JSONDecoder().decode(Recovery.self, from: $0) }
+        let setAsideBack = setAside?.fileMark.flatMap { Marks.resolve($0)?.url }
+        check("recent files and work set aside keep bookmarks to their files", same(recentBack, u3) && same(setAsideBack, u3))
+        recentBack?.stopAccessingSecurityScopedResource()
+        setAsideBack?.stopAccessingSecurityScopedResource()
         let keptSaved = saveAs(dir.appendingPathComponent("recovered.3mf"))
         Workbench.recoveryQueue.sync {}
         check("saved, nothing is set aside", keptSaved && !lib.dirty && !FileManager.default.fileExists(atPath: recovery.path))
@@ -1891,6 +1900,11 @@ enum SelfTest {
                 let untouched = lib.doc == held
                 let closed = (keyDown(53).map { lib.key($0) } ?? false) && !plans.showing
                 check("the Plans card takes the keys: Backspace leaves the shapes alone, Esc closes it", swallowed && untouched && closed)
+
+                // The personal build's plans: Studio for good, nothing to buy or show.
+                let personal = Plans(shop: UnlockedShop(), allowance: Allowance(store: MemoryClaimStore(), clock: PlanClock()), clock: PlanClock())
+                check("the personal build is always Studio, its plans out of sight", personal.plan == .studio && personal.unlocked && personal.ready &&
+                      personal.status == nil && !plans.unlocked)
 
                 // Studio again, as the rest expects.
                 shop.reset()
