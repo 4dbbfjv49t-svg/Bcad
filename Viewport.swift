@@ -347,17 +347,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         g.count[k] = 3 * triangles
     }
 
-    // The brush where the pointer is on the surface, and (with the mirror on) where it works across it.
+    // The brush where the pointer is on the surface (its rim, its core, its lean), and where it works across each mirror.
     private func drawBrush(_ enc: MTLRenderCommandEncoder, _ r: SculptRing, _ place: Placement, accent: SIMD4<Float>) {
         var lines: [LineV] = []
-        func ring(_ at: SIMD3<Double>, _ n: SIMD3<Double>, _ alpha: Float) {
-            let up = length(n) > 0.5 ? normalize(n) : SIMD3<Double>(0, 0, 1)
-            let pts = circle(around: up, at, lib.sculptRadius).map { SIMD3<Float>($0) }
-            Renderer.polyline(pts, width: 2, color: SIMD4(accent.x, accent.y, accent.z, alpha), into: &lines)
-            Renderer.segment(SIMD3<Float>(at), SIMD3<Float>(at + up * lib.sculptRadius * 0.25), width: 2, color: SIMD4(accent.x, accent.y, accent.z, alpha), into: &lines)
+        let tip = lib.sculptTip
+        for line in SculptCursor.lines(at: r.at, normal: r.normal, way: lib.sculptWay, radius: lib.sculptRadius, tip: tip, mirror: lib.sculptMirror) {
+            Renderer.polyline(line.points.map { SIMD3<Float>($0) }, width: 2, color: SIMD4(accent.x, accent.y, accent.z, Float(line.alpha)), into: &lines)
         }
-        ring(r.at, r.normal, 0.95)
-        if lib.sculptMirror { ring(SIMD3(-r.at.x, r.at.y, r.at.z), SIMD3(-r.normal.x, r.normal.y, r.normal.z), 0.45) }
         drawLines(enc, lines, model: simd_float4x4(place.matrix), depth: depthOff)
     }
 
@@ -1058,6 +1054,21 @@ final class CadView: MTKView {
         return (s.penStrength ? p : 1, s.penSize ? p : 1)
     }
 
+    // A pen held at a slant (with that switched on): how far it leans along the stroke's way on the screen (degrees; its
+    // top leaning back as it's drawn along leans the brush's push forward). Nil for a mouse, or with the switch off.
+    static func penTilt(_ tilt: CGPoint, tablet: Bool, way: CGVector, _ s: Settings) -> Double? {
+        guard s.penTilt, tablet else { return nil }
+        let len = (way.dx * way.dx + way.dy * way.dy).squareRoot()
+        let (wx, wy) = len > 0 ? (way.dx / len, way.dy / len) : (1, 0)
+        return min(80, max(-80, -90 * Double(tilt.x * wx + tilt.y * wy)))
+    }
+
+    // The view's right, in the sculpted body's own coordinates.
+    private func bodyRight() -> SIMD3<Double> {
+        guard let place = lib.sculptPlace else { return SIMD3(1, 0, 0) }
+        return (place.matrix.inverse * SIMD4(SIMD3<Double>(lib.camera.side), 0)).xyz
+    }
+
     override func tabletProximity(with e: NSEvent) {
         eraser = e.isEnteringProximity && e.pointingDeviceType == .eraser
     }
@@ -1252,8 +1263,13 @@ final class CadView: MTKView {
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         if lib.mode == .sculpt {
-            // The brush follows the pointer over the body.
+            // The brush follows the pointer over the body, turned to the way it goes (coming onto it: the view's right).
             let r = lib.sculptBusy ? nil : sculptHit(p)
+            if let r, let was = lib.sculptRing {
+                if length(r.at - was.at) > 1e-6 { lib.sculptWay = r.at - was.at }
+            } else if r != nil {
+                lib.sculptWay = bodyRight()
+            }
             if r != lib.sculptRing { lib.sculptRing = r }
             if lib.hover != Hover() { lib.hover = Hover() }
             return
@@ -1339,8 +1355,9 @@ final class CadView: MTKView {
         case .sculpt:
             // On the body: a stroke of the brush (Shift smooths, ⌥ turns it around); off it, the view turns (Shift: pans).
             let pen = CadView.pen(e, lib.settings)
+            let tilt = CadView.penTilt(e.subtype == .tabletPoint ? e.tilt : .zero, tablet: e.subtype == .tabletPoint, way: CGVector(dx: 0, dy: 0), lib.settings)
             if let hit = sculptHit(p), let brush = lib.sculptBegin(at: hit.at, smooth: shift, invert: e.modifierFlags.contains(.option) != eraser,
-                                                                  pressure: pen.pressure, size: pen.size) {
+                                                                  pressure: pen.pressure, size: pen.size, tilt: tilt) {
                 strokeBrush = brush
                 strokeFrom = hit.at
                 lib.sculptRing = hit
@@ -1454,8 +1471,10 @@ final class CadView: MTKView {
         case .sculpt:
             guard let (o, d) = sculptRay(p) else { return }
             let pen = CadView.pen(e, lib.settings)
-            if strokeBrush == .grab {
-                // Grabbed: carried in the plane through where it was taken that faces the view.
+            let tilt = CadView.penTilt(e.subtype == .tabletPoint ? e.tilt : .zero, tablet: e.subtype == .tabletPoint,
+                                       way: CGVector(dx: dx, dy: dy), lib.settings)
+            if strokeBrush?.drags == true {
+                // Grabbed (or hooked): carried in the plane through where it was taken that faces the view.
                 guard let place = lib.sculptPlace else { return }
                 let ahead = SIMD3<Double>(normalize(lib.camera.target - lib.camera.eye))
                 let f = (place.matrix.inverse * SIMD4(ahead, 0)).xyz
@@ -1465,7 +1484,8 @@ final class CadView: MTKView {
                 lib.sculptDab(at: at)
                 lib.sculptRing = SculptRing(at: at, normal: lib.sculptRing?.normal ?? -f)
             } else if let hit = lib.sculpt?.ray(o, d) {
-                lib.sculptDab(at: hit.at, pressure: pen.pressure, size: pen.size)
+                lib.sculptDab(at: hit.at, pressure: pen.pressure, size: pen.size, tilt: tilt)
+                if let was = lib.sculptRing, length(hit.at - was.at) > 1e-6 { lib.sculptWay = hit.at - was.at }
                 lib.sculptRing = hit
             }
         case .tilt(let k):

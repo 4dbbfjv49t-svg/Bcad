@@ -1722,9 +1722,13 @@ struct Settings: Codable, Equatable {
     var symmetric = false
     // Shortcuts switched off: they don't fire and their keys are free for others.
     var off: Set<String> = []
-    // Sculpting with a drawing tablet: what pressing the pen harder does (a mouse is always full strength and size).
+    // Sculpting with a drawing tablet: what pressing the pen harder does (a mouse is always full strength and size), and
+    // whether holding it at a slant leans the brush.
     var penStrength = true
     var penSize = false
+    var penTilt = false
+    // The brush, its size, and each brush's strength and tip as last left.
+    var sculpt = SculptSettings()
 
     init() {}
 
@@ -1745,6 +1749,8 @@ struct Settings: Codable, Equatable {
         off = Set(((try? c.decode([String].self, forKey: .off)) ?? []).filter { Action(rawValue: $0) != nil })
         penStrength = (try? c.decode(Bool.self, forKey: .penStrength)) ?? true
         penSize = (try? c.decode(Bool.self, forKey: .penSize)) ?? false
+        penTilt = (try? c.decode(Bool.self, forKey: .penTilt)) ?? false
+        sculpt = (try? c.decode(SculptSettings.self, forKey: .sculpt)) ?? SculptSettings()
     }
 
     // The print bed's longest side: no size or thread is made longer.
@@ -2127,11 +2133,13 @@ final class Workbench: DesignHost {
     var sculptLocal = false
     var sculptTriangles = 0
     var sculptBusy = false
-    var sculptBrush = SculptBrush.draw
-    var sculptRadius = 3.0
-    var sculptStrength = 0.5
-    var sculptMirror = false
+    // The brush's size: tenths of a millimetre of its radius (1…200), as last set, or (never set) to suit the body.
+    var sculptSize = 30.0
+    // Mirrors in use: bits for x, y and z.
+    var sculptMirror = 0
     var sculptRing: SculptRing?
+    // The way the pointer last went over the surface (the body's own coordinates): an oval brush is turned from it.
+    var sculptWay = SIMD3<Double>(1, 0, 0)
     @ObservationIgnored private var sculptToken = 0
     var splitAxis = 2
     // The ruler: its ends, the end the pointer is on, and the shortest distance between surfaces when an end is one.
@@ -3538,8 +3546,8 @@ final class Workbench: DesignHost {
         }
         sculptPast = []
         sculptAhead = []
-        // A brush a tenth of the body across, at least four triangles wide.
-        sculptRadius = Workbench.round2(max(4 * s.detail, s.size / 10))
+        // The size last set; never set, a brush a tenth of the body across, at least four triangles wide.
+        sculptSize = settings.sculpt.size ?? min(200, max(1, (10 * max(4 * s.detail, s.size / 10)).rounded()))
         useSculpt(s)
     }
 
@@ -3596,23 +3604,26 @@ final class Workbench: DesignHost {
 
     // A stroke: begun where the pointer met the body (its own coordinates), dabbed along the way, ended. Shift smooths
     // whatever the brush; ⌥ inverts it. The brush it took (nil when there's nothing to sculpt).
+    // across: the way it's taken to go until it moves (the body's own coordinates); tilt: a pen's slant (degrees).
     @discardableResult
-    func sculptBegin(at p: SIMD3<Double>, smooth: Bool, invert: Bool, pressure: Double = 1, size: Double = 1) -> SculptBrush? {
+    func sculptBegin(at p: SIMD3<Double>, smooth: Bool, invert: Bool, pressure: Double = 1, size: Double = 1, across: SIMD3<Double>? = nil,
+                     tilt: Double? = nil) -> SculptBrush? {
         guard let s = sculpt, !sculptBusy else { return nil }
         let brush = smooth ? .smooth : sculptBrush
         // A new stroke after undoing a Remesh: that Remesh can't be done again.
         sculptAhead = []
         // The triangles under it made the Detail size with the switch on (the Detail brush does only that).
         s.setDetail(sculptLocal || brush == .detail ? sculptDetail : 0)
-        s.begin(brush, at: p, radius: sculptRadius, strength: sculptStrength, mirror: sculptMirror, invert: invert)
-        s.dab(p, pressure: pressure, size: size)
+        let tip = settings.sculpt.tips[brush.key] ?? SculptTip()
+        s.begin(brush, at: p, radius: sculptRadius, strength: tip.strength, mirror: sculptMirror, invert: invert, tip: tip, across: across ?? sculptWay)
+        s.dab(p, pressure: pressure, size: size, tilt: tilt)
         countSculpt()
         sceneVersion += 1
         return brush
     }
 
-    func sculptDab(at p: SIMD3<Double>, pressure: Double = 1, size: Double = 1) {
-        sculpt?.dab(p, pressure: pressure, size: size)
+    func sculptDab(at p: SIMD3<Double>, pressure: Double = 1, size: Double = 1, tilt: Double? = nil) {
+        sculpt?.dab(p, pressure: pressure, size: size, tilt: tilt)
         countSculpt()
         sceneVersion += 1
     }
@@ -3649,10 +3660,45 @@ final class Workbench: DesignHost {
         }
     }
 
-    // [ and ]: the brush smaller or larger.
+    // [ and ]: the brush smaller or larger, by about a seventh, at least by one.
     func sculptResize(_ up: Bool) {
-        sculptRadius = Workbench.round2(min(500, max(0.05, sculptRadius * (up ? 1.15 : 1 / 1.15))))
+        let n = sculptSize
+        setSculptSize(up ? max(n + 1, (n * 1.15).rounded()) : min(n - 1, (n / 1.15).rounded()))
+    }
+
+    // The brush, its size and its own strength and tip, kept in the settings as they're set.
+    var sculptBrush: SculptBrush {
+        get { SculptBrush(key: settings.sculpt.brush) ?? .draw }
+        set { updateSettings { $0.sculpt.brush = newValue.key } }
+    }
+
+    // Its radius (mm).
+    var sculptRadius: Double { sculptSize / 10 }
+
+    func setSculptSize(_ n: Double) {
+        guard n.isFinite else { return }
+        let v = min(200, max(1, n.rounded()))
+        sculptSize = v
+        updateSettings { $0.sculpt.size = v }
         sceneVersion += 1
+    }
+
+    var sculptTip: SculptTip {
+        get { settings.sculpt.tips[sculptBrush.key] ?? SculptTip() }
+        set {
+            let k = sculptBrush.key
+            updateSettings { $0.sculpt.tips[k] = newValue }
+            sceneVersion += 1
+        }
+    }
+
+    var sculptStrength: Double {
+        get { sculptTip.strength }
+        set {
+            var t = sculptTip
+            t.strength = min(1, max(0.01, newValue))
+            sculptTip = t
+        }
     }
 
     // A detail to two significant digits (0.33, 1.2, 4).

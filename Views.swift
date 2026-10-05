@@ -518,6 +518,9 @@ struct ModeBar: View {
     @Environment(Workbench.self) private var lib
     // The tool it was opened for: kept while it slides away, so it doesn't turn into another tool's bar on the way.
     let mode: Mode
+    // Sculpting: the brushes to choose from, and the brush's tip, opened.
+    @State private var brushesOpen = false
+    @State private var tipOpen = false
 
     private var title: String {
         switch mode {
@@ -604,24 +607,30 @@ struct ModeBar: View {
             .disabled(lib.editBody == nil)
     }
 
-    // The brushes and the mirror; the brush's size and strength, the detail to make it again at (and, switched on, to
-    // make the triangles under every brush), Remesh, how many triangles it has, Done.
+    // The brush (the others to choose from), the mirrors, its size, strength and tip; the detail to make it again at
+    // (and, switched on, to make the triangles under every brush), Remesh, how many triangles it has, Done.
     @ViewBuilder private var sculpt: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
-                ForEach(SculptBrush.allCases, id: \.self) { b in
-                    Chip(text: b.label, chosen: lib.sculptBrush == b, tint: lib.accent2) { lib.sculptBrush = b }
-                        .help(L(b.hint))
+                Chip(text: lib.sculptBrush.label + " ▾", chosen: true, tint: lib.accent2) { brushesOpen.toggle() }
+                    .help(lib.sculptBrush.hint)
+                    .popover(isPresented: $brushesOpen, arrowEdge: .bottom) { BrushPicker { brushesOpen = false }.environment(lib) }
+                Text(L("Mirror")).foregroundStyle(Ink.text.opacity(0.55)).padding(.leading, 8)
+                ForEach(0..<3, id: \.self) { i in
+                    Chip(text: ["X", "Y", "Z"][i], chosen: (lib.sculptMirror & (1 << i)) != 0, tint: Axis.color(i)) { lib.sculptMirror ^= 1 << i }
+                        .help(L("Shapes the body alike on both sides of its middle along this axis"))
                 }
-                Chip(text: L("Mirror X"), chosen: lib.sculptMirror, tint: Axis.color(0)) { lib.sculptMirror.toggle() }
-                    .help(L("Shapes both sides of the body alike, across its middle"))
+                Text(L("Size")).foregroundStyle(Ink.text.opacity(0.55)).padding(.leading, 8)
+                MMField(value: lib.sculptSize, range: 1...200, width: 46, digits: 0) { lib.setSculptSize($0) }
+                    .help(L("The brush's radius in tenths of a millimetre · [ ] smaller and larger"))
+                Text(L("Strength")).foregroundStyle(Ink.text.opacity(0.55)).padding(.leading, 4)
+                MMField(value: lib.sculptStrength * 100, unit: "%", range: 1...100, width: 46, digits: 0) { lib.sculptStrength = $0 / 100 }
+                Chip(text: L("Brush tip") + " ▾", chosen: tipOpen, tint: lib.accent2) { tipOpen.toggle() }
+                    .help(L("How hard and crisp its edge is, how oval, and how far it leans"))
+                    .popover(isPresented: $tipOpen, arrowEdge: .bottom) { BrushTipPanel().environment(lib) }
                     .padding(.leading, 6)
             }
             HStack(spacing: 10) {
-                Text(L("Radius")).foregroundStyle(Ink.text.opacity(0.55))
-                MMField(value: lib.sculptRadius, unit: L("mm"), range: 0.05...500, width: 58) { lib.sculptRadius = $0 }
-                Text(L("Strength")).foregroundStyle(Ink.text.opacity(0.55))
-                MMField(value: lib.sculptStrength * 100, unit: "%", range: 1...100, width: 52) { lib.sculptStrength = $0 / 100 }
                 Text(L("Detail")).foregroundStyle(Ink.text.opacity(0.55))
                 MMField(value: lib.sculptDetail, unit: L("mm"), range: 0.05...20, width: 58) { lib.sculptDetail = $0 }
                 Chip(text: L("Under the brush"), chosen: lib.sculptLocal, tint: lib.accent2) { lib.sculptLocal.toggle() }
@@ -2265,6 +2274,10 @@ struct SettingsPane: View {
                     NeonToggle(state: s.penSize) { lib.updateSettings { $0.penSize.toggle() } }
                         .accessibilityLabel(L("Pen pressure sets the size"))
                 }
+                SettingLine(title: L("Pen tilt sets the tilt"), detail: L("With a drawing tablet: holding the pen at a slant leans the brush")) {
+                    NeonToggle(state: s.penTilt) { lib.updateSettings { $0.penTilt.toggle() } }
+                        .accessibilityLabel(L("Pen tilt sets the tilt"))
+                }
                 SettingsTitle(text: L("Other shortcuts"))
                 ForEach(fixed, id: \.0) { title, keys in
                     HStack {
@@ -2984,5 +2997,76 @@ struct PlanSettings: View {
                 SettingLine(title: L("Today's free file"), detail: plans.allowance.todays?.name ?? L("Not used yet today")) { EmptyView() }
             }
         }
+    }
+}
+
+// Every brush to choose from: those that add, those that shape, those that move.
+struct BrushPicker: View {
+    @Environment(Workbench.self) private var lib
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(SculptBrush.rows.indices, id: \.self) { r in
+                HStack(spacing: 4) {
+                    ForEach(SculptBrush.rows[r], id: \.self) { b in
+                        Chip(text: b.label, chosen: lib.sculptBrush == b, tint: lib.accent2) {
+                            lib.sculptBrush = b
+                            done()
+                        }
+                        .help(b.hint)
+                    }
+                }
+            }
+        }
+        .padding(12)
+    }
+}
+
+// A brush's tip: how much of it works at full strength and how crisp its edge, how oval and turned how far from the way
+// it's drawn, how far its push leans that way. Kept for each brush.
+struct BrushTipPanel: View {
+    @Environment(Workbench.self) private var lib
+
+    var body: some View {
+        let t = lib.sculptTip
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L("Brush tip") + " · " + lib.sculptBrush.label)
+                .font(.ui(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(lib.accent2)
+            line(L("Hardness"), L("How much of the brush works at full strength before it fades"), t.hardness * 100, "%", 0...100) { v in edit { $0.hardness = v / 100 } }
+            line(L("Rigidity"), L("How crisp its edge is: soft and rounded, or a straight slope"), t.rigidity * 100, "%", 0...100) { v in edit { $0.rigidity = v / 100 } }
+            line(L("Oval"), L("How wide it is across, as a part of its length"), t.oval * 100, "%", 5...100) { v in edit { $0.oval = v / 100 } }
+            line(L("Angle"), L("How far the oval is turned from the way you draw"), t.angle, "°", 0...180) { v in edit { $0.angle = v } }
+            line(L("Tilt"), L("How far its push leans toward the way you draw"), t.tilt, "°", -80...80) { v in edit { $0.tilt = v } }
+            Button(L("Plain")) {
+                edit { tip in
+                    let strength = tip.strength
+                    tip = SculptTip()
+                    tip.strength = strength
+                }
+            }
+            .buttonStyle(PillStyle(tint: lib.accent2))
+            .frame(width: 90)
+            .help(L("A round, soft tip, straight out"))
+        }
+        .padding(14)
+        .frame(width: 270)
+    }
+
+    private func edit(_ change: (inout SculptTip) -> Void) {
+        var t = lib.sculptTip
+        change(&t)
+        lib.sculptTip = t
+    }
+
+    private func line(_ title: String, _ help: String, _ value: Double, _ unit: String, _ range: ClosedRange<Double>,
+                      _ set: @escaping (Double) -> Void) -> some View {
+        HStack {
+            Text(title).foregroundStyle(Ink.text.opacity(0.75))
+            Spacer(minLength: 8)
+            MMField(value: value, unit: unit, range: range, width: 50, digits: 0, set: set)
+        }
+        .help(help)
     }
 }

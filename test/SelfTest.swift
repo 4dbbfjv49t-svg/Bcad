@@ -1409,9 +1409,9 @@ enum SelfTest {
             lib.camera.pitch = 1.0
             let flat = top(0, 0)
             lib.sculptBrush = .draw
-            lib.sculptRadius = 4
+            lib.setSculptSize(40)
             lib.sculptStrength = 0.5
-            lib.sculptMirror = false
+            lib.sculptMirror = 0
             let strokes = lib.sculptStrokes
             if let a = view.project(SIMD3(-4, 0, 20)), let b = view.project(SIMD3(4, 0, 20)) {
                 view.mouseMoved(with: event(.mouseMoved, a, []))
@@ -1439,8 +1439,8 @@ enum SelfTest {
             lib.camera.pitch = 0
             lib.camera.yaw = 0
             lib.sculptBrush = .grab
-            lib.sculptRadius = 5
-            lib.sculptMirror = true
+            lib.setSculptSize(50)
+            lib.sculptMirror = 1
             let right = nearest(SIMD3(12, -10, 0)), left = nearest(SIMD3(-12, -10, 0))
             let was = (point(right), point(left))
             if let a = view.project(SIMD3(12, -10, 10)), let b = view.project(SIMD3(12, -10, 16)) {
@@ -1451,15 +1451,84 @@ enum SelfTest {
             } else {
                 check("the sculpted body's front is in view", false)
             }
-            // Beside the body a drag turns the view and sculpts nothing; [ and ] change the brush's size.
+            // The snake hook, dragged as Grab is: the front pulled up after the pointer, near where it began.
+            lib.sculptBrush = .snakeHook
+            lib.sculptMirror = 0
+            let hooked = nearest(SIMD3(0, -10, 0)), hookedWas = point(hooked)
+            if let a = view.project(SIMD3(0, -10, 10)), let b = view.project(SIMD3(0, -10, 16)) {
+                drag(a, b)
+                let up = point(hooked).z - hookedWas.z
+                check("the snake hook pulls the surface out after the pointer", up > 3 && up < 6.5, "\(up)")
+            } else {
+                check("the sculpted body's front is in view", false)
+            }
+            // Beside the body a drag turns the view and sculpts nothing; [ and ] change the brush's size, by at least one,
+            // between 1 and 200 (tenths of a millimetre of its radius).
             let turned = lib.camera.yaw, made = lib.sculptStrokes
             drag(CGPoint(x: 20, y: 20), CGPoint(x: 80, y: 20))
-            let r0 = lib.sculptRadius
+            let r0 = lib.sculptSize
             lib.sculptResize(true)
-            check("beside the body a drag turns the view; ] makes the brush larger", lib.camera.yaw != turned && lib.sculptStrokes == made &&
-                  abs(lib.sculptRadius - Workbench.round2(r0 * 1.15)) < 1e-9, "radius \(r0) → \(lib.sculptRadius)")
-            lib.sculptMirror = false
+            let r1 = lib.sculptSize
+            lib.setSculptSize(1)
+            lib.sculptResize(false)
+            let least = lib.sculptSize
+            lib.sculptResize(true)
+            let two = lib.sculptSize
+            lib.setSculptSize(200)
+            lib.sculptResize(true)
+            let most = lib.sculptSize
+            check("beside the body a drag turns the view; ] makes the brush larger (1 → 2, 200 stays), its radius a tenth of its size",
+                  lib.camera.yaw != turned && lib.sculptStrokes == made && r1 == max(r0 + 1, (r0 * 1.15).rounded()) && least == 1 && two == 2 &&
+                  most == 200 && lib.sculptRadius == 20 && lib.settings.sculpt.size == 200, "size \(r0) → \(r1), \(least), \(two), \(most)")
+            lib.setSculptSize(40)
             lib.sculptBrush = .draw
+
+            // Mirrored across x and y, Draw raises four places on the top alike; Clay raises the top up to its plane.
+            lib.sculptMirror = 3
+            let four = [SIMD2(8.0, 5.0), SIMD2(-8.0, 5.0), SIMD2(8.0, -5.0), SIMD2(-8.0, -5.0)], fourWas = four.map { top($0.x, $0.y) }
+            lib.sculptBegin(at: SIMD3(8, 5, fourWas[0]), smooth: false, invert: false)
+            lib.sculptEnd()
+            let fourRose = four.enumerated().map { top($1.x, $1.y) - fourWas[$0] }
+            lib.undo()
+            lib.sculptMirror = 0
+            lib.sculptBrush = .clay
+            let clayWas = top(-6, -4)
+            lib.sculptBegin(at: SIMD3(-6, -4, clayWas), smooth: false, invert: false)
+            lib.sculptEnd()
+            let clayRose = top(-6, -4) - clayWas
+            lib.undo()
+            lib.sculptBrush = .draw
+            check("mirrored across x and y, four places rise alike; clay raises the top", fourRose.allSatisfy { $0 > 0.1 && abs($0 - fourRose[0]) < 0.02 } &&
+                  clayRose > 0.05 && clayRose < 0.5, "\(fourRose), clay \(clayRose)")
+
+            // The brush's outline: its rim and lean, its core with some hardness, and again across each mirror.
+            var hard = SculptTip()
+            hard.hardness = 0.5
+            let plainLines = SculptCursor.lines(at: .zero, normal: SIMD3(0, 0, 1), way: SIMD3(1, 0, 0), radius: 2, tip: SculptTip(), mirror: 0).count
+            let hardLines = SculptCursor.lines(at: .zero, normal: SIMD3(0, 0, 1), way: SIMD3(1, 0, 0), radius: 2, tip: hard, mirror: 3).count
+            var oval = SculptTip()
+            oval.oval = 0.5
+            let ovalRim = SculptCursor.lines(at: .zero, normal: SIMD3(0, 0, 1), way: SIMD3(1, 0, 0), radius: 2, tip: oval, mirror: 0)[0].points
+            let ovalWide = ovalRim.map { abs($0.y) }.max() ?? 0, ovalLong = ovalRim.map { abs($0.x) }.max() ?? 0
+            check("the brush's outline: rim and lean, a core when hard, each again across every mirror; an oval half as wide",
+                  plainLines == 2 && hardLines == 12 && abs(ovalLong - 2) < 1e-9 && abs(ovalWide - 1) < 1e-3, "\(plainLines), \(hardLines), \(ovalLong) × \(ovalWide)")
+
+            // Brush settings kept, and read leniently: an older Bcad's have none; numbers out of range are brought in.
+            var kept = Settings()
+            kept.penTilt = true
+            kept.sculpt.size = 42
+            kept.sculpt.brush = SculptBrush.clay.key
+            var tip = SculptTip()
+            tip.hardness = 0.4
+            tip.oval = 0.5
+            tip.angle = 30
+            kept.sculpt.tips[SculptBrush.clay.key] = tip
+            let keptBack = (try? JSONEncoder().encode(kept)).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+            let older = try? JSONDecoder().decode(Settings.self, from: Data(#"{"snap": 2}"#.utf8))
+            let wild = try? JSONDecoder().decode(Settings.self, from: Data(#"{"sculpt": {"brush": "trowel", "size": 9999, "tips": {"draw": {"oval": -3, "hardness": 7}, "trowel": {}}}}"#.utf8))
+            check("brush settings kept; an older Bcad's settings get the defaults; numbers out of range brought in", keptBack == kept &&
+                  older?.sculpt == SculptSettings() && older?.penTilt == false && wild?.sculpt.brush == "draw" && wild?.sculpt.size == 200 &&
+                  wild?.sculpt.tips["draw"]?.oval == 0.05 && wild?.sculpt.tips["draw"]?.hardness == 1 && wild?.sculpt.tips["trowel"] == nil)
 
             // A drawing tablet's pen: its pressure read from the tablet's events (a mouse's are full strength and size),
             // and a dab pressed at a quarter raising a quarter as much as one pressed fully.
@@ -1483,6 +1552,13 @@ enum SelfTest {
             check("a tablet pen's pressure: pressed at a quarter, a quarter as strong (a mouse, full)", abs((pen?.pressure ?? 0) - 0.25) < 0.01 &&
                   pen?.size == 1 && mouse == (1, 1) && firm > 0.05 && abs(light / firm - 0.25) < 0.02 && abs(top(-8, 5) - h0) < 1e-4,
                   "pen \(String(describing: pen)), \(light) of \(firm)")
+            // A pen held at a slant: its lean along the stroke's way, only with that switched on (a mouse: none).
+            var leaning = lib.settings
+            leaning.penTilt = true
+            let off = CadView.penTilt(CGPoint(x: -0.5, y: 0), tablet: true, way: CGVector(dx: 1, dy: 0), lib.settings)
+            let on = CadView.penTilt(CGPoint(x: -0.5, y: 0), tablet: true, way: CGVector(dx: 1, dy: 0), leaning)
+            let mouseTilt = CadView.penTilt(.zero, tablet: false, way: CGVector(dx: 1, dy: 0), leaning)
+            check("a pen's tilt leans the brush only with that switched on", off == nil && on == 45 && mouseTilt == nil, "\(String(describing: on))")
 
             // Under the brush: with the switch on, a stroke makes the triangles it passes over the Detail size (more of them
             // there; ⌘Z takes them back exactly, ⇧⌘Z makes them again); the Detail brush does only that, the surface staying
@@ -1663,12 +1739,12 @@ enum SelfTest {
             guard let d = k.queue.sync({ k.remesh(.primitive(.make(.sphere)), scale: SIMD3(1.4, 1, 1), detail: 0.6) }),
                   let s = SculptSession(d, detail: 0.6) else { return block(10) }
             if let front = s.ray(SIMD3(0, -50, 0), SIMD3(0, 1, 0)) {
-                s.begin(.grab, at: front.at, radius: 4, strength: 0.5, mirror: false, invert: false)
+                s.begin(.grab, at: front.at, radius: 4, strength: 0.5, mirror: 0, invert: false)
                 for k in 1...4 { s.dab(front.at + SIMD3(0, -1.5 * Double(k), 0), pressure: 1) }
                 s.end()
             }
             if let side = s.ray(SIMD3(50, -4, 0), SIMD3(-1, 0, 0)) {
-                s.begin(.crease, at: side.at, radius: 2.5, strength: 0.7, mirror: true, invert: false)
+                s.begin(.crease, at: side.at, radius: 2.5, strength: 0.7, mirror: 1, invert: false)
                 for k in 0...8 {
                     if let q = s.ray(SIMD3(50, -4 + Double(k), 0), SIMD3(-1, 0, 0)) { s.dab(q.at, pressure: 1) }
                 }
