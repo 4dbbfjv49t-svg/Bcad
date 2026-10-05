@@ -1279,6 +1279,8 @@ final class CadView: MTKView {
     }
 
     override func mouseDown(with e: NSEvent) {
+        // (Nothing behind the Plans card is touched.)
+        guard !lib.plans.showing else { return }
         window?.makeFirstResponder(self)
         let p = convert(e.locationInWindow, from: nil)
         downAt = p
@@ -1382,6 +1384,7 @@ final class CadView: MTKView {
     }
 
     override func mouseDragged(with e: NSEvent) {
+        guard !lib.plans.showing else { return }
         let p = convert(e.locationInWindow, from: nil)
         let dx = p.x - last.x, dy = p.y - last.y
         if hypot(p.x - downAt.x, p.y - downAt.y) > 3 { moved = true }
@@ -1497,6 +1500,7 @@ final class CadView: MTKView {
     }
 
     override func mouseUp(with e: NSEvent) {
+        guard !lib.plans.showing else { return }
         switch drag {
         case .orbit, .pan:
             if !moved && lib.mode == .measure, let end = measureSnap(convert(e.locationInWindow, from: nil), free: e.modifierFlags.contains(.option)) {
@@ -1535,6 +1539,7 @@ final class CadView: MTKView {
     }
 
     override func scrollWheel(with e: NSEvent) {
+        guard !lib.plans.showing else { return }
         if e.hasPreciseScrollingDeltas && !e.modifierFlags.contains(.option) {
             pan(e.scrollingDeltaX, -e.scrollingDeltaY)
         } else {
@@ -1545,11 +1550,13 @@ final class CadView: MTKView {
     }
 
     override func magnify(with e: NSEvent) {
+        guard !lib.plans.showing else { return }
         zoom(Float(e.magnification) * 1.5, at: convert(e.locationInWindow, from: nil))
         redraw()
     }
 
     override func rotate(with e: NSEvent) {
+        guard !lib.plans.showing else { return }
         lib.camera.yaw -= Float(e.rotation) * .pi / 180
         redraw()
     }

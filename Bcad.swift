@@ -409,11 +409,6 @@ extension Fastener {
     }
 }
 
-// What a later plan may hold back (the human figure is part of the larger one).
-enum Features {
-    static let figures = true
-}
-
 // A human figure, mannequin-like: a man or a woman, its sizes and pose as numbers (BcadKernel.h, BK_FIG_…). The kernel
 // makes it one mesh body standing on its soles, facing −y, centred on its own origin like a primitive.
 struct Figure: Hashable, Sendable {
@@ -1779,12 +1774,15 @@ struct Recovery: Codable, Sendable {
     var doc: Document
     var file: String?
     var name: String?
+    // The document's id this session (the free plan knows today's file by it).
+    var docID: UUID?
 }
 
 enum Paths {
     static let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Bcad", isDirectory: true)
     static let state = dir.appendingPathComponent("state.json")
     static let recovery = dir.appendingPathComponent("unsaved.json")
+    static let testStore = dir.appendingPathComponent("test-store.json")
 }
 
 enum Mode: Equatable {
@@ -2073,6 +2071,9 @@ final class Workbench: DesignHost {
     // The document as last opened or saved; it has changes while it differs from that.
     private var saved = Document()
     var dirty: Bool { doc != saved }
+    // The plan in force and the Plans card; the document's id this session (new with each document opened or begun).
+    let plans: Plans
+    @ObservationIgnored private(set) var docID = UUID()
     var selection: [UUID] = []
     var meshes: [UUID: Mesh] = [:]
     var sceneVersion = 0
@@ -2176,6 +2177,7 @@ final class Workbench: DesignHost {
     var accent3: Color { Skin.shared.accent3 }
 
     init() {
+        plans = Plans.make()
         Skin.shared.host = self
         load()
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
@@ -2250,7 +2252,7 @@ final class Workbench: DesignHost {
         guard dirty else { dropUnsaved(); return }
         guard doc != keptAside else { return }
         keptAside = doc
-        let r = Recovery(doc: doc, file: fileURL?.path, name: docName), url = recoveryURL
+        let r = Recovery(doc: doc, file: fileURL?.path, name: docName, docID: docID), url = recoveryURL
         Self.recoveryQueue.async {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             if let data = try? JSONEncoder().encode(r) { try? data.write(to: url, options: .atomic) }
@@ -2270,6 +2272,7 @@ final class Workbench: DesignHost {
               let r = try? JSONDecoder().decode(Recovery.self, from: data), r.doc.valid, !r.doc.bodies.isEmpty else { return false }
         let file = r.file.map { URL(fileURLWithPath: $0) }
         resetEditing()
+        if let id = r.docID { docID = id }
         doc = r.doc
         saved = file.flatMap { try? ThreeMF.read($0).doc } ?? Document()
         fileURL = file.flatMap { saved.bodies.isEmpty ? nil : $0 }
@@ -2553,11 +2556,87 @@ final class Workbench: DesignHost {
         addFastener(thread) { [weak self] in self?.choose(.thread) }
     }
 
+    // MARK: plans
+
+    func openPlans(focus: Plan = .pro, reason: String? = nil) {
+        endCapture()
+        plans.loadProducts()
+        withAnimation(Neon.glide) {
+            plans.focus = focus
+            plans.reason = reason
+            plans.showing = true
+        }
+        if let reason, let app = NSApp {
+            NSAccessibility.post(element: app, notification: .announcementRequested,
+                                 userInfo: [.announcement: reason, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
+    }
+
+    func closePlans() {
+        withAnimation(Neon.glide) { plans.showing = false }
+    }
+
+    func buy(_ id: String) {
+        let plan = Catalog.product(id)?.plan ?? .pro
+        plans.buy(id) { [weak self] r in
+            guard let self else { return }
+            switch r {
+            case .done:
+                self.closePlans()
+                self.flash(L("{plan} is on — thank you", ["plan": plan.name]))
+            case .pending: self.flash(L("Waiting for approval"))
+            case .failed(let why): self.flash(why.isEmpty ? L("Couldn't reach the App Store") : why)
+            case .cancelled, .nothing: break
+            }
+        }
+    }
+
+    func restorePurchases() {
+        plans.restore { [weak self] r in
+            guard let self else { return }
+            switch r {
+            case .done:
+                self.closePlans()
+                self.flash(L("Purchases restored"))
+            case .nothing: self.flash(L("No subscription to restore"))
+            case .failed(let why): self.flash(why.isEmpty ? L("Couldn't reach the App Store") : why)
+            case .pending, .cancelled: break
+            }
+        }
+    }
+
+    // Whether this document may be saved or exported: on the free plan, only today's file (the first written today).
+    // Otherwise the Plans card says why.
+    private func mayWrite() -> Bool {
+        guard !plans.plan.unlimitedFiles, case .taken(let name) = plans.allowance.verdict(docID) else { return true }
+        openPlans(focus: .pro, reason: L("The free plan saves one document a day, and today's is “{name}”. Subscribe for more, or save this one tomorrow.",
+                                         ["name": name]))
+        return false
+    }
+
+    // A document written: on the free plan, it's today's file.
+    private func wrote(_ id: UUID, name: String, file: URL?, bodies: String?) {
+        guard !plans.plan.unlimitedFiles else { return }
+        plans.allowance.use(id, name: name, file: file, bodies: bodies)
+        plans.stamp += 1
+    }
+
+    // Human figures come with Studio: on any other plan the Plans card opens there instead.
+    private func figuresLocked() -> Bool {
+        guard !plans.plan.figures else { return false }
+        if plans.ready {
+            openPlans(focus: .studio, reason: L("Human figures come with the Studio plan"))
+        } else {
+            flash(L("Checking your plan…"))
+        }
+        return true
+    }
+
     // MARK: figures
 
     // A man standing on the bed, with the Figure tab open to change him.
     func addFigure(woman: Bool = false) {
-        guard Features.figures else { return }
+        guard !figuresLocked() else { return }
         let f = Figure(woman: woman)
         tryThen([.figure(f)]) { [weak self] in
             self?.add(.figure(f), name: f.name)
@@ -2593,17 +2672,22 @@ final class Workbench: DesignHost {
 
     // New numbers typed in, chosen or a pose: one step to undo.
     func setFigure(_ id: UUID, _ f: Figure) {
-        guard let b = body(id), let r = refigured(b, f) else { return }
+        guard let b = body(id), let r = refigured(b, f), !figuresLocked() else { return }
         begin()
         mutate(id) { $0.node = r.node; $0.place.move = r.move; $0.name = r.name }
         rebuildScene()
     }
 
     // A number dragged: the whole drag one step to undo; a draft shown as it goes, the full figure made as it ends.
-    func beginFigureDrag() { begin() }
+    func beginFigureDrag() {
+        figureDragging = !figuresLocked()
+        if figureDragging { begin() }
+    }
+
+    @ObservationIgnored private var figureDragging = false
 
     func dragFigure(_ id: UUID, _ f: Figure) {
-        guard let b = body(id), let r = refigured(b, f) else { return }
+        guard figureDragging, let b = body(id), let r = refigured(b, f) else { return }
         mutate(id) { $0.node = r.node; $0.place.move = r.move; $0.name = r.name }
         // (A figure cut or hollowed shows as it was until the drag ends: its draft would leave that out.)
         if r.node == .figure(f) {
@@ -2614,6 +2698,8 @@ final class Workbench: DesignHost {
     }
 
     func endFigureDrag() {
+        guard figureDragging else { return }
+        figureDragging = false
         draftWanted = nil
         undoLastIfUnchanged()
         rebuildScene()
@@ -3178,8 +3264,8 @@ final class Workbench: DesignHost {
             return .primitive(p)
         case .fastener(let f):
             return .fastener(f.setting(.length, max(1, (f.length * s.z * 100).rounded() / 100)))
-        case .figure(let f) where abs(s.x - s.z) < 1e-9 && abs(s.y - s.z) < 1e-9:
-            // Grown evenly: taller (stretched one way only, it keeps the stretch).
+        case .figure(let f) where plans.plan.figures && abs(s.x - s.z) < 1e-9 && abs(s.y - s.z) < 1e-9:
+            // Grown evenly: taller (stretched one way only, or on a plan without figures, it keeps the stretch).
             let r = Figure.Field.height.range
             return .figure(f.setting(.height, min(r.upperBound, max(r.lowerBound, (f[.height] * s.z * 100).rounded() / 100))))
         default:
@@ -3617,7 +3703,7 @@ final class Workbench: DesignHost {
 
     // A two-finger sideways swipe over the inspector moves to the neighbouring screen, one per swipe.
     private func swipeInspector(_ e: NSEvent) -> Bool {
-        guard e.hasPreciseScrollingDeltas, e.momentumPhase == [], !selection.isEmpty, angleEdit == nil,
+        guard e.hasPreciseScrollingDeltas, e.momentumPhase == [], !selection.isEmpty, angleEdit == nil, !plans.showing,
               let height = e.window?.contentView?.bounds.height else { return false }
         let p = CGPoint(x: e.locationInWindow.x, y: height - e.locationInWindow.y)
         if e.phase == .began { swipe = 0; swiped = false }
@@ -4007,11 +4093,17 @@ final class Workbench: DesignHost {
 
     // MARK: keys
 
-    private func key(_ e: NSEvent) -> Bool {
-        if NSApp.modalWindow != nil { return false }
+    func key(_ e: NSEvent) -> Bool {
+        if NSApp?.modalWindow != nil { return false }
         let name = Keys.codes[e.keyCode] ?? ""
+        // The Plans card takes the keys: Esc closes it, and nothing reaches the shapes behind it (⌘ shortcuts still work).
+        if plans.showing {
+            if e.keyCode == 53 { closePlans(); return true }
+            if !e.modifierFlags.intersection([.command, .control, .option]).isEmpty { return false }
+            return !["Tab", "Space", "Enter"].contains(name)
+        }
         if capturing != nil { capture(e.keyCode == 53 ? "" : name); return true }
-        if let r = NSApp.keyWindow?.firstResponder, r is NSText || r is NSTextView { return false }
+        if let r = NSApp?.keyWindow?.firstResponder, r is NSText || r is NSTextView { return false }
         let mods = e.modifierFlags.intersection([.command, .control, .option])
         if !mods.isEmpty { return false }
         let shift = e.modifierFlags.contains(.shift)
@@ -4095,6 +4187,7 @@ final class Workbench: DesignHost {
         }
         guard Darwin.rename(url.path, to.path) == 0 else { flash(L("Couldn't rename the file")); return }
         fileURL = to
+        if !plans.plan.unlimitedFiles { plans.allowance.moved(docID, to: to) }
     }
 
     private static func sameFile(_ a: URL, _ b: URL) -> Bool {
@@ -4143,6 +4236,7 @@ final class Workbench: DesignHost {
     // Leaves every tool, editor and pending step of the current document behind, before another one comes in.
     private func resetEditing() {
         generation += 1
+        docID = UUID()
         flight?.cancel()
         angleEdit = nil
         angleOpening = false
@@ -4186,6 +4280,8 @@ final class Workbench: DesignHost {
             saved = d
             fileURL = url
             docName = nil
+            // Today's free file opened again is still today's.
+            if !plans.plan.unlimitedFiles, let id = plans.allowance.adopt(url, bodies: Allowance.fingerprint(d)) { docID = id }
             dropUnsaved()
             noteRecent(url)
             Self.fileLog.notice("Opened \(url.lastPathComponent, privacy: .public)")
@@ -4206,6 +4302,8 @@ final class Workbench: DesignHost {
 
     // The file is written on the kernel's thread, so the window stays live; `done` learns whether it worked.
     func saveDocument(as: Bool = false, done: @escaping (Bool) -> Void = { _ in }) {
+        guard plans.ready else { plans.whenReady { [weak self] in self?.saveDocument(as: `as`, done: done) }; return }
+        guard mayWrite() else { done(false); return }
         var url = fileURL
         if url == nil || `as` {
             let panel = NSSavePanel()
@@ -4215,7 +4313,7 @@ final class Workbench: DesignHost {
             url = u
         }
         guard let url else { done(false); return }
-        let doc = self.doc, fit = settings.fit, bed = settings.bed, note = L("Saving…"), generation = self.generation
+        let doc = self.doc, fit = settings.fit, bed = settings.bed, note = L("Saving…"), generation = self.generation, id = docID
         // What the engine can't build is saved as it's shown.
         let looks = meshes
         withAnimation(Neon.spring) { busy = note }
@@ -4244,6 +4342,7 @@ final class Workbench: DesignHost {
                     self.ended(note)
                     // Another document opened or begun meanwhile stays as it is: the file saved was the one before it.
                     if written {
+                        self.wrote(id, name: url.deletingPathExtension().lastPathComponent, file: url, bodies: Allowance.fingerprint(doc))
                         if self.generation == generation {
                             self.fileURL = url
                             self.docName = nil
@@ -4264,8 +4363,10 @@ final class Workbench: DesignHost {
     }
 
     func export(step: Bool) {
+        guard plans.ready else { plans.whenReady { [weak self] in self?.export(step: step) }; return }
         let bodies = (selection.isEmpty ? doc.bodies : selected).filter { !$0.hidden }
         guard !bodies.isEmpty else { flash(L("Nothing to export")); return }
+        guard mayWrite() else { return }
         // Past a few hundred thousand sculpted triangles (a face each), a STEP file is more than CAD programs open.
         if step && bodies.reduce(0, { $0 + $1.node.sculptTriangles }) > 300_000 {
             flash(L("Sculpted shapes this detailed make too large a STEP file — export STL or 3MF instead"))
@@ -4280,7 +4381,9 @@ final class Workbench: DesignHost {
 
     // Written on the kernel's thread; `done` learns whether it was.
     func export(_ bodies: [Solid], step: Bool, to url: URL, done: @escaping (Bool) -> Void = { _ in }) {
+        guard mayWrite() else { done(false); return }
         let fit = settings.fit, note = L("Exporting…"), printed = doc.printed(bodies)
+        let id = docID, name = title, fingerprint = Allowance.fingerprint(doc)
         let large = step && bodies.reduce(0, { $0 + $1.node.sculptTriangles }) > 20_000
         withAnimation(Neon.spring) { busy = note }
         Kernel.shared.queue.async {
@@ -4305,6 +4408,7 @@ final class Workbench: DesignHost {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.ended(note)
+                    if written { self.wrote(id, name: name, file: nil, bodies: fingerprint) }
                     self.flash(written ? (large ? L("Exported {name} · sculpted shapes make large STEP files: STL or 3MF suit them better", ["name": url.lastPathComponent])
                                                 : L("Exported {name}", ["name": url.lastPathComponent]))
                                : found.map { L("Not exported: {problem}", ["problem": $0.1.text($0.0)]) } ?? L("Export failed"))
@@ -4321,6 +4425,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         MainActor.assumeIsolated {
             MenuText.install()
+            // (The Plans card never opens by itself.)
+            Workbench.shared.plans.start()
             Workbench.shared.rebuildScene()
             Workbench.shared.offerUnsaved()
             Workbench.shared.startKeepingUnsaved()
@@ -4389,6 +4495,7 @@ struct BcadApp: App {
                 Button(L("Export STEP…")) { lib.export(step: true) }.keyboardShortcut("e", modifiers: [.command, .option])
             }
             CommandGroup(replacing: .appSettings) {
+                Button(L("Plans…")) { lib.openPlans() }
                 Button(L("Settings…")) { lib.toggleSettings() }.keyboardShortcut(",")
             }
             CommandGroup(replacing: .undoRedo) {
@@ -4427,7 +4534,9 @@ struct BcadApp: App {
                 Button(L("Drop onto the bed")) { lib.dropToBed() }
                 Divider()
                 Button(L("Add thread")) { lib.addThread() }.keyboardShortcut("b")
-                if Features.figures { Button(L("Add human")) { lib.addFigure() } }
+                Button { lib.addFigure() } label: {
+                    if lib.plans.plan.figures { Text(L("Add human")) } else { Label(L("Add human"), systemImage: "lock.fill") }
+                }
             }
         }
     }

@@ -9,6 +9,16 @@ nuts, then merge, cut, split, round, bevel and hollow them. Its geometry engine 
 - **STL**: all chosen bodies in one file (binary, millimetres).
 - **STEP**: each body as a closed solid (AP214). Flat faces are exact; curved ones are 0.01 mm facets.
 
+## Plans
+- **Free:** one document a day (saved and exported as often as you like that day), no ads, no human figures.
+- **Pro** ($9 a month or $90 a year): unlimited saving and exporting.
+- **Studio** ($15 a month or $150 a year): Pro plus human figures.
+
+Each starts with a 7-day free trial (once). Products and prices are in `Bcad.storekit`. Development builds sell through a
+test store with no real payment (kept in `~/Library/Application Support/Bcad/test-store.json`; the Plans card has
+Expire now, Next day and Reset). The App Store build uses StoreKit. The free plan's file of the day is kept in the
+Keychain. Privacy policy: `docs/privacy.md`.
+
 ## Build
 On macOS 26 with Xcode 26: `./build.sh` (installs `/Applications/Bcad.app`), or `./build.sh path/to/Bcad.app`.
 

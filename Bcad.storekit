@@ -1,0 +1,138 @@
+{
+  "identifier": "B7C2A1F0",
+  "nonRenewingSubscriptions": [],
+  "products": [],
+  "settings": {
+    "_failTransactionsEnabled": false,
+    "_locale": "en_US",
+    "_storefront": "USA",
+    "_storeKitErrors": []
+  },
+  "subscriptionGroups": [
+    {
+      "id": "21000001",
+      "localizations": [
+        {
+          "description": "Bcad's plans",
+          "displayName": "Bcad",
+          "locale": "en_US"
+        }
+      ],
+      "name": "Bcad",
+      "subscriptions": [
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "15.00",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "6700000001",
+          "introductoryOffer": {
+            "internalID": "6700000101",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P1W"
+          },
+          "localizations": [
+            {
+              "description": "Unlimited files and human figures",
+              "displayName": "Bcad Studio",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "bcad.studio.monthly",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Studio monthly",
+          "subscriptionGroupID": "21000001",
+          "type": "RecurringSubscription",
+          "winbackOffers": []
+        },
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "150.00",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "6700000002",
+          "introductoryOffer": {
+            "internalID": "6700000102",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P1W"
+          },
+          "localizations": [
+            {
+              "description": "Unlimited files and human figures",
+              "displayName": "Bcad Studio",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "bcad.studio.yearly",
+          "recurringSubscriptionPeriod": "P1Y",
+          "referenceName": "Studio yearly",
+          "subscriptionGroupID": "21000001",
+          "type": "RecurringSubscription",
+          "winbackOffers": []
+        },
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "9.00",
+          "familyShareable": false,
+          "groupNumber": 2,
+          "internalID": "6700000003",
+          "introductoryOffer": {
+            "internalID": "6700000103",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P1W"
+          },
+          "localizations": [
+            {
+              "description": "Unlimited saving and exporting",
+              "displayName": "Bcad Pro",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "bcad.pro.monthly",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "Pro monthly",
+          "subscriptionGroupID": "21000001",
+          "type": "RecurringSubscription",
+          "winbackOffers": []
+        },
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "90.00",
+          "familyShareable": false,
+          "groupNumber": 2,
+          "internalID": "6700000004",
+          "introductoryOffer": {
+            "internalID": "6700000104",
+            "numberOfPeriods": 1,
+            "paymentMode": "free",
+            "subscriptionPeriod": "P1W"
+          },
+          "localizations": [
+            {
+              "description": "Unlimited saving and exporting",
+              "displayName": "Bcad Pro",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "bcad.pro.yearly",
+          "recurringSubscriptionPeriod": "P1Y",
+          "referenceName": "Pro yearly",
+          "subscriptionGroupID": "21000001",
+          "type": "RecurringSubscription",
+          "winbackOffers": []
+        }
+      ]
+    }
+  ],
+  "version": {
+    "major": 4,
+    "minor": 0
+  }
+}

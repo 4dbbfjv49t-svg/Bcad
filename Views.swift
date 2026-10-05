@@ -60,6 +60,9 @@ struct RootView: View {
                             }
                         }
                     }
+                    if lib.plans.showing {
+                        PlansCard().transition(.scale(scale: 0.96).combined(with: .opacity))
+                    }
                     // Work under way shows with a spinner; a message (a result, a problem) without one.
                     if let busy = lib.busy {
                         BusyToast(text: busy)
@@ -84,6 +87,7 @@ struct RootView: View {
         .animation(Neon.glide, value: lib.mode)
         .animation(Neon.glide, value: lib.selection.isEmpty)
         .animation(Neon.glide, value: lib.drawerOpen)
+        .animation(Neon.glide, value: lib.plans.showing)
     }
 
     // A tool (split, round, hollow, the ruler) is out: its bar shows instead of the inspector.
@@ -258,13 +262,17 @@ struct ShapeBar: View {
     var body: some View {
         HStack(spacing: 8) {
             ForEach(ShapeGroup.allCases, id: \.self) { g in ShapeGroupButton(group: g, open: $open) }
-            if Features.figures {
-                Rectangle().fill(Ink.text.opacity(0.18)).frame(width: 1, height: 22).padding(.horizontal, 2)
-                Button { lib.addFigure() } label: { Image(systemName: "figure.stand") }
-                    .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 36))
-                    .help(L("Human"))
-                    .accessibilityLabel(L("Human"))
-            }
+            Rectangle().fill(Ink.text.opacity(0.18)).frame(width: 1, height: 22).padding(.horizontal, 2)
+            let locked = !lib.plans.plan.figures
+            Button { lib.addFigure() } label: { Image(systemName: "figure.stand") }
+                .buttonStyle(NeonButtonStyle(tint: lib.accent, size: 36))
+                .overlay(alignment: .topTrailing) {
+                    if locked {
+                        Image(systemName: "lock.fill").font(.ui(size: 9, weight: .bold)).foregroundStyle(lib.accent2).offset(x: 2, y: -2).allowsHitTesting(false)
+                    }
+                }
+                .help(locked ? L("Human figures come with the Studio plan") : L("Human"))
+                .accessibilityLabel(L("Human"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -679,6 +687,18 @@ struct Drawer: View {
                         DocumentName()
                         if lib.dirty {
                             Circle().fill(lib.accent).frame(width: 6, height: 6).glow(lib.accent, 5).transition(.scale)
+                        }
+                        if lib.plans.ready && lib.plans.plan == .free {
+                            Button { lib.openPlans() } label: {
+                                Text(L("Free"))
+                                    .font(.ui(size: 10.5, weight: .bold, design: .rounded))
+                                    .foregroundStyle(lib.accent2)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().strokeBorder(lib.accent2.opacity(0.6), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help(L("Free plan: one document a day · see plans"))
                         }
                     }
                     .transition(.move(edge: .leading).combined(with: .haze))
@@ -1643,7 +1663,25 @@ struct FigureScreen: View {
 
     var body: some View {
         let right = !lib.figureMirror && lib.figureRight
+        // On a plan without figures, its numbers are shown but can't be changed.
+        let locked = !lib.plans.plan.figures
         VStack(alignment: .leading, spacing: 6) {
+            if locked {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.fill").foregroundStyle(lib.accent2)
+                    Text(L("Human figures come with the Studio plan"))
+                        .font(.ui(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Ink.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button(L("See plans")) { lib.openPlans(focus: .studio) }
+                        .buttonStyle(PillStyle(tint: lib.accent2))
+                        .frame(width: 110)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(lib.accent2.opacity(0.12)))
+            }
+            VStack(alignment: .leading, spacing: 6) {
             Segmented(options: [false, true], label: { $0 ? L("Woman") : L("Man") }, icon: { $0 ? "figure.stand.dress" : "figure.stand" },
                       current: f.woman) { w in lib.setFigure(id, f.setting(.sex, w ? 1 : 0)) }
             SizeLine(title: L("Body height"), axis: 2, value: f[.height], unit: L("mm"), range: Figure.Field.height.range) { v in
@@ -1687,6 +1725,9 @@ struct FigureScreen: View {
             row(right ? .rightOut : .leftOut, L("Sideways"))
             row(right ? .rightHip : .leftHip, L("Forward"))
             row(right ? .rightKnee : .leftKnee, L("Knee"))
+            }
+            .allowsHitTesting(!locked)
+            .opacity(locked ? 0.45 : 1)
         }
         .animation(Neon.spring, value: lib.figureMirror)
     }
@@ -2182,6 +2223,7 @@ struct SettingsPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 SettingsHead(langOpen: $langOpen, styleOpen: $styleOpen)
+                PlanSettings()
                 SettingsTitle(text: L("Shortcuts"))
                 ForEach(Action.allCases, id: \.self) { a in
                     ShortcutLine(title: a.label, on: s.isOn(a), toggle: { lib.toggleShortcut(a) }) { KeyField(action: a) }
@@ -2685,5 +2727,262 @@ struct AnglePresets: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(.default) { if ok { lib.updateAngles { $0.setAngle(toA) } } }
+    }
+}
+
+// MARK: - Plans
+
+@MainActor func longDate(_ d: Date) -> String {
+    d.formatted(.dateTime.day().month(.wide).year().locale(Locale(identifier: L10n.shared.id)))
+}
+
+extension Plans {
+    // What the plan in force does next: its trial ends, it renews, changes or ends.
+    var status: String? {
+        guard let a = active, let end = a.expires else { return nil }
+        let date = longDate(end)
+        if a.trial && a.renews { return L("Trial ends {date}", ["date": date]) }
+        if !a.renews { return L("Ends {date}", ["date": date]) }
+        if let n = a.next, let c = Catalog.product(n) {
+            return L("Changes to {plan} on {date}", ["plan": c.plan.name + " · " + (c.billing == .monthly ? L("Monthly") : L("Yearly")), "date": date])
+        }
+        return L("Renews {date}", ["date": date])
+    }
+}
+
+// Free, Pro and Studio side by side, monthly or yearly: what each brings, its price and its free trial; buying, restoring,
+// and the terms. Esc, the close button or a click beside the card closes it.
+struct PlansCard: View {
+    @Environment(Workbench.self) private var lib
+
+    var body: some View {
+        let plans = lib.plans
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.4))
+                .contentShape(Rectangle())
+                .onTapGesture { lib.closePlans() }
+                .accessibilityHidden(true)
+            Snug {
+                ScrollView {
+                    VStack(spacing: 14) {
+                        HStack(spacing: 10) {
+                            Text(L("Plans"))
+                                .font(.ui(size: 20, weight: .bold, design: .rounded))
+                                .foregroundStyle(Ink.text)
+                                .halo(lib.accent, 10)
+                            if plans.test != nil {
+                                Text(L("Test store — no real payment"))
+                                    .font(.ui(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Color.black)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.orange))
+                            }
+                            Spacer(minLength: 8)
+                            CloseX { lib.closePlans() }
+                        }
+                        if let reason = plans.reason {
+                            HStack(spacing: 8) {
+                                Image(systemName: "info.circle.fill").foregroundStyle(lib.accent2)
+                                Text(reason).font(.ui(size: 12.5, weight: .medium, design: .rounded)).foregroundStyle(Ink.text).fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(lib.accent2.opacity(0.12)))
+                        }
+                        let saving = plans.yearlySaving(.pro)
+                        Segmented(options: Billing.allCases, label: { b in
+                            b == .monthly ? L("Monthly") : saving.map { L("Yearly") + " · " + L("Save {n}%", ["n": $0]) } ?? L("Yearly")
+                        }, icon: { $0 == .monthly ? "calendar" : "calendar.badge.checkmark" }, current: plans.billing) { plans.billing = $0 }
+                            .frame(maxWidth: 420)
+                        if let problem = plans.storeProblem {
+                            HStack(spacing: 8) {
+                                Text(problem).font(.ui(size: 12, weight: .medium, design: .rounded)).foregroundStyle(Neon.red)
+                                Button(L("Try again")) { plans.loadProducts() }.buttonStyle(PillStyle(tint: lib.accent)).frame(width: 120)
+                            }
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            ForEach(Plan.allCases, id: \.self) { PlanColumn(plan: $0) }
+                        }
+                        HStack(spacing: 16) {
+                            PlanLink(text: L("Restore Purchases")) { lib.restorePurchases() }
+                            PlanLink(text: L("Manage subscription")) { plans.openURL(Catalog.manage) }
+                            PlanLink(text: L("Terms of Use")) { plans.openURL(Catalog.terms) }
+                            PlanLink(text: L("Privacy Policy")) { plans.openURL(Catalog.privacy) }
+                        }
+                        Text(L("Payment is charged to your Apple Account when you confirm, or when a free trial ends. A subscription renews automatically unless it's cancelled at least 24 hours before the end of the period; manage or cancel it in your App Store account settings. A free trial is offered once."))
+                            .font(.ui(size: 10.5, design: .rounded))
+                            .foregroundStyle(Ink.text.opacity(0.5))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let t = plans.test {
+                            HStack(spacing: 8) {
+                                Text(L("Test store")).font(.ui(size: 11, weight: .bold, design: .rounded)).foregroundStyle(Color.orange)
+                                PlanLink(text: L("Expire now")) { t.expireNow(); plans.refresh() }
+                                PlanLink(text: L("Next day")) { t.nextDay(); plans.refresh() }
+                                PlanLink(text: L("Reset test store")) {
+                                    t.reset()
+                                    plans.allowance.reset()
+                                    plans.refresh()
+                                }
+                            }
+                        }
+                    }
+                    .padding(22)
+                }
+                .scrollIndicators(.never)
+                .scrollBounceBehavior(.basedOnSize)
+            }
+            .frame(width: 800)
+            .glassBar(26)
+            .shadow(color: lib.accent.opacity(0.18 * Skin.shared.glow), radius: 30)
+            .padding(.vertical, 24)
+            .accessibilityElement(children: .contain)
+            .accessibilityAddTraits(.isModal)
+            .accessibilityLabel(L("Plans"))
+        }
+    }
+}
+
+// A plan's column on the Plans card.
+struct PlanColumn: View {
+    @Environment(Workbench.self) private var lib
+    let plan: Plan
+
+    private var features: [String] {
+        switch plan {
+        case .free: [L("One document a day, saved and exported as often as you like"), L("Opens all your files"), L("No ads")]
+        case .pro: [L("Unlimited saving"), L("Unlimited STL and STEP export"), L("No ads")]
+        case .studio: [L("Everything in Pro"), L("Human figures: add, pose and resize")]
+        }
+    }
+
+    private func per(_ b: Billing, _ price: String) -> String {
+        b == .monthly ? L("{price} a month", ["price": price]) : L("{price} a year", ["price": price])
+    }
+
+    var body: some View {
+        let plans = lib.plans
+        let current = plans.plan == plan
+        let focus = plans.focus == plan
+        let tint = plan == .studio ? lib.accent2 : lib.accent
+        let product = plan == .free ? nil : plans.product(plan, plans.billing)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Text(plan.name).font(.ui(size: 18, weight: .bold, design: .rounded)).foregroundStyle(Ink.text)
+                Spacer(minLength: 4)
+                if current {
+                    Text(L("Current plan"))
+                        .font(.ui(size: 10.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(tint))
+                }
+            }
+            // The price billed is the largest; a year's also as a month's.
+            VStack(alignment: .leading, spacing: 2) {
+                if plan == .free {
+                    Text(plans.product(.pro, .monthly)?.format(0) ?? "0").font(.ui(size: 22, weight: .heavy, design: .rounded)).foregroundStyle(Ink.text)
+                } else if let p = product {
+                    Text(per(p.billing, p.displayPrice)).font(.ui(size: 22, weight: .heavy, design: .rounded)).foregroundStyle(Ink.text)
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                    if p.billing == .yearly {
+                        Text(per(.monthly, p.format(p.price / 12))).font(.ui(size: 11.5, weight: .medium, design: .rounded)).foregroundStyle(Ink.text.opacity(0.55))
+                    }
+                    if let d = p.trialDays, plans.trialEligible, plans.plan == .free {
+                        Text(L("Free for {days}, then {price}", ["days": L("{n} days", ["n": d]), "price": per(p.billing, p.displayPrice)]))
+                            .font(.ui(size: 11.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(tint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("—").font(.ui(size: 22, weight: .heavy, design: .rounded)).foregroundStyle(Ink.text.opacity(0.4))
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(features, id: \.self) { f in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "checkmark").font(.ui(size: 10, weight: .black)).foregroundStyle(tint)
+                        Text(f).font(.ui(size: 12, weight: .medium, design: .rounded)).foregroundStyle(Ink.text.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            if let p = product {
+                let mine = plans.active?.product == p.id
+                Button(action: { lib.buy(p.id) }) {
+                    if plans.working { ProgressView().controlSize(.small) } else { Text(action(p, mine: mine)) }
+                }
+                .buttonStyle(PillStyle(tint: tint))
+                .disabled(mine || plans.working)
+                .opacity(mine ? 0.5 : 1)
+            }
+            if current, let status = plans.status {
+                Text(status).font(.ui(size: 10.5, weight: .medium, design: .rounded)).foregroundStyle(Ink.text.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 290, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(tint.opacity(focus ? 0.14 : 0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(tint.opacity(focus ? 0.75 : 0.15), lineWidth: focus ? 1.5 : 1))
+        .glow(tint, focus ? 10 : 0)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(plan.name)
+    }
+
+    // The button's words: a first subscription (with its free trial), an upgrade, or a change of plan or period.
+    private func action(_ p: ShopProduct, mine: Bool) -> String {
+        let plans = lib.plans
+        if mine { return L("Current plan") }
+        if plans.plan == .free {
+            if let d = p.trialDays, plans.trialEligible { return L("Try free for {days}", ["days": L("{n} days", ["n": d])]) }
+            return L("Subscribe")
+        }
+        return plan > plans.plan ? L("Upgrade") : L("Switch")
+    }
+}
+
+// A link-like button under the Plans card.
+struct PlanLink: View {
+    @Environment(Workbench.self) private var lib
+    let text: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(text)
+                .font(.ui(size: 11.5, weight: .semibold, design: .rounded))
+                .underline(hover)
+                .foregroundStyle(hover ? lib.accent : Ink.text.opacity(0.7))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+    }
+}
+
+// The Settings section: the plan in force, what it does next, and today's free file.
+struct PlanSettings: View {
+    @Environment(Workbench.self) private var lib
+
+    var body: some View {
+        let plans = lib.plans
+        let _ = plans.stamp
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsTitle(text: L("Plan"))
+            SettingLine(title: plans.plan.name + (plans.test != nil ? " · " + L("Test store") : ""),
+                        detail: plans.status ?? (plans.plan == .free ? L("One document a day") : nil)) {
+                Button(plans.plan == .free ? L("See plans") : L("Change plan")) { lib.openPlans(focus: plans.plan == .free ? .pro : plans.plan) }
+                    .buttonStyle(PillStyle(tint: lib.accent2))
+                    .frame(width: 130)
+            }
+            if plans.plan == .free {
+                SettingLine(title: L("Today's free file"), detail: plans.allowance.todays?.name ?? L("Not used yet today")) { EmptyView() }
+            }
+        }
     }
 }

@@ -1711,6 +1711,198 @@ enum SelfTest {
             try? json.write(to: samplesDir.appendingPathComponent("expect.json"))
         }
 
+        // Plans: the test store sells what Bcad.storekit says; the free plan's one document a day (saved, exported, saved again,
+        // under another name and renamed as often as wanted; any other document refused with nothing written and the Plans
+        // card saying why, New → Save keeping it open; the next day another; the clock set back gives no new day; a Keychain
+        // that can't be used still holds the day for the run); Pro with its free trial (any document, no human figures);
+        // Studio (figures); a plan run out (back to free, its files still opening); Restore Purchases; the Keychain itself;
+        // the card taking the keys. Then Studio again.
+        do {
+            let plans = lib.plans
+            if let shop = plans.test {
+                check("until now the self-test ran as Studio, the day's file kept in memory", plans.plan == .studio && plans.allowance.store is MemoryClaimStore)
+                func exportNow(_ url: URL) -> Bool {
+                    var done: Bool?
+                    lib.export(lib.doc.bodies, step: false, to: url) { done = $0 }
+                    let t = Date()
+                    while done == nil && Date().timeIntervalSince(t) < 60 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+                    return done == true
+                }
+                func fresh(_ name: String, _ node: Node) {
+                    lib.testAnswer = .alertThirdButtonReturn
+                    lib.newDocument()
+                    use([Solid(name: name, color: Palette.colors[2], node: node, place: Placement(move: SIMD3(0, 0, 10)))])
+                }
+                let answerWas = lib.testAnswer, uniformWas = lib.settings.uniform
+
+                // What's for sale, as Bcad.storekit has it.
+                let p = plans.products
+                let config = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: ProcessInfo.processInfo.environment["APP_STOREKIT"] ?? ""))))
+                    as? [String: Any]
+                let subs = ((config?["subscriptionGroups"] as? [[String: Any]])?.first?["subscriptions"] as? [[String: Any]]) ?? []
+                func field(_ id: String, _ key: String) -> Any? { subs.first { $0["productID"] as? String == id }?[key] }
+                func price(_ id: String) -> String { p.first { $0.id == id }.map { "\($0.price)" } ?? "?" }
+                let periods = Catalog.ids.allSatisfy { id in field(id, "recurringSubscriptionPeriod") as? String == (Catalog.product(id)?.billing == .monthly ? "P1M" : "P1Y") }
+                let levels = (field("bcad.studio.monthly", "groupNumber") as? Int ?? 9) < (field("bcad.pro.monthly", "groupNumber") as? Int ?? 0)
+                    && field("bcad.studio.yearly", "groupNumber") as? Int == field("bcad.studio.monthly", "groupNumber") as? Int
+                check("the test store sells the four plans of Bcad.storekit: prices, periods, a 7-day free trial each, Studio above Pro",
+                      Set(p.map(\.id)) == Set(Catalog.ids) && price("bcad.pro.monthly") == "9" && price("bcad.pro.yearly") == "90" &&
+                      price("bcad.studio.monthly") == "15" && price("bcad.studio.yearly") == "150" && p.allSatisfy { $0.trialDays == 7 } &&
+                      periods && levels && plans.yearlySaving(.pro) == 17 && plans.yearlySaving(.studio) == 17,
+                      p.map { "\($0.id) \($0.displayPrice) \($0.trialDays ?? 0)" }.joined(separator: ", "))
+
+                // Free: document A is today's file.
+                shop.expireNow()
+                plans.refresh()
+                let free = plans.plan == .free
+                fresh("A box", box)
+                let a = dir.appendingPathComponent("free-a.3mf"), a2 = dir.appendingPathComponent("free-a2.3mf")
+                let savedA = saveAs(a), claimA = plans.allowance.todays
+                let exportedA = exportNow(dir.appendingPathComponent("free-a.stl"))
+                let againA = saveAs(a), asA = saveAs(a2)
+                check("free: today's file saves, exports, saves again and under another name", free && savedA && claimA?.doc == lib.docID && exportedA && againA && asA,
+                      "\(savedA) \(exportedA) \(againA) \(asA)")
+                lib.renameDocument("free-a3")
+                let a3 = dir.appendingPathComponent("free-a3.3mf")
+                lib.newDocument()
+                lib.open(a3)
+                settle()
+                let reopened = lib.docID == claimA?.doc
+                check("free: today's file renamed and opened again is still today's", reopened && saveAs(a3))
+
+                // Document B is refused: nothing written, the card says why; New → Save keeps it open.
+                fresh("B ball", .primitive(.make(.sphere)))
+                let b = dir.appendingPathComponent("free-b.3mf"), bStl = dir.appendingPathComponent("free-b.stl")
+                let savedB = saveAs(b), exportedB = exportNow(bStl)
+                let refused = !savedB && !exportedB && !FileManager.default.fileExists(atPath: b.path) && !FileManager.default.fileExists(atPath: bStl.path) &&
+                    plans.showing && plans.focus == .pro && (plans.reason ?? "").contains("free-a3")
+                lib.closePlans()
+                lib.fileURL = nil
+                lib.testAnswer = .alertFirstButtonReturn
+                let unsavedB = lib.doc
+                lib.newDocument()
+                let kept = lib.doc == unsavedB && lib.dirty && plans.showing
+                lib.closePlans()
+                check("free: another document is refused (nothing written, the Plans card says why); New → Save keeps it open", refused && kept,
+                      plans.reason ?? "no reason")
+
+                // The next day B saves and is the day's file; the clock set back gives no new day.
+                shop.nextDay()
+                plans.refresh()
+                let nextB = saveAs(b), aNow = claimA.map { plans.allowance.verdict($0.doc) }
+                plans.clock.offset -= 2 * 86_400
+                let back = plans.allowance.verdict(UUID()) == .taken("free-b") && plans.allowance.verdict(lib.docID) == .mine
+                plans.clock.offset += 2 * 86_400
+                check("free: the next day another document saves; the clock set back gives no new day", nextB && aNow == .taken("free-b") && back)
+                let broken = Allowance(store: MemoryClaimStore(broken: true), clock: plans.clock)
+                let d1 = UUID(), first = broken.verdict(d1)
+                broken.use(d1, name: "One", file: nil, bodies: nil)
+                check("a Keychain that can't be used still holds the day's file for this run",
+                      first == .open && broken.verdict(d1) == .mine && broken.verdict(UUID()) == .taken("One") && broken.degraded)
+
+                // Pro, with its free trial: any document; no human figures (adding, changing or resizing one).
+                let eligible = plans.trialEligible
+                lib.buy("bcad.pro.monthly")
+                let trialEnd = Calendar(identifier: .gregorian).date(byAdding: .day, value: 7, to: plans.clock.now())
+                let pro = plans.plan == .pro && plans.active?.trial == true && plans.active?.expires == trialEnd && !plans.trialEligible && !plans.showing
+                fresh("C cone", .primitive(.make(.cone)))
+                let proSaves = saveAs(dir.appendingPathComponent("pro-c.3mf"))
+                check("Pro with its 7-day free trial: any document saves", eligible && pro && proSaves, plans.status ?? "")
+                let count = lib.doc.bodies.count
+                lib.addFigure()
+                settle()
+                let addRefused = lib.doc.bodies.count == count && plans.showing && plans.focus == .studio
+                lib.closePlans()
+                let man = Solid(name: "Man", color: Palette.colors[3], node: .figure(Figure()), place: Placement(move: SIMD3(0, 0, 50)))
+                use([man])
+                lib.setFigure(man.id, Figure().setting(.height, 150))
+                let unchanged = lib.body(man.id)?.node == .figure(Figure())
+                lib.closePlans()
+                lib.settings.uniform = true
+                lib.selection = [man.id]
+                lib.rescale(man.id, axis: 2, by: 1.2)
+                settle()
+                let stretched = lib.body(man.id).map { $0.node == .figure(Figure()) && simd_reduce_max(simd_abs($0.place.scale - SIMD3(repeating: 1.2))) < 1e-9 } == true
+                lib.settings.uniform = uniformWas
+                check("Pro: adding or changing a human figure opens Studio on the Plans card; resizing one leaves its numbers alone",
+                      addRefused && unchanged && stretched && !plans.showing)
+
+                // Studio: an upgrade at once; human figures.
+                lib.buy("bcad.studio.monthly")
+                let studio = plans.plan == .studio && plans.active?.trial == false
+                lib.addFigure()
+                settle()
+                let added = lib.doc.bodies.contains { b in if case .figure = b.node { b.id != man.id } else { false } }
+                check("Studio: an upgrade at once, and a human figure is added", studio && added)
+
+                // Run out: back to free; a file with a figure still opens, its numbers can't change.
+                shop.cancelRenewal()
+                for _ in 0..<40 { shop.nextDay() }
+                plans.refresh()
+                let lapsed = plans.plan == .free
+                lib.open(dir.appendingPathComponent("figure.3mf"))
+                settle()
+                let fig = lib.doc.bodies.first { b in if case .figure = b.node { true } else { false } }
+                if let fig, case .figure(let f) = fig.node { lib.setFigure(fig.id, f.setting(.height, 50)) }
+                check("a plan run out: back to free; a file with a figure opens, its numbers can't change", lapsed && fig != nil && !lib.dirty && plans.showing)
+                lib.closePlans()
+
+                // Restore Purchases: nothing, then a subscription.
+                lib.restorePurchases()
+                let nothing = lib.note == L("No subscription to restore")
+                shop.give(Catalog.id(.studio, .yearly))
+                lib.restorePurchases()
+                check("Restore Purchases: nothing to restore, then a subscription restored", nothing && lib.note == L("Purchases restored") && plans.plan == .studio)
+
+                // The Keychain itself, on an entry of its own (removed after).
+                let keychain = KeychainClaimStore(service: "Bcad self-test " + UUID().uuidString)
+                var kept1 = false, note = ""
+                do {
+                    let empty = try keychain.load()
+                    let c1 = DayClaim(day: "2026-01-02", doc: UUID(), name: "One", files: ["ab"], bodies: "cd")
+                    try keychain.save(c1)
+                    let r1 = try keychain.load()
+                    var c2 = c1
+                    c2.name = "Two"
+                    try keychain.save(c2)
+                    let r2 = try keychain.load()
+                    let c3 = DayClaim(day: "2026-01-03", doc: UUID(), name: "Three")
+                    try keychain.save(c3)
+                    let r3 = try keychain.load()
+                    try keychain.clear()
+                    let r4 = try keychain.load()
+                    kept1 = empty == nil && r1 == c1 && r2 == c2 && r3 == c3 && r4 == nil
+                } catch {
+                    note = "\(error)"
+                    try? keychain.clear()
+                }
+                check("the Keychain keeps the day's file (an entry per day, the latest read back)", kept1, note)
+
+                // The card takes the keys: Backspace leaves the shapes alone, Esc closes it.
+                use([Solid(name: "Keep", color: Palette.colors[1], node: box, place: Placement(move: SIMD3(0, 0, 10)))])
+                lib.selection = lib.doc.bodies.map(\.id)
+                lib.openPlans()
+                func keyDown(_ code: UInt16) -> NSEvent? {
+                    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "",
+                                     charactersIgnoringModifiers: "", isARepeat: false, keyCode: code)
+                }
+                let held = lib.doc
+                let swallowed = keyDown(51).map { lib.key($0) } ?? false
+                let untouched = lib.doc == held
+                let closed = (keyDown(53).map { lib.key($0) } ?? false) && !plans.showing
+                check("the Plans card takes the keys: Backspace leaves the shapes alone, Esc closes it", swallowed && untouched && closed)
+
+                // Studio again, as the rest expects.
+                shop.reset()
+                shop.give(Catalog.id(.studio, .yearly))
+                plans.allowance.reset()
+                plans.refresh()
+                lib.testAnswer = answerWas
+            } else {
+                check("the self-test uses the test store", false)
+            }
+        }
+
         // The workbench's build must end before the process does (the app leaves at once as it quits).
         k.queue.sync {}
         print(ok ? "ALL OK" : "FAILURES")

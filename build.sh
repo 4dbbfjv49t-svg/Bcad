@@ -40,7 +40,7 @@ for f in Engine/*.cpp; do
   "${CXX[@]}" -O3 -ffp-contract=off -c "$f" -o "$WORK/${f:t:r}.o"
   KERNEL+=("$WORK/${f:t:r}.o")
 done
-SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift Sculpt.swift)
+SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift Sculpt.swift Plans.swift)
 if (( SELFTEST )); then SOURCES+=(test/SelfTest.swift); FLAGS+=(-D SELFTEST); fi
 
 echo "▸ Compiling"
@@ -52,7 +52,7 @@ if (( SELFTEST )); then
   mkdir -p "$OUT"
   cp "$WORK/Bcad" "$OUT/BcadTest"
   echo "▸ Self-test ($OUT)"
-  APP_STRINGS="$PWD/i18n.json" "$OUT/BcadTest" --selftest "$OUT"
+  APP_STRINGS="$PWD/i18n.json" APP_STOREKIT="$PWD/Bcad.storekit" "$OUT/BcadTest" --selftest "$OUT"
   exit $?
 fi
 
@@ -130,6 +130,8 @@ cp "$WORK/Bcad" "$TARGET/Contents/MacOS/Bcad"
 cp "$WORK/Info.plist" "$TARGET/Contents/Info.plist"
 cp "$WORK/AppIcon.icns" "$TARGET/Contents/Resources/AppIcon.icns"
 cp i18n.json "$TARGET/Contents/Resources/i18n.json"
+# The test store's products and prices (development builds sell nothing for real).
+cp Bcad.storekit "$TARGET/Contents/Resources/Bcad.storekit"
 cp -R "$WORK"/lproj/*.lproj "$TARGET/Contents/Resources/"
 # Nothing but the system's own libraries.
 if otool -L "$TARGET/Contents/MacOS/Bcad" | awk 'NR > 1 && $1 !~ /^(\/usr\/lib\/|\/System\/)/' | grep -q .; then
