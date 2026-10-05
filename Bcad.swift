@@ -412,19 +412,23 @@ extension Fastener {
 // A human figure, mannequin-like: a man or a woman, its sizes and pose as numbers (BcadKernel.h, BK_FIG_…). The kernel
 // makes it one mesh body standing on its soles, facing −y, centred on its own origin like a primitive.
 struct Figure: Hashable, Sendable {
-    // In the kernel's order (BK_FIG_SEX … BK_FIG_RIGHT_KNEE); files keep each by its name.
+    // In the kernel's order (BK_FIG_SEX … BK_FIG_HAIR_VOLUME); files keep each by its name.
     enum Field: Int, CaseIterable, Sendable {
         case sex, height, build, muscle, shoulders, chest, waist, hips, arms, legs, head, nod, turn, tilt, bend, twist, lean
         case leftRaise, leftForward, leftElbow, rightRaise, rightForward, rightElbow, leftHip, leftOut, leftKnee, rightHip, rightOut, rightKnee
+        case leftWrist, leftCurl, leftSpread, rightWrist, rightCurl, rightSpread, hair, hairVolume
 
         // As files keep it (never to change).
         var name: String {
             ["sex", "height", "build", "muscle", "shoulders", "chest", "waist", "hips", "arms", "legs", "head", "nod", "turn", "tilt", "bend",
              "twist", "lean", "leftRaise", "leftForward", "leftElbow", "rightRaise", "rightForward", "rightElbow", "leftHip", "leftOut",
-             "leftKnee", "rightHip", "rightOut", "rightKnee"][rawValue]
+             "leftKnee", "rightHip", "rightOut", "rightKnee", "leftWrist", "leftCurl", "leftSpread", "rightWrist", "rightCurl", "rightSpread",
+             "hair", "hairVolume"][rawValue]
         }
-        // Body sizes as parts of the standard for its sex (shown in %); the pose in degrees.
-        var share: Bool { (Field.build.rawValue...Field.head.rawValue).contains(rawValue) }
+        // Body sizes (and the hair's volume) as parts of the standard (shown in %); a fist and fingers spread in %; the
+        // rest of the pose in degrees.
+        var share: Bool { (Field.build.rawValue...Field.head.rawValue).contains(rawValue) || self == .hairVolume }
+        var percent: Bool { share || [.leftCurl, .leftSpread, .rightCurl, .rightSpread].contains(self) }
         var range: ClosedRange<Double> {
             var o = [0.0, 0.0]
             bk_figure_range(Int32(rawValue), &o)
@@ -434,9 +438,28 @@ struct Figure: Hashable, Sendable {
         var other: Field {
             let r = rawValue
             switch r {
-            case Field.leftRaise.rawValue...Field.leftElbow.rawValue, Field.leftHip.rawValue...Field.leftKnee.rawValue: return Field(rawValue: r + 3)!
-            case Field.rightRaise.rawValue...Field.rightElbow.rawValue, Field.rightHip.rawValue...Field.rightKnee.rawValue: return Field(rawValue: r - 3)!
+            case Field.leftRaise.rawValue...Field.leftElbow.rawValue, Field.leftHip.rawValue...Field.leftKnee.rawValue,
+                 Field.leftWrist.rawValue...Field.leftSpread.rawValue: return Field(rawValue: r + 3)!
+            case Field.rightRaise.rawValue...Field.rightElbow.rawValue, Field.rightHip.rawValue...Field.rightKnee.rawValue,
+                 Field.rightWrist.rawValue...Field.rightSpread.rawValue: return Field(rawValue: r - 3)!
             default: return self
+            }
+        }
+    }
+
+    // In the kernel's order (BK_HAIR_NONE …).
+    enum Hair: Int, CaseIterable, Sendable {
+        case bare, short, bob, long, ponytail, bun, afro
+
+        @MainActor var label: String {
+            switch self {
+            case .bare: L("No hair")
+            case .short: L("Short hair")
+            case .bob: L("Bob")
+            case .long: L("Long hair")
+            case .ponytail: L("Ponytail")
+            case .bun: L("Bun")
+            case .afro: L("Afro")
             }
         }
     }
@@ -454,6 +477,13 @@ struct Figure: Hashable, Sendable {
     init(woman: Bool = false) {
         values = Self.defaults(woman ? 1 : 0)
     }
+
+    // As a new one is made: with hair (short for a man, long for a woman).
+    static func fresh(woman: Bool = false) -> Figure {
+        Figure(woman: woman).setting(.hair, Double((woman ? Hair.long : Hair.short).rawValue))
+    }
+
+    var hair: Hair { Hair(rawValue: Int(self[.hair].rounded())) ?? .bare }
 
     private static func defaults(_ sex: Double) -> [Double] {
         var v = [Double](repeating: 0, count: Int(BK_FIG_COUNT))
@@ -643,12 +673,12 @@ indirect enum Node: Codable, Hashable, Sendable {
     // A human figure.
     case figure(Figure)
 
-    // The document version a file holding it needs: 2 with a sculpted body in it, 3 with a figure (files an earlier
-    // Bcad can't open).
+    // The document version a file holding it needs: 2 with a sculpted body in it, 4 with a figure (3 before figures had
+    // hands and hair; files an earlier Bcad can't open).
     var fileVersion: Int {
         switch self {
         case .sculpt: 2
-        case .figure: 3
+        case .figure: 4
         case .group(_, let parts): parts.map(\.node.fileVersion).max() ?? 1
         default: inner?.fileVersion ?? 1
         }
@@ -659,7 +689,7 @@ indirect enum Node: Codable, Hashable, Sendable {
     var sculptTriangles: Int {
         switch self {
         case .sculpt(let s): s.data.triangleCount
-        case .figure: 70_000
+        case .figure: 140_000
         case .group(_, let parts): parts.reduce(0) { $0 + $1.node.sculptTriangles }
         default: inner?.sculptTriangles ?? 0
         }
@@ -887,8 +917,8 @@ struct MergeLink: Codable, Hashable, Sendable {
 
 struct Document: Codable, Equatable, Sendable {
     // The newest version of the document Bcad reads: one a newer Bcad wrote is said to be that, not damaged. 2: sculpted
-    // bodies; 3: figures.
-    static let version = 3
+    // bodies; 3: figures; 4: figures with hands and hair.
+    static let version = 4
     var version = Document.version
     var bodies: [Solid] = []
 
@@ -1604,6 +1634,18 @@ final class Kernel: @unchecked Sendable {
             problems.append(String(cString: bk_last_error()))
             return nil
         }
+        defer { bk_sculpt_mesh_free(r) }
+        let pos = Array(UnsafeBufferPointer(start: r.pointee.positions, count: 3 * Int(r.pointee.vertexCount)))
+        let idx = Array(UnsafeBufferPointer(start: r.pointee.indices, count: 3 * Int(r.pointee.triangleCount)))
+        return SculptData(positions: pos, indices: idx)
+    }
+
+    // A figure's (or a sculpted body's) own mesh, its stretch taken into it: its finest parts as fine as made. Nil when
+    // the node isn't one as it is.
+    func bodyMesh(_ node: Node, scale: SIMD3<Double>) -> SculptData? {
+        guard let s = shape(node) else { return nil }
+        let m = [scale.x, 0, 0, 0, 0, scale.y, 0, 0, 0, 0, scale.z, 0]
+        guard let r = s.with({ sp in m.withUnsafeBufferPointer { bk_mesh_body(sp, $0.baseAddress) } }) else { return nil }
         defer { bk_sculpt_mesh_free(r) }
         let pos = Array(UnsafeBufferPointer(start: r.pointee.positions, count: 3 * Int(r.pointee.vertexCount)))
         let idx = Array(UnsafeBufferPointer(start: r.pointee.indices, count: 3 * Int(r.pointee.triangleCount)))
@@ -2699,7 +2741,7 @@ final class Workbench: DesignHost {
     // A man standing on the bed, with the Figure tab open to change him.
     func addFigure(woman: Bool = false) {
         guard !figuresLocked() else { return }
-        let f = Figure(woman: woman)
+        let f = Figure.fresh(woman: woman)
         tryThen([.figure(f)]) { [weak self] in
             self?.add(.figure(f), name: f.name)
             self?.choose(.thread)
@@ -3486,9 +3528,14 @@ final class Workbench: DesignHost {
         }
         let size = meshes[b.id].map { simd_reduce_max($0.size * simd_abs(b.place.scale)) } ?? 20
         var detail = Workbench.round2(min(5, max(0.05, size / 60)))
-        // A figure at the detail it's made at, so its face and hands keep their shape.
-        if case .figure(let f) = b.node.base { detail = Workbench.round2(min(5, max(0.05, f.detail * simd_reduce_max(simd_abs(b.place.scale))))) }
-        made(b.id, b.node, scale: b.place.scale, detail: detail) { [weak self] n in
+        // A figure at the detail it's made at; as it is (not cut or hollowed), from its own mesh, so its fingers and face
+        // keep their shape.
+        var own = false
+        if case .figure(let f) = b.node.base {
+            detail = Workbench.round2(min(5, max(0.05, f.detail * simd_reduce_max(simd_abs(b.place.scale)))))
+            own = b.node == .figure(f)
+        }
+        made(b.id, b.node, scale: b.place.scale, detail: detail, own: own) { [weak self] n in
             self?.openSculpt(b.id, n)
             self?.flash(L("{body} is now a mesh to shape: its exact sizes and roundings become part of its surface", ["body": b.name]))
         }
@@ -3567,7 +3614,7 @@ final class Workbench: DesignHost {
 
     // Makes `node` (or a sculpted body's own mesh, `from`) ready to sculpt at `detail`, its stretch taken in, on the
     // kernel's thread; then `done` with it, unless the mode was left meanwhile.
-    private func made(_ id: UUID, _ node: Node?, scale: SIMD3<Double>, detail: Double, from: SculptData? = nil,
+    private func made(_ id: UUID, _ node: Node?, scale: SIMD3<Double>, detail: Double, from: SculptData? = nil, own: Bool = false,
                       done: @escaping (SculptSession) -> Void) {
         guard !sculptBusy else { return }
         sculptBusy = true
@@ -3576,8 +3623,10 @@ final class Workbench: DesignHost {
         Kernel.shared.queue.async {
             Kernel.shared.fit = fit
             _ = Kernel.shared.takeProblems()
-            let data = from ?? node.flatMap { Kernel.shared.remesh($0, scale: scale, detail: detail) }
-            let s = data.flatMap { SculptSession($0, detail: detail) }
+            // (A figure as it is from its own mesh; any other, or should that not take, made again at the detail.)
+            let mine = own ? node.flatMap { Kernel.shared.bodyMesh($0, scale: scale) }.flatMap { SculptSession($0, detail: detail) } : nil
+            let data: SculptData? = mine != nil ? nil : from ?? node.flatMap { Kernel.shared.remesh($0, scale: scale, detail: detail) }
+            let s = mine ?? data.flatMap { SculptSession($0, detail: detail) }
             var problems = Kernel.shared.takeProblems()
             if data != nil && s == nil { problems.append(String(cString: bk_last_error())) }
             DispatchQueue.main.async {

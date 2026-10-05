@@ -71,6 +71,9 @@ typedef struct {
   uint32_t *indices;  // 3 per triangle, counter-clockwise seen from outside
 } BKSculptMesh;
 BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail);
+// A mesh body's own mesh, placed by m (row-major 3x4): a figure's or a sculpted body's points and triangles as they are
+// (not cut, merged or treated), so its finest parts stay as fine. NULL when the shape isn't one as it is.
+BKSculptMesh *bk_mesh_body(const BKShape *s, const double *m);
 void bk_sculpt_mesh_free(BKSculptMesh *m);
 
 // A sculpted body being shaped (Engine/Sculpt.hpp): made from its mesh, read back at any time as floats (positions and
@@ -130,18 +133,22 @@ BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s);
 // What's wrong with its links ("" when nothing): for tests.
 const char *bk_sculpt_check(const BKSculpt *s);
 
-// A human figure (Engine/Figure.hpp), mannequin-like, standing on z = 0 facing −y (its left at +x), centred on its box:
-// its numbers in this order (fewer: the rest standard for its sex). Sex 0 a man … 1 a woman; height in mm (standing
-// straight, sole to crown); build to head as parts of the standard for its sex (1 = standard); the rest the pose, in
+// A human figure (Engine/Figure.hpp), standing on z = 0 facing −y (its left at +x), centred on its box: its numbers in
+// this order (fewer: the rest standard for its sex). Sex 0 a man … 1 a woman; height in mm (standing straight, sole to
+// crown, hair not counted); build to head as parts of the standard for its sex (1 = standard); then the pose, in
 // degrees: the head's nod, turn and tilt; the torso's bend, twist and lean; each arm's raise (out to the side), forward
-// and elbow; each leg's hip (forward), out and knee. A mesh body, the same at any detail; a draft is coarser and
-// quicker, for showing while a number is dragged.
+// and elbow; each leg's hip (forward), out and knee; each hand's wrist (bent toward the palm), curl (0 open … 100 a fist,
+// in %) and spread (the fingers apart, %); last the hair: its style (as BK_HAIR_…) and volume (as a part of the
+// standard). A mesh body, the same at any detail (its fingers, face and toes finer than the rest); a draft is coarser
+// and quicker, for showing while a number is dragged.
 enum {
   BK_FIG_SEX, BK_FIG_HEIGHT, BK_FIG_BUILD, BK_FIG_MUSCLE, BK_FIG_SHOULDERS, BK_FIG_CHEST, BK_FIG_WAIST, BK_FIG_HIPS, BK_FIG_ARMS,
   BK_FIG_LEGS, BK_FIG_HEAD, BK_FIG_NOD, BK_FIG_TURN, BK_FIG_TILT, BK_FIG_BEND, BK_FIG_TWIST, BK_FIG_LEAN, BK_FIG_LEFT_RAISE,
   BK_FIG_LEFT_FORWARD, BK_FIG_LEFT_ELBOW, BK_FIG_RIGHT_RAISE, BK_FIG_RIGHT_FORWARD, BK_FIG_RIGHT_ELBOW, BK_FIG_LEFT_HIP,
-  BK_FIG_LEFT_OUT, BK_FIG_LEFT_KNEE, BK_FIG_RIGHT_HIP, BK_FIG_RIGHT_OUT, BK_FIG_RIGHT_KNEE, BK_FIG_COUNT
+  BK_FIG_LEFT_OUT, BK_FIG_LEFT_KNEE, BK_FIG_RIGHT_HIP, BK_FIG_RIGHT_OUT, BK_FIG_RIGHT_KNEE, BK_FIG_LEFT_WRIST, BK_FIG_LEFT_CURL,
+  BK_FIG_LEFT_SPREAD, BK_FIG_RIGHT_WRIST, BK_FIG_RIGHT_CURL, BK_FIG_RIGHT_SPREAD, BK_FIG_HAIR, BK_FIG_HAIR_VOLUME, BK_FIG_COUNT
 };
+enum { BK_HAIR_NONE, BK_HAIR_SHORT, BK_HAIR_BOB, BK_HAIR_LONG, BK_HAIR_PONYTAIL, BK_HAIR_BUN, BK_HAIR_AFRO, BK_HAIR_COUNT };
 enum { BK_POSE_STAND, BK_POSE_T, BK_POSE_WALK, BK_POSE_SIT, BK_POSE_WAVE, BK_POSE_COUNT };
 // The standard numbers for a man (sex 0) or a woman (1), standing (BK_FIG_COUNT of them).
 void bk_figure_defaults(double sex, double *out);

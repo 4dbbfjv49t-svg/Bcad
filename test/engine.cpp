@@ -13,12 +13,14 @@
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <random>
 #include <string>
@@ -3111,6 +3113,129 @@ int main() {
     bk_free(slab), bk_free(ball);
   }
 
+  // MARK: grids
+  // The surface found on a grid finer in places: with no finer cells, exactly as on the plain grid; random blobs across
+  // the edge of a finer zone closed and facing one way (by the points' numbers, not their places), at least as true as
+  // on the plain grid; a rod thinner than a step found whole where the grid is finer.
+  {
+    printf("— grids\n");
+    using bce::V3, bce::cross, bce::dot, bce::norm, bce::norm2;
+    struct Ball {
+      V3 c;
+      double r;
+    };
+    // (Distances from balls and rods: a block is decided wherever its middle is further than its half diagonal.)
+    auto blockOf = [](const std::function<double(V3)> &f) {
+      return [f](V3 lo, V3 hi) {
+        double d = f((lo + hi) * 0.5), far = 0.5 * norm(hi - lo) * 1.000001;
+        return d > far ? 1 : d < -far ? -1 : 0;
+      };
+    };
+    struct Surface {
+      std::vector<V3> p;
+      std::vector<uint32_t> t;
+      std::string why;
+      bool made;
+    };
+    auto make = [&](const std::function<double(V3)> &f, double h, int n, int k, const std::function<bool(V3, V3)> &fine, int passes) {
+      Surface s;
+      int ns[3] = {n, n, n};
+      s.made = bce::isoSurface(V3{0, 0, 0}, h, ns, f, blockOf(f), passes, s.p, s.t, s.why, 1500000, k, fine);
+      return s;
+    };
+    // Closed and facing one way by its points' numbers: each side once each way; how many pieces; its volume.
+    auto sound = [](const Surface &s, int &pieces, double &volume) {
+      pieces = 0, volume = 0;
+      if (!s.made || s.t.empty()) return false;
+      std::map<std::pair<uint32_t, uint32_t>, uint32_t> side;
+      size_t nt = s.t.size() / 3;
+      for (size_t t = 0; t < nt; t++) {
+        const uint32_t *x = &s.t[3 * t];
+        if (x[0] == x[1] || x[1] == x[2] || x[2] == x[0]) return false;
+        for (int q = 0; q < 3; q++)
+          if (!side.emplace(std::make_pair(x[q], x[(q + 1) % 3]), (uint32_t)t).second) return false;
+        volume += dot(s.p[x[0]], cross(s.p[x[1]], s.p[x[2]])) / 6;
+      }
+      std::vector<uint32_t> up(nt);
+      for (size_t t = 0; t < nt; t++) up[t] = (uint32_t)t;
+      std::function<uint32_t(uint32_t)> root = [&](uint32_t a) { return up[a] == a ? a : up[a] = root(up[a]); };
+      for (const auto &[e, t] : side) {
+        auto back = side.find({e.second, e.first});
+        if (back == side.end()) return false;
+        up[root(t)] = root(back->second);
+      }
+      for (size_t t = 0; t < nt; t++) pieces += root((uint32_t)t) == t;
+      return true;
+    };
+    auto balls = [](const std::vector<Ball> &b) {
+      return [b](V3 p) {
+        double d = INFINITY;
+        for (const auto &x : b) d = std::min(d, norm(p - x.c) - x.r);
+        return d;
+      };
+    };
+    auto boxZone = [](V3 lo, V3 hi) {
+      return [lo, hi](V3 a, V3 b) { return a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y && a.z <= hi.z && b.z >= lo.z; };
+    };
+    // No finer cells: the plain grid's surface to the bit (a zone given with k 1, or k 3 with a zone nothing's in).
+    {
+      auto f = balls({{{0.3, -0.2, 0.1}, 3.1}, {{2.5, 1, -0.5}, 1.7}});
+      Surface plain = make(f, 0.5, 21, 1, nullptr, 2), one = make(f, 0.5, 21, 1, boxZone({-9, -9, -9}, {9, 9, 9}), 2),
+              none = make(f, 0.5, 21, 3, boxZone({50, 50, 50}, {60, 60, 60}), 2);
+      bool same = plain.made && one.made && none.made && plain.t == one.t && plain.t == none.t && plain.p.size() == none.p.size();
+      for (size_t i = 0; same && i < plain.p.size(); i++)
+        same = std::memcmp(&plain.p[i], &one.p[i], sizeof(V3)) == 0 && std::memcmp(&plain.p[i], &none.p[i], sizeof(V3)) == 0;
+      check("grids: with no finer cells, the plain grid's surface to the bit", same, fmt("%.0f triangles", plain.t.size() / 3));
+    }
+    // Random blobs, some smaller than a step, across a finer zone's edge (3 and 2 times finer, evened out or not): closed,
+    // and their volume nearer the fine grid's than the plain grid's is (or within 1% of it).
+    {
+      std::mt19937 rng(20261005);
+      std::uniform_real_distribution<double> u(-1, 1);
+      int good = 0, tries = 0;
+      double worst = 0;
+      std::string notes;
+      for (int round = 0; round < 24; round++) {
+        std::vector<Ball> b;
+        int count = 2 + round % 5;
+        // (Within the grid, its outermost points outside: as far as 5.1 from its middle, the grid reaching 6.)
+        for (int i = 0; i < count; i++) b.push_back({V3{2.5 * u(rng), 2.5 * u(rng), 2.5 * u(rng)}, i % 3 == 2 ? 0.15 + 0.2 * (u(rng) + 1) : 0.8 + 0.9 * (u(rng) + 1)});
+        auto f = balls(b);
+        V3 zlo{u(rng) * 2 - 2, u(rng) * 2 - 2, -9}, zhi{u(rng) * 2 + 1, u(rng) * 2 + 1, u(rng) * 3};
+        int k = round % 2 ? 2 : 3, passes = round % 3 ? 2 : 0;
+        Surface two = make(f, 0.5, 25, k, boxZone(zlo, zhi), passes), all = make(f, 0.5 / k, 24 * k + 1, 1, nullptr, passes),
+                plain = make(f, 0.5, 25, 1, nullptr, passes);
+        int pieces, piecesAll, piecesPlain;
+        double v, vAll, vPlain;
+        tries++;
+        bool ok = sound(two, pieces, v) && sound(all, piecesAll, vAll) && sound(plain, piecesPlain, vPlain) && v > 0 &&
+                  std::fabs(v - vAll) <= std::fabs(vPlain - vAll) + 0.01 * vAll;
+        if (ok) worst = std::max(worst, std::fabs(v - vAll) / vAll);
+        if (!ok && notes.size() < 300) notes += fmt("round %.0f: %.4g vs %.4g", round, v, vAll) + fmt(" (plain %.4g) · ", vPlain);
+        good += ok;
+      }
+      check("grids: random blobs across a finer zone's edge closed, facing one way, as true as the plain grid at least", good == tries,
+            fmt("%.0f of %.0f, volumes within %.2f%%", good, tries, 100 * worst) + " " + notes);
+    }
+    // A rod thinner than a step, wholly in a finer zone: one piece, its volume as a capsule's; on the plain grid, broken.
+    {
+      V3 a{-4.2, -3.1, -2.3}, b{3.9, 2.7, 3.3};
+      double r = 0.22;
+      auto f = [a, b, r](V3 p) {
+        V3 ab = b - a;
+        double t = std::min(1.0, std::max(0.0, dot(p - a, ab) / norm2(ab)));
+        return norm(a + ab * t - p) - r;
+      };
+      Surface fine3 = make(f, 0.5, 25, 3, boxZone({-9, -9, -9}, {9, 9, 9}), 2), plain = make(f, 0.5, 25, 1, nullptr, 2);
+      int pieces = 0, piecesPlain = 0;
+      double v = 0, vPlain = 0, capsule = PI * r * r * norm(b - a) + 4.0 / 3 * PI * r * r * r;
+      bool ok = sound(fine3, pieces, v) && pieces == 1 && std::fabs(v - capsule) <= 0.2 * capsule;
+      bool brokenPlain = !plain.made || !sound(plain, piecesPlain, vPlain) || piecesPlain != 1;
+      check("grids: a rod thinner than a step whole where the grid's finer (broken where it isn't)", ok && brokenPlain,
+            fmt("%.3f vs %.3f mm³, %.0f piece(s)", v, capsule, pieces) + fmt("; plain grid %.0f piece(s)", piecesPlain));
+    }
+  }
+
   // MARK: figures
   // A man and a woman in every pose, full and as a draft: closed, one piece, taken as a mesh body, its box as worked out
   // before it's made; standing exactly its height, its soles flat at the bottom, alike across its middle; posed as asked;
@@ -3189,7 +3314,7 @@ int main() {
     // Standing straight: exactly its height, soles flat on the bottom under both feet, alike across x = 0.
     {
       std::vector<double> p = numbers(0, -1);
-      for (int i = BK_FIG_NOD; i < BK_FIG_COUNT; i++) p[i] = 0;
+      for (int i = BK_FIG_NOD; i <= BK_FIG_RIGHT_SPREAD; i++) p[i] = 0;
       BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, 0);
       double bb[6];
       box(s, bb);
@@ -3221,7 +3346,8 @@ int main() {
                                                                               one[0] > stand[0] + 30 && near(leftIs, leftWas, 1e-9),
             fmt("T %.1f wide, sitting %.1f tall", tpose[0], sit[2]) + fmt(", one arm %.1f wide (left side %.6f", one[0], leftIs) + fmt(" was %.6f)", leftWas));
     }
-    // The draft as the full one; as fine at any size (as many triangles at 60 mm as at 600 mm); the same when made again.
+    // The draft as the full one; as fine at any size (as many triangles at 150 mm as at 1500 mm: smaller, the thinnest
+    // parts are kept 0.4 mm thick); the same when made again.
     {
       std::vector<double> p = numbers(1, BK_POSE_WALK);
       BKShape *full = bk_figure(p.data(), BK_FIG_COUNT, 0), *draft = bk_figure(p.data(), BK_FIG_COUNT, 1);
@@ -3240,15 +3366,122 @@ int main() {
       BKShape *again = bk_figure(p.data(), BK_FIG_COUNT, 0);
       check("figures: the same to the bit when made again", hash(again) == first);
       bk_free(again), bk_free(full), bk_free(draft);
-      p[BK_FIG_HEIGHT] = 60;
+      p[BK_FIG_HEIGHT] = 150;
       BKShape *small = bk_figure(p.data(), BK_FIG_COUNT, 0);
-      p[BK_FIG_HEIGHT] = 600;
+      p[BK_FIG_HEIGHT] = 1500;
       BKShape *large = bk_figure(p.data(), BK_FIG_COUNT, 0);
       BKMesh *ms = bk_mesh(small, 0.05), *ml = bk_mesh(large, 0.05);
-      check("figures: as fine at any size", std::abs(ms->triangleCount - ml->triangleCount) <= 0.02 * ml->triangleCount && ml->triangleCount > 30000 &&
-                                                ml->triangleCount < 120000,
+      check("figures: as fine at any size", std::abs(ms->triangleCount - ml->triangleCount) <= 0.02 * ml->triangleCount && ml->triangleCount > 100000 &&
+                                                ml->triangleCount < 250000,
             fmt("%.0f and %.0f triangles", ms->triangleCount, ml->triangleCount));
       bk_mesh_free(ms), bk_mesh_free(ml), bk_free(small), bk_free(large);
+    }
+    // Every hair style, a man's and a woman's: closed, one piece, its box as worked out; the hair above the crown (the
+    // figure's height still sole to crown, as bare). Hands: a fist changes only the hands; a wrist bent toward the palm
+    // brings the fingertips in toward the body.
+    {
+      std::string notes;
+      int made = 0;
+      for (int style = BK_HAIR_SHORT; style < BK_HAIR_COUNT; style++) {
+        std::vector<double> p = numbers(style % 2, BK_POSE_STAND);
+        p[BK_FIG_HAIR] = style;
+        BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, 0);
+        double ext[6], bb[6], sv;
+        std::string why = s ? "" : bk_last_error();
+        BKMesh *m = s ? bk_mesh(s, 0.05) : nullptr;
+        bool ok = s && m && closed(m, sv, why) && bk_figure_extent(p.data(), BK_FIG_COUNT, ext) && box(s, bb) == 1 && bk_piece_count(s) == 1;
+        double off = 0;
+        for (int a = 0; ok && a < 3; a++) off = std::max(off, std::fabs(ext[a] - (bb[3 + a] - bb[a])));
+        ok = ok && off <= 1e-9 * p[BK_FIG_HEIGHT] && ext[2] > p[BK_FIG_HEIGHT] + 0.5;
+        if (!ok) notes += fmt("style %.0f: ", style) + why + fmt(" box off %.3g, %.3f tall · ", off, ext[2]);
+        made += ok;
+        bk_mesh_free(m), bk_free(s);
+      }
+      check("figures: every hair style closed, one piece, its box as worked out, above the crown", made == BK_HAIR_COUNT - 1, notes);
+
+      auto points = [](const BKShape *s) {
+        BKMesh *m = bk_mesh(s, 0.05);
+        std::vector<std::array<float, 3>> v;
+        for (int i = 0; i < m->vertexCount; i++) v.push_back({m->positions[3 * i], m->positions[3 * i + 1], m->positions[3 * i + 2]});
+        bk_mesh_free(m);
+        std::sort(v.begin(), v.end());
+        return v;
+      };
+      std::vector<double> open = numbers(0, BK_POSE_STAND), fist = open, bent = open;
+      fist[BK_FIG_LEFT_CURL] = fist[BK_FIG_RIGHT_CURL] = 100;
+      bent[BK_FIG_LEFT_WRIST] = 60;
+      BKShape *so = bk_figure(open.data(), BK_FIG_COUNT, 0), *sf = bk_figure(fist.data(), BK_FIG_COUNT, 0), *sb = bk_figure(bent.data(), BK_FIG_COUNT, 0);
+      std::vector<std::array<float, 3>> po = points(so), pf = points(sf), pb = points(sb), only;
+      std::set_symmetric_difference(po.begin(), po.end(), pf.begin(), pf.end(), std::back_inserter(only));
+      double bb[6], highest = -INFINITY;
+      box(so, bb);
+      for (const auto &q : only) highest = std::max(highest, (double)q[2] - bb[2]);
+      // (The left hand's lowest point, among those the wrist moves: its fingertips.)
+      auto tip = [](const std::vector<std::array<float, 3>> &v, const std::vector<std::array<float, 3>> &w) {
+        std::vector<std::array<float, 3>> moved;
+        std::set_difference(v.begin(), v.end(), w.begin(), w.end(), std::back_inserter(moved));
+        std::array<float, 3> low{0, 0, INFINITY};
+        for (const auto &q : moved)
+          if (q[0] > 0 && q[2] < low[2]) low = q;
+        return low;
+      };
+      std::array<float, 3> to = tip(po, pb), tb = tip(pb, po);
+      check("figures: a fist changes only the hands; a wrist bent brings the fingertips toward the body", !only.empty() && highest < 0.55 * open[BK_FIG_HEIGHT] &&
+                                                                                                             tb[0] < to[0] - 0.5 && tb[2] > to[2] + 0.5,
+            fmt("changed up to %.2f mm high; the tip from x %.2f", highest, to[0]) + fmt(" z %.2f to x %.2f", to[2], tb[0]) + fmt(" z %.2f", tb[2]));
+      bk_free(so), bk_free(sf), bk_free(sb);
+    }
+    // Small ones (their thin parts made thicker, to print): made, closed, one piece. (Their ears' and mouth's carving once
+    // cut through, leaving crumbs; the finest grid once took too many triangles to make at all.)
+    {
+      std::string notes;
+      int made = 0;
+      for (double height : {10.0, 12.0, 30.0})
+        for (int sex = 0; sex < 2; sex++) {
+          std::vector<double> p = numbers(sex, BK_POSE_STAND);
+          p[BK_FIG_HEIGHT] = height;
+          BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, 0);
+          BKMesh *m = s ? bk_mesh(s, 0.05) : nullptr;
+          double sv;
+          std::string why = s ? "" : bk_last_error();
+          bool ok = m && closed(m, sv, why) && bk_piece_count(s) == 1;
+          if (!ok) notes += fmt("%.0f mm, sex %.0f: ", height, sex) + why + fmt(" (%.0f pieces) · ", s ? bk_piece_count(s) : 0);
+          made += ok;
+          bk_mesh_free(m), bk_free(s);
+        }
+      check("figures: small ones (10 to 30 mm) made, closed, one piece", made == 6, notes);
+    }
+    // Arms raised and bent so the hands pass through the face: one piece (the face's carving once cut crumbs off them).
+    {
+      const double over[BK_FIG_COUNT] = {0.3470343125672074, 1846.344703591285, 1.3999999999999999, 0.76992616608118958, 1.2279639070701101, 0.98553825702806275, 0.75, 1.050473109453641, 0.9650898674414653, 0.84999999999999998, 0.85874906881706103, -20.242948795092371, -21.746244004636374, -28.613060952418625, -20, 26.947188365214174, -5.3361641019732495, 170, 123.68716390970368, 147.58539793007304, 26.16390061278392, 170, 66.182468093083799, -30, 50, 86.221416208883809, -6.2150281564132044, 34.540174513343992, 132.15922006593078, 0.6232166686257159, 100, 100, 72.056920799681507, 74.897077871135451, 56.851738559402619, 1.7460795269141109, 0.66799940902662913};
+      BKShape *s = bk_figure(over, BK_FIG_COUNT, 0);
+      check("figures: hands passing through the face stay whole (only the head is carved)", s && bk_piece_count(s) == 1,
+            s ? fmt("%.0f pieces", bk_piece_count(s)) : bk_last_error());
+      bk_free(s);
+    }
+    // Sculpting starts from a figure's own mesh (its fingers as fine as made), placed as asked (mirrored, still facing
+    // out); a shape that isn't a mesh body as it is has none.
+    {
+      std::vector<double> p = numbers(1, BK_POSE_STAND);
+      BKShape *s = bk_figure(p.data(), BK_FIG_COUNT, 0), *cube = bk_primitive(BK_BOX, std::array<double, 3>{10, 10, 10}.data());
+      BKMesh *m = bk_mesh(s, 0.05);
+      const double flip[12] = {-2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0};
+      BKSculptMesh *own = bk_mesh_body(s, I), *big = bk_mesh_body(s, flip), *none = bk_mesh_body(cube, I);
+      BKSculpt *sc = big ? bk_sculpt_new(big->positions, big->vertexCount, big->indices, big->triangleCount) : nullptr;
+      BKSculptMesh *back = sc ? bk_sculpt_mesh(sc) : nullptr;
+      double v = 0;
+      for (int t = 0; back && t < back->triangleCount; t++) {
+        const float *a = &back->positions[3 * back->indices[3 * t]], *b = &back->positions[3 * back->indices[3 * t + 1]],
+                    *c = &back->positions[3 * back->indices[3 * t + 2]];
+        v += (a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) - a[1] * ((double)b[0] * c[2] - (double)b[2] * c[0]) +
+              a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+      }
+      check("figures: sculpting starts from its own mesh, placed as asked; a box has none",
+            own && m && own->triangleCount == m->triangleCount && back && back->triangleCount == m->triangleCount && near(v, 8 * m->volume, 1e-3 * 8 * m->volume) &&
+                !none,
+            fmt("%.0f triangles, %.1f mm³ (8 × %.1f)", own ? own->triangleCount : 0, v, m ? m->volume : 0));
+      bk_sculpt_mesh_free(own), bk_sculpt_mesh_free(big), bk_sculpt_mesh_free(none), bk_sculpt_mesh_free(back);
+      bk_sculpt_free(sc), bk_mesh_free(m), bk_free(s), bk_free(cube);
     }
     // Merged onto a base, a peg hole cut up into it, hollowed, printed and written as STEP.
     {

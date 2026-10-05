@@ -175,6 +175,31 @@ BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail) {
   return out;
 }
 
+BKSculptMesh *bk_mesh_body(const BKShape *s, const double *m) {
+  if (!s) return nullptr;
+  if (!m || !finite(m, 12)) return lastError = "mesh body: sizes must be numbers", nullptr;
+  const Node *n = s->shape.node.get();
+  if (!n || n->kind != Node::Prim || !n->model || n->model->kind != Model::Mesh || !n->model->mesh) return lastError = "mesh body: not one as it is", nullptr;
+  Affine a = s->shape.place.then(Affine::from(m));
+  double det = a.det();
+  if (!(std::fabs(det) > 1e-12)) return lastError = "mesh body: placement flattens the shape", nullptr;
+  const Solid &body = *n->model->mesh;
+  BKSculptMesh *out = new BKSculptMesh();
+  out->vertexCount = (int)body.p.size(), out->triangleCount = (int)body.tri.size() / 3;
+  std::vector<float> pos(3 * body.p.size());
+  for (size_t i = 0; i < body.p.size(); i++) {
+    V3 q = a.point(body.p[i]);
+    pos[3 * i] = (float)q.x, pos[3 * i + 1] = (float)q.y, pos[3 * i + 2] = (float)q.z;
+  }
+  std::vector<uint32_t> tris = body.tri;
+  // (Mirrored: each triangle turned round, to face out still.)
+  if (det < 0)
+    for (size_t t = 0; t + 2 < tris.size(); t += 3) std::swap(tris[t + 1], tris[t + 2]);
+  out->positions = mallocCopy(pos);
+  out->indices = mallocCopy(tris);
+  return out;
+}
+
 void bk_sculpt_mesh_free(BKSculptMesh *m) {
   if (!m) return;
   free(m->positions), free(m->indices);

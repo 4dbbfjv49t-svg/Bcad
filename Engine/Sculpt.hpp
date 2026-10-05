@@ -31,9 +31,13 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
 // outermost points must all be outside). Only blocks of 4 steps a side that block(lo, hi) can't prove all inside (−1) or
 // all outside (+1) are worked out point by point. Where the surface crosses a grid edge is by a straight line between
 // its ends' values; the points are then evened out `passes` times. False with `why` when nothing's inside or it would
-// take more than about `most` triangles.
+// take more than about `most` triangles. With k above 1, the cells fine(lo, hi) asks for (among those not proved inside
+// or outside) are worked out k times finer each way; the cells beside them meet their finer surface without a gap.
+// With `uncrossed`, wherever evening out made the surface pass through itself, those points are put back (all of them at
+// last), and it's told whether the surface ends up not passing through itself.
 bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)> &field, const std::function<int(V3, V3)> &block, int passes,
-                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most = 1500000);
+                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most = 1500000, int k = 1,
+                const std::function<bool(V3, V3)> &fine = nullptr, bool *uncrossed = nullptr);
 
 // A body being sculpted: its mesh (points shared, closed) shaped by strokes of a brush, each stroke undone and done again
 // as one. Brushes (as BK_BRUSH_…): grab (the points under it at the start carried along by the drag), draw (raised along

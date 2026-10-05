@@ -1,6 +1,7 @@
-// Human figures (Figure.cpp): a man or a woman, mannequin-like, its sizes and pose set by numbers (as BK_FIG_…), made as
-// one closed mesh body: smooth parts round a skeleton (each blended into the next only near the joint they share, so a
-// hand hanging by the hip stays apart from it), its surface found on a grid.
+// Human figures (Figure.cpp): a man or a woman, its sizes, pose and hair set by numbers (as BK_FIG_…), made as one closed
+// mesh body: smooth parts round a skeleton (each blended into the next only near the joint they share, so a hand hanging
+// by the hip stays apart from it, and the fingers from each other), its surface found on a grid, finer at the hands, the
+// face and the toes.
 #pragma once
 #include "Engine/Model.hpp"
 
@@ -8,7 +9,7 @@
 
 namespace bce {
 
-enum { FigureNumbers = 29 };  // BK_FIG_COUNT
+enum { FigureNumbers = 37 };  // BK_FIG_COUNT
 
 struct FigureSpec {
   double v[FigureNumbers];

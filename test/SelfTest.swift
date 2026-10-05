@@ -1656,13 +1656,17 @@ enum SelfTest {
             settle()
             let id = lib.primary?.id ?? UUID()
             let (lo, hi) = bounds(id)
-            check("Human adds a man standing on the bed, the Figure tab open", lib.primary?.name == L("Man") && lib.screen == .thread &&
-                  lib.figureChosen?.figure == Figure() && abs(lo.z) < 0.01 && abs(hi.z - 100) < 0.01 && triangles(id) > 40_000, spans((lo, hi)))
+            // (With short hair: the box a little above his crown, 100 mm up.)
+            let haired = Figure.fresh().box.size.z
+            check("Human adds a man with short hair standing on the bed, the Figure tab open", lib.primary?.name == L("Man") && lib.screen == .thread &&
+                  lib.figureChosen?.figure == Figure.fresh() && Figure.fresh().hair == .short && Figure.fresh(woman: true).hair == .long &&
+                  abs(lo.z) < 0.01 && abs(hi.z - haired) < 0.01 && haired > 100.5 && triangles(id) > 100_000, spans((lo, hi)) + " \(triangles(id)) triangles")
             let stand = feet(id)
             if let f = figure(id) { lib.setFigure(id, f.setting(.height, 120)) }
             settle()
             let (tallLo, tallHi) = bounds(id)
-            check("taller: the top moves up, the feet stay where they were", abs(tallLo.z) < 0.01 && abs(tallHi.z - 120) < 0.01 && near(feet(id), stand, 1e-9),
+            check("taller: the top moves up, the feet stay where they were", abs(tallLo.z) < 0.01 && abs(tallHi.z - (figure(id)?.box.size.z ?? 0)) < 0.01 &&
+                  tallHi.z > 120 && near(feet(id), stand, 1e-9),
                   spans((tallLo, tallHi)))
             if let f = figure(id) { lib.setFigure(id, f.setting(.sex, 1)) }
             settle()
@@ -1692,27 +1696,45 @@ enum SelfTest {
             lib.redo()
             settle()
             check("a slider's drag shows drafts, then the full figure; mirrored, both sides move; one step to undo, ⇧⌘Z does it again",
-                  drafted > 0 && drafted < 40_000 && full > 40_000 && both && undone && lib.doc == dragged, "\(drafted) → \(full) triangles")
+                  drafted > 0 && drafted < 40_000 && full > 100_000 && both && undone && lib.doc == dragged, "\(drafted) → \(full) triangles")
             lib.figureMirror = false
             if let n = lib.figure(id, .leftElbow, 45) { lib.setFigure(id, n) }
             settle()
             check("the mirror off: one side alone", figure(id).map { $0[.leftElbow] == 45 && $0[.rightElbow] == 0 } == true)
             lib.figureMirror = true
+            // Hands: a fist, mirrored to both; hair: an afro stands higher than short hair, with none the top is the crown.
+            let topBefore = bounds(id).1.z
+            if let n = lib.figure(id, .leftCurl, 100) { lib.setFigure(id, n) }
+            settle()
+            let fists = figure(id).map { $0[.leftCurl] == 100 && $0[.rightCurl] == 100 } == true
+            if let f = figure(id) { lib.setFigure(id, f.setting(.hair, Double(Figure.Hair.afro.rawValue))) }
+            settle()
+            let afro = bounds(id).1.z
+            if let f = figure(id) { lib.setFigure(id, f.setting(.hair, Double(Figure.Hair.bare.rawValue))) }
+            settle()
+            let bare = bounds(id).1.z
+            check("a fist on both hands (mirrored); an afro stands higher than short hair, with none the top is the crown",
+                  fists && afro > topBefore + 1 && bare < topBefore && abs(bare - (figure(id)?.box.size.z ?? 0)) < 0.01 && figure(id)?.hair == Figure.Hair.bare,
+                  "\(topBefore) → \(afro) → \(bare)")
+            if let f = figure(id) { lib.setFigure(id, f.setting(.hair, Double(Figure.Hair.long.rawValue))) }
+            settle()
 
             let figureFile = dir.appendingPathComponent("figure.3mf")
             let shaped = lib.doc
             let reread = saveAs(figureFile) ? try? ThreeMF.read(figureFile) : nil
-            check("a figure is saved and opened again the same (a version 3 file)", reread?.doc == shaped && reread?.doc.version == 3,
+            check("a figure is saved and opened again the same (a version 4 file)", reread?.doc == shaped && reread?.doc.version == 4,
                   "version \(reread?.doc.version ?? 0)")
             let older = try? JSONDecoder().decode(Figure.self, from: Data(#"{"sex": 1, "height": 80}"#.utf8))
             var want = Figure(woman: true)
             want[.height] = 80
-            check("a figure saved before some of its numbers existed gets the standard ones", older == want)
+            check("a figure saved before some of its numbers existed gets the standard ones (no hair, hands relaxed)",
+                  older == want && older?.hair == Figure.Hair.bare && older?[.leftCurl] == want[.leftCurl])
 
             lib.selection = [id]
             lib.perform(.sculpt)
             waitFor(120) { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
-            check("Sculpt starts at the figure's own detail", lib.mode == .sculpt && lib.sculpt != nil && lib.sculptDetail == 0.75, "detail \(lib.sculptDetail)")
+            check("Sculpt starts at the figure's own detail, from its own mesh (its fingers as fine)", lib.mode == .sculpt && lib.sculpt != nil &&
+                  lib.sculptDetail == 0.75 && lib.sculptTriangles > 100_000, "detail \(lib.sculptDetail), \(lib.sculptTriangles) of \(triangles(id)) triangles")
             lib.cancelMode()
             settle()
         }
@@ -1732,7 +1754,7 @@ enum SelfTest {
             return Solid(name: name, color: color, node: node, place: Placement(move: SIMD3(x, y, height / 2)))
         }
         let bolt = Node.fastener(Fastener(kind: .hex, size: 4)), nut = Node.fastener(Fastener(kind: .hexNut, size: 4))
-        let woman = Figure(woman: true)
+        let woman = Figure.fresh(woman: true)
         // A sphere stretched along x made ready to sculpt (as Sculpt makes it) and shaped by hand: a nose pulled out of its
         // front, a groove creased into both its sides with the mirror; a mesh body standing 20 mm tall.
         let egg: Node = {
@@ -1771,8 +1793,8 @@ enum SelfTest {
                               Part(node: .hollow(of: egg, open: [], walls: [], thickness: 1.5), place: Placement(move: SIMD3(0, 0, 11))),
                               Part(node: .primitive(Primitive(kind: .cylinder, size: [24, 4])), place: Placement())
                           ]), place: Placement(move: SIMD3(40, 0, 2)))], true),
-            // A man as added, and a woman hollowed (1.2 mm walls) standing on a round base.
-            ("figures", [standing("Man", Palette.colors[3], .figure(Figure()), -30, 0),
+            // A man as added (short hair), and a woman with long hair hollowed (1.2 mm walls) standing on a round base.
+            ("figures", [standing("Man", Palette.colors[3], .figure(Figure.fresh()), -30, 0),
                          Solid(name: "Hollow woman on a base", color: Palette.colors[5], node: .group(op: Int32(BK_UNION), parts: [
                              Part(node: .hollow(of: .figure(woman), open: [], walls: [], thickness: 1.2),
                                   place: Placement(move: SIMD3(-woman.box.anchor.x, -woman.box.anchor.y, 1.8 + woman.box.size.z / 2))),

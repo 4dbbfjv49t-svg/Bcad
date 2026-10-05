@@ -1734,17 +1734,32 @@ struct FigureScreen: View {
             row(right ? .rightOut : .leftOut, L("Sideways"))
             row(right ? .rightHip : .leftHip, L("Forward"))
             row(right ? .rightKnee : .leftKnee, L("Knee"))
+            SettingsTitle(text: L("Hand"))
+            row(right ? .rightWrist : .leftWrist, L("Wrist"))
+            row(right ? .rightCurl : .leftCurl, L("Fist"))
+            row(right ? .rightSpread : .leftSpread, L("Spread"))
+            SettingsTitle(text: L("Hair"))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                ForEach(Figure.Hair.allCases, id: \.self) { h in
+                    Chip(text: h.label, chosen: f.hair == h) { lib.setFigure(id, f.setting(.hair, Double(h.rawValue))) }
+                }
+            }
+            if f.hair != .bare {
+                row(.hairVolume, L("Hair volume"))
+                    .transition(.haze)
+            }
             }
             .allowsHitTesting(!locked)
             .opacity(locked ? 0.45 : 1)
         }
         .animation(Neon.spring, value: lib.figureMirror)
+        .animation(Neon.spring, value: f.hair == .bare)
     }
 
-    // Body sizes shown in percent, the pose in degrees.
+    // Body sizes, a fist and fingers spread shown in percent, the rest of the pose in degrees.
     private func row(_ field: Figure.Field, _ title: String) -> some View {
         let k = field.share ? 100.0 : 1, r = field.range
-        return FigureSlider(title: title, value: f[field] * k, range: r.lowerBound * k...r.upperBound * k, unit: field.share ? "%" : "°",
+        return FigureSlider(title: title, value: f[field] * k, range: r.lowerBound * k...r.upperBound * k, unit: field.percent ? "%" : "°",
                             begin: { lib.beginFigureDrag() },
                             change: { v in if let n = lib.figure(id, field, v / k) { lib.dragFigure(id, n) } },
                             end: { lib.endFigureDrag() },

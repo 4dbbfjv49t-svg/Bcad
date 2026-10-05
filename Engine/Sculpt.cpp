@@ -4,6 +4,7 @@
 #include "Engine/Sculpt.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -240,6 +241,207 @@ void march(const Grid &g, Inside inside, Fraction fraction, size_t reserve, std:
       }
 }
 
+// Marching cubes on two levels: the grid's cells (fineCell: those to be made finer) and, inside each of those, cells K
+// times smaller each way, on a lattice K times finer (its points the grid's where they fall on them: their labels and
+// values as the grid has them; the rest worked out with `field`). A grid edge beside any finer cell is cut into K short
+// ones, a grid face beside one into K × K squares. The cells beside finer ones keep their size, their faces polygons with
+// the short edges' points in their sides (or the squares): the same polygons from both sides, so the surface meets
+// itself; on each, as on a cube's face, each run of inside corners is cut off from where the surface goes in to where it
+// comes out, and those sides close into loops (each crossing point where one ends and the next begins).
+template <class Inside, class Value>
+void marchTwoLevel(const Grid &g, int K, const std::vector<uint8_t> &fineCell, Inside inside, Value value, const std::function<double(V3)> &field,
+                   std::vector<V3> &outPts, std::vector<uint32_t> &outTris) {
+  static const Cube cube;
+  const int *n = g.n;
+  int nc[3] = {n[0] - 1, n[1] - 1, n[2] - 1}, nf[3];
+  for (int a = 0; a < 3; a++) nf[a] = K * (n[a] - 1) + 1;
+  auto isFine = [&](int i, int j, int k) {
+    return i >= 0 && j >= 0 && k >= 0 && i < nc[0] && j < nc[1] && k < nc[2] && fineCell[(size_t)i + (size_t)nc[0] * ((size_t)j + (size_t)nc[1] * (size_t)k)];
+  };
+  auto key = [&](const int *P) { return (uint64_t)P[0] + (uint64_t)nf[0] * ((uint64_t)P[1] + (uint64_t)nf[1] * (uint64_t)P[2]); };
+  auto onGrid = [&](const int *P) { return P[0] % K == 0 && P[1] % K == 0 && P[2] % K == 0; };
+  // A lattice point's place along an axis (a grid point's as the grid has it, to the bit).
+  auto at = [&](int a, int I) { return I % K == 0 ? g.at(a, I / K) : g.o[a] + (double)(2 * I - (nf[a] - 1)) * (0.5 * g.h / K); };
+  std::unordered_map<uint64_t, double> fineValue;
+  auto valueAt = [&](const int *P) -> double {
+    if (onGrid(P)) return value(P[0] / K, P[1] / K, P[2] / K);
+    uint64_t q = key(P);
+    auto found = fineValue.find(q);
+    if (found != fineValue.end()) return found->second;
+    double v = field(V3{at(0, P[0]), at(1, P[1]), at(2, P[2])});
+    fineValue.emplace(q, v);
+    return v;
+  };
+  auto insideAt = [&](const int *P) { return onGrid(P) ? inside(P[0] / K, P[1] / K, P[2] / K) : valueAt(P) < 0; };
+  // The surface's point on the edge from lattice point P along axis a, len lattice steps long (1, or K: a whole grid edge).
+  std::unordered_map<uint64_t, uint32_t> pointOf;
+  auto crossing = [&](const int *P, int a, int len) {
+    uint64_t q = (uint64_t)a << 62 | (uint64_t)(len == 1) << 61 | key(P);
+    auto found = pointOf.find(q);
+    if (found != pointOf.end()) return found->second;
+    int Q[3] = {P[0], P[1], P[2]};
+    Q[a] += len;
+    double f0 = valueAt(P), f1 = valueAt(Q);
+    double f = f0 != f1 ? f0 / (f0 - f1) : 0.5;
+    f = std::min(0.98, std::max(0.02, f));
+    V3 x{at(0, P[0]), at(1, P[1]), at(2, P[2])};
+    x[a] += f * (len == K ? g.h : g.h / K);
+    uint32_t id = (uint32_t)outPts.size();
+    outPts.push_back(x);
+    pointOf.emplace(q, id);
+    return id;
+  };
+  // A loop of crossing points made into triangles (a polygon of more sides: a point at its middle, a triangle to each side).
+  auto emit = [&](const uint32_t *loop, int m) {
+    if (m == 3) {
+      outTris.insert(outTris.end(), {loop[0], loop[1], loop[2]});
+      return;
+    }
+    V3 mid{0, 0, 0};
+    for (int q = 0; q < m; q++) mid += outPts[loop[q]];
+    uint32_t centre = (uint32_t)outPts.size();
+    outPts.push_back(mid / m);
+    for (int q = 0; q < m; q++) outTris.insert(outTris.end(), {centre, loop[q], loop[(q + 1) % m]});
+  };
+  // A cube from lattice point B, s lattice steps a side.
+  auto cubeAt = [&](const int *B, int s) {
+    int m = 0;
+    for (int c = 0; c < 8; c++) {
+      int P[3] = {B[0] + s * (c & 1), B[1] + s * (c >> 1 & 1), B[2] + s * (c >> 2 & 1)};
+      m |= (int)insideAt(P) << c;
+    }
+    if (m == 0 || m == 255) return;
+    int next[12];
+    std::fill(next, next + 12, -1);
+    for (const auto &f : cube.face) {
+      bool c[4];
+      for (int q = 0; q < 4; q++) c[q] = m >> f.corner[q] & 1;
+      for (int q = 0; q < 4; q++) {
+        if (c[q] || !c[(q + 1) % 4]) continue;
+        int r = (q + 1) % 4;
+        while (!(c[r] && !c[(r + 1) % 4])) r = (r + 1) % 4;
+        next[f.edge[q]] = f.edge[r];
+      }
+    }
+    auto point = [&](int e) {
+      int low = cube.edgeLow[e], P[3] = {B[0] + s * (low & 1), B[1] + s * (low >> 1 & 1), B[2] + s * (low >> 2 & 1)};
+      return crossing(P, cube.edgeAxis[e], s);
+    };
+    bool done[12] = {false};
+    for (int e = 0; e < 12; e++) {
+      if (next[e] < 0 || done[e]) continue;
+      uint32_t loop[12];
+      int m2 = 0;
+      for (int x = e; !done[x]; x = next[x]) done[x] = true, loop[m2++] = point(x);
+      emit(loop, m2);
+    }
+  };
+  // A grid edge cut short: beside a finer cell (the four round it).
+  auto split = [&](const int *c, int a) {
+    int b = (a + 1) % 3, d = (a + 2) % 3;
+    for (int u = -1; u <= 0; u++)
+      for (int v = -1; v <= 0; v++) {
+        int x[3] = {c[0], c[1], c[2]};
+        x[b] += u, x[d] += v;
+        if (isFine(x[0], x[1], x[2])) return true;
+      }
+    return false;
+  };
+  std::vector<std::array<int, 3>> poly;
+  std::vector<std::pair<uint32_t, uint32_t>> link;
+  std::vector<uint8_t> used;
+  std::vector<uint32_t> loop;
+  for (int k = 0; k < nc[2]; k++)
+    for (int j = 0; j < nc[1]; j++)
+      for (int i = 0; i < nc[0]; i++) {
+        int B[3] = {K * i, K * j, K * k};
+        if (isFine(i, j, k)) {
+          for (int r = 0; r < K; r++)
+            for (int q = 0; q < K; q++)
+              for (int p = 0; p < K; p++) {
+                int C[3] = {B[0] + p, B[1] + q, B[2] + r};
+                cubeAt(C, 1);
+              }
+          continue;
+        }
+        bool near = false;
+        for (int dz = -1; dz <= 1 && !near; dz++)
+          for (int dy = -1; dy <= 1 && !near; dy++)
+            for (int dx = -1; dx <= 1 && !near; dx++) near = isFine(i + dx, j + dy, k + dz);
+        bool any = false;
+        if (near)
+          for (int e = 0; e < 12 && !any; e++) {
+            int low = cube.edgeLow[e], c[3] = {i + (low & 1), j + (low >> 1 & 1), k + (low >> 2 & 1)};
+            any = split(c, cube.edgeAxis[e]);
+          }
+        if (!any) {
+          cubeAt(B, K);
+          continue;
+        }
+        // Beside a finer cell: its faces as polygons, each run of inside corners cut off.
+        link.clear();
+        for (int f = 0; f < 6; f++) {
+          int a = f / 2, s = f % 2, u = (a + 1) % 3, v = (a + 2) % 3;
+          if (!s) std::swap(u, v);
+          int across[3] = {i, j, k};
+          across[a] += s ? 1 : -1;
+          // A lattice point of this face, x along u and y along v from its first corner (lattice steps).
+          auto on = [&](int x, int y) {
+            std::array<int, 3> P = {B[0], B[1], B[2]};
+            P[a] += s * K, P[u] += x, P[v] += y;
+            return P;
+          };
+          std::vector<std::vector<std::array<int, 3>>> polys;
+          if (isFine(across[0], across[1], across[2])) {
+            for (int y = 0; y < K; y++)
+              for (int x = 0; x < K; x++) polys.push_back({on(x, y), on(x + 1, y), on(x + 1, y + 1), on(x, y + 1)});
+          } else {
+            static const int du[4] = {0, 1, 1, 0}, dv[4] = {0, 0, 1, 1};
+            poly.clear();
+            for (int m = 0; m < 4; m++) {
+              int x0 = du[m] * K, y0 = dv[m] * K, x1 = du[(m + 1) % 4] * K, y1 = dv[(m + 1) % 4] * K;
+              std::array<int, 3> P0 = on(x0, y0), P1 = on(x1, y1);
+              int axis = x0 != x1 ? u : v, low[3];
+              for (int q = 0; q < 3; q++) low[q] = std::min(P0[q], P1[q]) / K;
+              int steps = split(low, axis) ? K : 1;
+              for (int t = 0; t < steps; t++) poly.push_back(on(x0 + (x1 - x0) * t / steps, y0 + (y1 - y0) * t / steps));
+            }
+            polys.push_back(poly);
+          }
+          for (const auto &pg : polys) {
+            int m = (int)pg.size();
+            used.assign(m, 0);
+            for (int q = 0; q < m; q++) used[q] = insideAt(pg[q].data());
+            auto edgePoint = [&](int q) {
+              const auto &P = pg[q], &Q = pg[(q + 1) % m];
+              int axis = P[0] != Q[0] ? 0 : P[1] != Q[1] ? 1 : 2, low[3];
+              for (int c = 0; c < 3; c++) low[c] = std::min(P[c], Q[c]);
+              return crossing(low, axis, std::abs(P[axis] - Q[axis]));
+            };
+            for (int q = 0; q < m; q++) {
+              if (used[q] || !used[(q + 1) % m]) continue;
+              int r = (q + 1) % m;
+              while (!(used[r] && !used[(r + 1) % m])) r = (r + 1) % m;
+              link.push_back({edgePoint(q), edgePoint(r)});
+            }
+          }
+        }
+        std::sort(link.begin(), link.end());
+        std::vector<uint8_t> took(link.size(), 0);
+        for (size_t e = 0; e < link.size(); e++) {
+          if (took[e]) continue;
+          loop.clear();
+          for (size_t x = e; !took[x];) {
+            took[x] = 1, loop.push_back(link[x].first);
+            auto to = std::lower_bound(link.begin(), link.end(), std::make_pair(link[x].second, (uint32_t)0));
+            if (to == link.end() || to->first != link[x].second) break;
+            x = (size_t)(to - link.begin());
+          }
+          if (loop.size() >= 3) emit(loop.data(), (int)loop.size());
+        }
+      }
+}
+
 // Evened out: each point moved halfway to the middle of its neighbours, along the surface (not across it), `passes` times.
 void relax(std::vector<V3> &outPts, const std::vector<uint32_t> &outTris, int passes) {
   size_t np = outPts.size();
@@ -370,11 +572,13 @@ bool overlapFlat(const V3 *t, const V3 *u, int drop) {
   return !apart(t, u) && !apart(u, t);
 }
 
-}  // namespace
-
-bool selfCrossing(const std::vector<V3> &P, const std::vector<uint32_t> &T) {
+// Whether the mesh passes through itself; with `mark`, every triangle crossing another marked (1) rather than stopping at
+// the first.
+bool crossing(const std::vector<V3> &P, const std::vector<uint32_t> &T, std::vector<uint8_t> *mark) {
   size_t nt = T.size() / 3;
+  if (mark) mark->assign(nt, 0);
   if (nt < 2) return false;
+  bool any = false;
   // A box tree over the triangles (halved by their middles, down to four).
   struct Box {
     V3 lo, hi;
@@ -444,21 +648,27 @@ bool selfCrossing(const std::vector<V3> &P, const std::vector<uint32_t> &T) {
           for (int j = 0; j < 3; j++) shared = shared || x[i] == y[j];
         if (shared) continue;
         V3 d = P[y[0]], e = P[y[1]], f = P[y[2]];
-        if (through(d, e, a, b, c) || through(e, f, a, b, c) || through(f, d, a, b, c) || through(a, b, d, e, f) || through(b, c, d, e, f) ||
-            through(c, a, d, e, f))
-          return true;
+        bool hit = through(d, e, a, b, c) || through(e, f, a, b, c) || through(f, d, a, b, c) || through(a, b, d, e, f) || through(b, c, d, e, f) ||
+                   through(c, a, d, e, f);
         // In one plane: overlapping (as pieces laid over each other are).
-        if (!orient3d(a, b, c, d) && !orient3d(a, b, c, e) && !orient3d(a, b, c, f)) {
+        if (!hit && !orient3d(a, b, c, d) && !orient3d(a, b, c, e) && !orient3d(a, b, c, f)) {
           V3 nrm = cross(b - a, c - a);
           int drop = std::fabs(nrm.x) >= std::fabs(nrm.y) && std::fabs(nrm.x) >= std::fabs(nrm.z) ? 0 : std::fabs(nrm.y) >= std::fabs(nrm.z) ? 1 : 2;
           const V3 t3[3] = {a, b, c}, u3[3] = {d, e, f};
-          if (overlapFlat(t3, u3, drop)) return true;
+          hit = overlapFlat(t3, u3, drop);
         }
+        if (!hit) continue;
+        if (!mark) return true;
+        any = true, (*mark)[t] = (*mark)[u] = 1;
       }
     }
   }
-  return false;
+  return any;
 }
+
+}  // namespace
+
+bool selfCrossing(const std::vector<V3> &P, const std::vector<uint32_t> &T) { return crossing(P, T, nullptr); }
 
 bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double t, std::vector<V3> &outPts,
                   std::vector<uint32_t> &outTris, std::string &why) {
@@ -536,7 +746,8 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
 }
 
 bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)> &field, const std::function<int(V3, V3)> &block, int passes,
-                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most) {
+                std::vector<V3> &outPts, std::vector<uint32_t> &outTris, std::string &why, size_t most, int k,
+                const std::function<bool(V3, V3)> &fine, bool *uncrossed) {
   outPts.clear(), outTris.clear();
   if (!(h > 0) || !std::isfinite(h) || n[0] < 3 || n[1] < 3 || n[2] < 3) return why = "nothing to make", false;
   Grid g;
@@ -593,6 +804,25 @@ bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)
     size_t q = g.index(i, j, k);
     return (in[q >> 6] >> (q & 63) & 1) != 0;
   };
+  // Cells made finer: those of blocks not proved inside or outside that `fine` asks for.
+  int nc[3] = {n[0] - 1, n[1] - 1, n[2] - 1};
+  auto cellOf = [&](int i, int j, int k) { return (size_t)i + (size_t)nc[0] * ((size_t)j + (size_t)nc[1] * (size_t)k); };
+  std::vector<uint8_t> fineCell;
+  size_t fines = 0;
+  if (k > 1 && fine) {
+    fineCell.assign((size_t)nc[0] * nc[1] * nc[2], 0);
+    for (int bk = 0, id = 0; bk < nb[2]; bk++)
+      for (int bj = 0; bj < nb[1]; bj++)
+        for (int bi = 0; bi < nb[0]; bi++, id++) {
+          if (verdict[id]) continue;
+          int i0, i1, j0, j1, k0, k1;
+          span(bi, 0, i0, i1), span(bj, 1, j0, j1), span(bk, 2, k0, k1);
+          for (int kk = k0; kk < k1; kk++)
+            for (int j = j0; j < j1; j++)
+              for (int i = i0; i < i1; i++)
+                if (fine(point(i, j, kk), point(i + 1, j + 1, kk + 1))) fineCell[cellOf(i, j, kk)] = 1, fines++;
+        }
+  }
   size_t mixed = 0, inner = 0;
   for (int k = 0; k + 1 < n[2]; k++)
     for (int j = 0; j + 1 < n[1]; j++)
@@ -601,18 +831,50 @@ bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)
         for (int c = 0; c < 8; c++) m |= (int)inside(i + (c & 1), j + (c >> 1 & 1), k + (c >> 2 & 1)) << c;
         mixed += m != 0 && m != 255, inner += m != 0;
       }
-  if (!inner) return why = "nothing inside", false;
-  if (4 * mixed > most) return why = "too fine: about " + std::to_string(4 * mixed) + " triangles", false;
-  march(g, inside,
-        [&](int i, int j, int k, int a, bool) {
-          int up[3] = {i, j, k};
-          up[a]++;
-          double f0 = value(i, j, k), f1 = value(up[0], up[1], up[2]);
-          double f = f0 != f1 ? f0 / (f0 - f1) : 0.5;
-          return std::min(0.98, std::max(0.02, f));
-        },
-        4 * mixed, outPts, outTris);
+  if (!inner && !fines) return why = "nothing inside", false;
+  if (4 * mixed + 4 * (size_t)k * k * fines > most) return why = "too fine: about " + std::to_string(4 * mixed + 4 * (size_t)k * k * fines) + " triangles", false;
+  if (!fines) {
+    march(g, inside,
+          [&](int i, int j, int k, int a, bool) {
+            int up[3] = {i, j, k};
+            up[a]++;
+            double f0 = value(i, j, k), f1 = value(up[0], up[1], up[2]);
+            double f = f0 != f1 ? f0 / (f0 - f1) : 0.5;
+            return std::min(0.98, std::max(0.02, f));
+          },
+          4 * mixed, outPts, outTris);
+  } else {
+    marchTwoLevel(g, k, fineCell, inside, value, field, outPts, outTris);
+    if (outTris.empty()) return why = "nothing inside", false;
+  }
+  if (!uncrossed) {
+    relax(outPts, outTris, passes);
+    return true;
+  }
+  // Evened out, then wherever that made it pass through itself (two sheets closer than a step, as a hand resting on a
+  // thigh), the crossing triangles' points put back where the grid had them, and their neighbours' if that isn't enough;
+  // at last all of them (the grid's own surface).
+  std::vector<V3> grid = outPts;
   relax(outPts, outTris, passes);
+  std::vector<uint8_t> mark, back(outPts.size(), 0);
+  for (int round = 0; round < 6; round++) {
+    if (!crossing(outPts, outTris, &mark)) return *uncrossed = true;
+    for (size_t t = 0; t < mark.size(); t++)
+      if (mark[t])
+        for (int q = 0; q < 3; q++) back[outTris[3 * t + q]] = 1;
+    // (From the second round, a ring of neighbours more each time.)
+    for (int ring = 0; ring < round; ring++) {
+      std::vector<uint8_t> grown = back;
+      for (size_t t = 0; t + 2 < outTris.size(); t += 3)
+        if (back[outTris[t]] || back[outTris[t + 1]] || back[outTris[t + 2]]) grown[outTris[t]] = grown[outTris[t + 1]] = grown[outTris[t + 2]] = 1;
+      back.swap(grown);
+    }
+    for (size_t i = 0; i < outPts.size(); i++)
+      if (back[i]) outPts[i] = grid[i];
+  }
+  if (!crossing(outPts, outTris, nullptr)) return *uncrossed = true;
+  outPts = grid;
+  *uncrossed = !crossing(outPts, outTris, nullptr);
   return true;
 }
 
