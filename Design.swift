@@ -1049,51 +1049,47 @@ struct TronGrid: View {
     }
 }
 
-// The moving grid behind the stage: still with Reduce animations, gone in Simplified UI.
-struct AnimatedGrid: View {
-    var body: some View {
-        let look = Skin.shared
-        if !look.simplified {
-            TimelineView(.animation(minimumInterval: 1 / 30, paused: look.reduceMotion)) { tl in
-                TronGrid(phase: look.reduceMotion ? 0.4 : (tl.date.timeIntervalSinceReferenceDate * 0.25).truncatingRemainder(dividingBy: 1), tint: look.accent)
-                    .opacity(0.45)
-            }
-            .allowsHitTesting(false)
-        }
-    }
-}
-
 struct Backdrop: View {
-    @State private var drift = false
+    @Environment(\.controlActiveState) private var active
+    // The drift's clock: standing still while the window is behind others, going on from there after (no jump).
+    @State private var stoppedAt: Date?
+    @State private var skipped: TimeInterval = 0
 
     var body: some View {
         let look = Skin.shared
+        let still = Neon.calm || active == .inactive
         ZStack {
             VisualEffect(dark: look.dark)
             Ink.void.opacity(look.simplified ? 0.94 : 0.8)
             if !look.simplified {
-                ZStack {
-                    Circle().fill(look.accent.opacity(0.2)).frame(width: 520, height: 520).blur(radius: 140)
-                        .offset(x: drift ? 280 : -220, y: drift ? -180 : 140)
-                    Circle().fill(look.accent2.opacity(0.17)).frame(width: 560, height: 560).blur(radius: 150)
-                        .offset(x: drift ? -260 : 240, y: drift ? 200 : -150)
-                    Circle().fill(look.accent3.opacity(0.08)).frame(width: 420, height: 420).blur(radius: 140)
-                        .offset(x: drift ? 80 : -60, y: drift ? 260 : -260)
+                // (Twenty steps a second: smooth for something this soft and slow, and a fraction of the drawing.)
+                TimelineView(.animation(minimumInterval: 1.0 / 20, paused: still)) { tl in
+                    let t = (stoppedAt ?? tl.date).timeIntervalSinceReferenceDate - skipped
+                    // There and back, 18 s each way, easing in and out (none in reduced motion).
+                    let k = Neon.calm ? 0 : (1 - cos(t * .pi / 18)) / 2
+                    let at = { (a: Double, b: Double) in a + (b - a) * k }
+                    ZStack {
+                        Circle().fill(look.accent.opacity(0.2)).frame(width: 520, height: 520).blur(radius: 140)
+                            .offset(x: at(-220, 280), y: at(140, -180))
+                        Circle().fill(look.accent2.opacity(0.17)).frame(width: 560, height: 560).blur(radius: 150)
+                            .offset(x: at(240, -260), y: at(-150, 200))
+                        Circle().fill(look.accent3.opacity(0.08)).frame(width: 420, height: 420).blur(radius: 140)
+                            .offset(x: at(-60, 80), y: at(-260, 260))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .drawingGroup()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .drawingGroup()
                 Scanlines().opacity(look.dark ? 0.06 : 0.025)
             }
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .onChange(of: Neon.calm, initial: true) {
-            if Neon.calm {
-                var t = Transaction(animation: nil)
-                t.disablesAnimations = true
-                withTransaction(t) { drift = false }
-            } else {
-                withAnimation(.easeInOut(duration: 18).repeatForever(autoreverses: true)) { drift = true }
+        .onChange(of: still, initial: true) {
+            if still {
+                if stoppedAt == nil { stoppedAt = Date() }
+            } else if let s = stoppedAt {
+                skipped += Date().timeIntervalSince(s)
+                stoppedAt = nil
             }
         }
     }

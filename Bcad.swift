@@ -725,6 +725,15 @@ indirect enum Node: Codable, Hashable, Sendable {
         }
     }
 
+    // Whether a bolt or nut is in it (only those are built for the fit).
+    var hasFastener: Bool {
+        switch self {
+        case .fastener: true
+        case .group(_, let parts): parts.contains { $0.node.hasFastener }
+        default: inner?.hasFastener ?? false
+        }
+    }
+
     var inner: Node? {
         switch self {
         case .split(let n, _, _), .round(let n, _, _), .hollow(let n, _, _, _), .bevel(let n, _, _, _), .cove(let n, _, _): n
@@ -1165,6 +1174,7 @@ struct Mesh {
         let m = simd_float4x4(place.matrix)
         var out = self
         out.vertices = vertices.map { v in SIMD4((m * SIMD4(v.xyz, 1)).xyz, v.w) }
+        out.stamp = Int.random(in: 1...Int.max)  // (moved: not the mesh anything kept for the stamp was made from)
         if m.determinant < 0 { for i in stride(from: 0, to: out.indices.count - 2, by: 3) { out.indices.swapAt(i + 1, i + 2) } }
         return out
     }
@@ -1271,7 +1281,9 @@ final class Kernel: @unchecked Sendable {
     }
 
     private func key(_ node: Node) -> Key {
-        Key(node: node, fit: Fit(clearance: (fit.clearance * 1000).rounded() / 1000, shrink: (fit.shrink * 1000).rounded() / 1000))
+        // (Only bolts and nuts are built for the fit: anything else is kept as it is when the fit changes.)
+        guard node.hasFastener else { return Key(node: node, fit: Fit()) }
+        return Key(node: node, fit: Fit(clearance: (fit.clearance * 1000).rounded() / 1000, shrink: (fit.shrink * 1000).rounded() / 1000))
     }
 
     func takeProblems() -> [String] { defer { problems = [] }; return problems }
@@ -1614,11 +1626,8 @@ final class Kernel: @unchecked Sendable {
         return point
     }
 
-    // The mesh's edge between two faces nearest p, as an edge pick.
-    static func nearestEdge(_ m: Mesh, _ p: SIMD3<Double>) -> Pick? { nearestEdgeAt(m, p)?.pick }
-
-    // The same, with which edge it is, how far and its point nearest p; with `through`, only edges passing within 0.04 of
-    // one of those points.
+    // The mesh's edge between two faces nearest p: which edge it is, how far, its point nearest p and it as an edge pick;
+    // with `through`, only edges passing within 0.04 of one of those points.
     static func nearestEdgeAt(_ m: Mesh, _ p: SIMD3<Double>, through: [SIMD3<Double>]? = nil)
         -> (index: Int, distance: Double, point: SIMD3<Double>, pick: Pick)? {
         var best = Double.infinity, hit = -1, point = p
@@ -3000,29 +3009,37 @@ final class Workbench: DesignHost {
         }
     }
 
-    // A shape's box exactly, waiting for the kernel when it hasn't said yet: for putting shapes down on the bed.
-    func exactBounds(_ b: Solid) -> (SIMD3<Double>, SIMD3<Double>)? {
-        guard let box = worldBounds(b) else { return nil }
-        if b.place.turn == SIMD3(0, 0, 0) { return box }
-        if let k = turnedBoxes[b.id], k.exact, k.stance.turn == b.place.turn, k.stance.scale == b.place.scale { return box }
-        let node = b.node, fit = settings.fit
-        var still = b.place
-        still.move = .zero
-        // (The engine may be busy with a long build: the window doesn't wait on it for more than a moment.)
-        let exact = Kernel.shared.queue.sync(within: 1.5) { () -> (low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)? in
+    // The lowest point of each of these shapes exactly, for putting them down on the bed: the kernel asked once for every
+    // turned one it hasn't measured yet (each asked on its own waited up to a moment and a half, one after another).
+    private func exactLows(_ ids: [UUID]) -> [UUID: Double] {
+        var lows: [UUID: Double] = [:]
+        var asks: [(id: UUID, node: Node, still: Placement, z: Double)] = []
+        for id in ids {
+            guard let b = body(id), let (lo, _) = worldBounds(b) else { continue }
+            lows[id] = lo.z
+            if b.place.turn == SIMD3(0, 0, 0) { continue }
+            if let k = turnedBoxes[b.id], k.exact, k.stance.turn == b.place.turn, k.stance.scale == b.place.scale { continue }
+            var still = b.place
+            still.move = .zero
+            asks.append((id: id, node: b.node, still: still, z: b.place.move.z))
+        }
+        guard !asks.isEmpty else { return lows }
+        let fit = settings.fit, jobs = asks.map { (node: $0.node, still: $0.still) }
+        // (The engine may be busy with a long build: the window doesn't wait on it for more than a moment, and takes the
+        // boxes from the meshes then.)
+        let exact = Kernel.shared.queue.sync(within: 1.5) { () -> [(low: SIMD3<Double>, high: SIMD3<Double>, exact: Bool)?] in
             Kernel.shared.fit = fit
-            return Kernel.shared.bounds(node, still)
-        } ?? nil
-        guard let exact else { return box }
-        return (exact.low + b.place.move, exact.high + b.place.move)
+            return jobs.map { Kernel.shared.bounds($0.node, $0.still) }
+        }
+        for (a, e) in zip(asks, exact ?? []) {
+            if let e { lows[a.id] = e.low.z + a.z }
+        }
+        return lows
     }
 
     private func applyDrops() {
         guard !dropQueue.isEmpty else { return }
-        for id in dropQueue {
-            guard let b = body(id), let (lo, _) = exactBounds(b) else { continue }
-            mutate(id) { $0.place.move.z -= lo.z }
-        }
+        for (id, z) in exactLows(Array(dropQueue)) { mutate(id) { $0.place.move.z -= z } }
         dropQueue.removeAll()
     }
 
@@ -3905,9 +3922,10 @@ final class Workbench: DesignHost {
     // Puts the selection (or every visible shape) down on the bed.
     func dropToBed() {
         let ids = selection.isEmpty ? doc.bodies.filter { !$0.hidden }.map(\.id) : selection
+        let lows = exactLows(ids)
         let moves = ids.compactMap { id -> (UUID, Double)? in
-            guard let b = body(id), let (lo, _) = exactBounds(b), abs(lo.z) > 0.000_1 else { return nil }
-            return (id, lo.z)
+            guard let z = lows[id], abs(z) > 0.000_1 else { return nil }
+            return (id, z)
         }
         guard !moves.isEmpty else { return }
         begin()

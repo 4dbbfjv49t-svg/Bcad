@@ -366,11 +366,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         let v1 = LineV(p: SIMD4(a, -1), q: SIMD4(b, width), color: color)
         let v2 = LineV(p: SIMD4(b, -1), q: SIMD4(a, width), color: color)
         let v3 = LineV(p: SIMD4(b, 1), q: SIMD4(a, width), color: color)
-        out += [v0, v1, v3, v0, v3, v2]
+        // (One at a time: no array made for each segment.)
+        out.append(v0); out.append(v1); out.append(v3)
+        out.append(v0); out.append(v3); out.append(v2)
     }
 
     static func polyline(_ pts: [SIMD3<Float>], width: Float, color: SIMD4<Float>, into out: inout [LineV]) {
         guard pts.count > 1 else { return }
+        out.reserveCapacity(out.count + 6 * (pts.count - 1))
         for i in 1..<pts.count { segment(pts[i - 1], pts[i], width: width, color: color, into: &out) }
     }
 
@@ -575,17 +578,39 @@ final class Renderer: NSObject, MTKViewDelegate {
         ])
     }
 
+    // Each mesh's triangles of a set of faces, as made for a tint (made again only when the mesh or the faces change, not
+    // every frame).
+    private struct TintKey: Hashable {
+        let stamp: Int
+        let faces: [Int]
+    }
+    private var tints: [TintKey: (buffer: MTLBuffer, count: Int)] = [:]
+
     // Faces of a body washed over in a see-through colour, each group in its own.
     private func tint(_ enc: MTLRenderCommandEncoder, _ m: Mesh, _ g: GPUBody, _ model: simd_float4x4, _ nm: simd_float4x4, _ groups: [([Int], SIMD4<Float>)]) {
         for (faces, tint) in groups where !faces.isEmpty {
-            let set = Set(faces)
-            var idx: [UInt32] = []
-            var i = 0
-            while i + 2 < m.indices.count {
-                if set.contains(Int(m.vertices[Int(m.indices[i])].w)) { idx += [m.indices[i], m.indices[i + 1], m.indices[i + 2]] }
-                i += 3
+            let key = TintKey(stamp: m.stamp, faces: Array(Set(faces)).sorted())
+            let made: (buffer: MTLBuffer, count: Int)
+            if let kept = tints[key] {
+                made = kept
+            } else {
+                let set = Set(faces)
+                var idx: [UInt32] = []
+                var i = 0
+                while i + 2 < m.indices.count {
+                    if set.contains(Int(m.vertices[Int(m.indices[i])].w)) {
+                        idx.append(m.indices[i])
+                        idx.append(m.indices[i + 1])
+                        idx.append(m.indices[i + 2])
+                    }
+                    i += 3
+                }
+                guard !idx.isEmpty, let ib = device.makeBuffer(bytes: idx, length: idx.count * 4) else { continue }
+                if tints.count > 32 { tints.removeAll() }
+                made = (ib, idx.count)
+                tints[key] = made
             }
-            guard !idx.isEmpty, let ib = device.makeBuffer(bytes: idx, length: idx.count * 4) else { continue }
+            let ib = made.buffer, count = made.count
             var u = BodyU(model: model, normalM: nm, color: tint, rim: SIMD4(0, 0, 0, 0), hoverFace: -1, flags: 0)
             enc.setRenderPipelineState(glassPipe)
             enc.setDepthStencilState(depthRead)
@@ -593,7 +618,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setVertexBuffer(g.nrm, offset: 0, index: 3)
             enc.setVertexBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
             enc.setFragmentBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
-            enc.drawIndexedPrimitives(type: .triangle, indexCount: idx.count, indexType: .uint32, indexBuffer: ib, indexBufferOffset: 0)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: count, indexType: .uint32, indexBuffer: ib, indexBufferOffset: 0)
         }
     }
 
@@ -808,8 +833,127 @@ enum Axis {
 
 // MARK: - Picking
 
+// A tree of boxes over a big mesh's triangles, so a ray looks at the few near it rather than all of them (a sculpt's
+// million, on every move of the pointer). Made once for each mesh (known by its stamp), off the main thread, the first
+// time it's picked.
+final class TriangleTree: @unchecked Sendable {
+    private struct Node {
+        var lo = SIMD3<Float>(repeating: 0), hi = SIMD3<Float>(repeating: 0)
+        var left: Int32 = -1, right: Int32 = -1, first: Int32 = 0, count: Int32 = 0
+    }
+    private var nodes: [Node] = []
+    private var order: [Int32] = []
+    let triangles: Int
+
+    init(_ v: [SIMD4<Float>], _ ix: [UInt32]) {
+        let n = ix.count / 3
+        triangles = n
+        guard n > 0 else { return }
+        var lo = [SIMD3<Float>](repeating: .zero, count: n), hi = lo, mid = lo
+        var all = (lo: SIMD3<Float>(repeating: .infinity), hi: SIMD3<Float>(repeating: -.infinity))
+        for t in 0..<n {
+            let a = v[Int(ix[3 * t])], b = v[Int(ix[3 * t + 1])], c = v[Int(ix[3 * t + 2])]
+            let p = SIMD3(a.x, a.y, a.z), q = SIMD3(b.x, b.y, b.z), r = SIMD3(c.x, c.y, c.z)
+            lo[t] = simd_min(p, simd_min(q, r))
+            hi[t] = simd_max(p, simd_max(q, r))
+            mid[t] = (lo[t] + hi[t]) / 2
+            all.lo = simd_min(all.lo, lo[t])
+            all.hi = simd_max(all.hi, hi[t])
+        }
+        // (Each box a hair larger than its triangles, so one a ray meets by rounding is never passed by.)
+        let pad = 1e-5 * simd_reduce_max(all.hi - all.lo) + 1e-6
+        order = Array(0..<Int32(n))
+        nodes.reserveCapacity(n / 2 + 1)
+        nodes.append(Node())
+        var jobs = [(node: 0, first: 0, count: n)]
+        while let j = jobs.popLast() {
+            let f = Int(order[j.first])
+            var blo = lo[f], bhi = hi[f], clo = mid[f], chi = mid[f]
+            for k in j.first..<(j.first + j.count) {
+                let t = Int(order[k])
+                blo = simd_min(blo, lo[t])
+                bhi = simd_max(bhi, hi[t])
+                clo = simd_min(clo, mid[t])
+                chi = simd_max(chi, mid[t])
+            }
+            nodes[j.node].lo = blo - pad
+            nodes[j.node].hi = bhi + pad
+            if j.count <= 8 {
+                nodes[j.node].first = Int32(j.first)
+                nodes[j.node].count = Int32(j.count)
+                continue
+            }
+            // Halved across the middle of its triangles' middles, along their longest spread (by count where that
+            // leaves one side empty).
+            let ext = chi - clo
+            let axis = ext.x >= ext.y && ext.x >= ext.z ? 0 : ext.y >= ext.z ? 1 : 2
+            let split = (clo[axis] + chi[axis]) / 2
+            var cut = order[j.first..<(j.first + j.count)].partition { mid[Int($0)][axis] >= split }
+            if cut <= j.first || cut >= j.first + j.count { cut = j.first + j.count / 2 }
+            let l = nodes.count, r = l + 1
+            nodes.append(Node())
+            nodes.append(Node())
+            nodes[j.node].left = Int32(l)
+            nodes[j.node].right = Int32(r)
+            jobs.append((node: l, first: j.first, count: cut - j.first))
+            jobs.append((node: r, first: cut, count: j.first + j.count - cut))
+        }
+    }
+
+    // Each triangle in a box the ray (o + t·d, t ≥ 0) enters nearer than `within` says as it goes.
+    func each(_ o: SIMD3<Float>, _ d: SIMD3<Float>, within: () -> Float, _ f: (Int) -> Void) {
+        guard !nodes.isEmpty else { return }
+        var stack: [Int32] = [0]
+        while let i = stack.popLast() {
+            let nd = nodes[Int(i)]
+            var t0: Float = 0, t1 = Float.infinity, met = true
+            for a in 0..<3 {
+                if d[a] == 0 {
+                    if o[a] < nd.lo[a] || o[a] > nd.hi[a] { met = false; break }
+                    continue
+                }
+                let u = (nd.lo[a] - o[a]) / d[a], w = (nd.hi[a] - o[a]) / d[a]
+                t0 = max(t0, min(u, w))
+                t1 = min(t1, max(u, w))
+            }
+            guard met, t0 <= t1, t0 <= within() * 1.0001 + 1e-4 else { continue }
+            if nd.left < 0 {
+                for k in Int(nd.first)..<Int(nd.first + nd.count) { f(Int(order[k])) }
+            } else {
+                stack.append(nd.left)
+                stack.append(nd.right)
+            }
+        }
+    }
+
+    // A mesh's tree: nil while it's small (looking at all of it is quick) or still being made.
+    @MainActor static func of(_ m: Mesh) -> TriangleTree? {
+        guard m.indices.count >= 3 * 20_000 else { return nil }
+        if let t = made[m.stamp] { return t }
+        if making.insert(m.stamp).inserted {
+            let v = m.vertices, ix = m.indices, stamp = m.stamp
+            DispatchQueue.global(qos: .userInitiated).async {
+                let t = TriangleTree(v, ix)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        TriangleTree.making.remove(stamp)
+                        if TriangleTree.made.count >= 24 { TriangleTree.made.removeAll() }
+                        TriangleTree.made[stamp] = t
+                    }
+                }
+            }
+        }
+        return nil
+    }
+    @MainActor private static var made: [Int: TriangleTree] = [:]
+    @MainActor private static var making: Set<Int> = []
+}
+
+
 enum Picking {
-    static func rayHit(_ m: Mesh, _ o: SIMD3<Double>, _ d: SIMD3<Double>) -> (t: Double, face: Int)? {
+    // The nearest triangle a ray (o + t·d) meets, and its face. A big mesh's tree of boxes leads it to the few triangles
+    // near the ray (all of them are looked at until the tree is ready).
+    @MainActor static func rayHit(_ m: Mesh, _ o: SIMD3<Double>, _ d: SIMD3<Double>) -> (t: Double, face: Int)? {
         // bounding box test
         var tmin = -Double.infinity, tmax = Double.infinity
         for a in 0..<3 {
@@ -821,27 +965,28 @@ enum Picking {
         if tmax < max(tmin, 0) { return nil }
         let of = SIMD3<Float>(o), df = SIMD3<Float>(d)
         var best = Float.infinity, face = -1
-        let v = m.vertices
-        var i = 0
-        while i < m.indices.count {
-            let a = v[Int(m.indices[i])], b = v[Int(m.indices[i + 1])], c = v[Int(m.indices[i + 2])]
+        let v = m.vertices, ix = m.indices
+        func test(_ tri: Int) {
+            let i = 3 * tri
+            let a = v[Int(ix[i])], b = v[Int(ix[i + 1])], c = v[Int(ix[i + 2])]
             let p0 = SIMD3(a.x, a.y, a.z), e1 = SIMD3(b.x, b.y, b.z) - p0, e2 = SIMD3(c.x, c.y, c.z) - p0
             let p = cross(df, e2)
             let det = dot(e1, p)
-            if abs(det) > 1e-12 {
-                let inv = 1 / det
-                let s = of - p0
-                let u = dot(s, p) * inv
-                if u >= 0 && u <= 1 {
-                    let q = cross(s, e1)
-                    let w = dot(df, q) * inv
-                    if w >= 0 && u + w <= 1 {
-                        let t = dot(e2, q) * inv
-                        if t > 1e-4 && t < best { best = t; face = Int(a.w) }
-                    }
-                }
-            }
-            i += 3
+            guard abs(det) > 1e-12 else { return }
+            let inv = 1 / det
+            let s = of - p0
+            let u = dot(s, p) * inv
+            guard u >= 0 && u <= 1 else { return }
+            let q = cross(s, e1)
+            let w = dot(df, q) * inv
+            guard w >= 0 && u + w <= 1 else { return }
+            let t = dot(e2, q) * inv
+            if t > 1e-4 && t < best { best = t; face = Int(a.w) }
+        }
+        if let tree = TriangleTree.of(m), tree.triangles == ix.count / 3 {
+            tree.each(of, df, within: { best }) { test($0) }
+        } else {
+            for tri in 0..<(ix.count / 3) { test(tri) }
         }
         return face >= 0 ? (Double(best), face) : nil
     }
@@ -1007,9 +1152,16 @@ final class CadView: MTKView {
 
     private var scale: CGFloat { window?.backingScaleFactor ?? 2 }
 
+    // The view and projection together, made again only when the camera or the view's size changed (snapping projects
+    // every corner and edge point on each move of the pointer).
+    private var vpKey: (SIMD3<Float>, Float, Float, Float, CGFloat, CGFloat)?
+    private var vpMatrix = matrix_identity_double4x4
     private func vp() -> simd_double4x4 {
-        let f = renderer.frame(CGSize(width: bounds.width, height: bounds.height))
-        return simd_double4x4(f.viewProj)
+        let c = lib.camera, w = bounds.width, h = bounds.height
+        if let k = vpKey, k.0 == c.target, k.1 == c.yaw, k.2 == c.pitch, k.3 == c.distance, k.4 == w, k.5 == h { return vpMatrix }
+        vpMatrix = simd_double4x4(renderer.frame(CGSize(width: w, height: h)).viewProj)
+        vpKey = (c.target, c.yaw, c.pitch, c.distance, w, h)
+        return vpMatrix
     }
 
     func project(_ p: SIMD3<Double>) -> CGPoint? {

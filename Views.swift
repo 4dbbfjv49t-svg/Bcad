@@ -3000,6 +3000,8 @@ struct PlanLink: View {
 // The Settings section: the plan in force, what it does next, and today's free file.
 struct PlanSettings: View {
     @Environment(Workbench.self) private var lib
+    // Today's free file, read from the Keychain when shown and when the plans change (not each time this is drawn).
+    @State private var todays: String?
 
     var body: some View {
         let plans = lib.plans
@@ -3013,9 +3015,11 @@ struct PlanSettings: View {
                     .frame(width: 130)
             }
             if plans.plan == .free {
-                SettingLine(title: L("Today's free file"), detail: plans.allowance.todays?.name ?? L("Not used yet today")) { EmptyView() }
+                SettingLine(title: L("Today's free file"), detail: todays ?? L("Not used yet today")) { EmptyView() }
             }
         }
+        .onAppear { todays = lib.plans.allowance.todays?.name }
+        .onChange(of: plans.stamp) { todays = lib.plans.allowance.todays?.name }
     }
 }
 
