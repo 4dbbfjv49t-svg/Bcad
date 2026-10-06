@@ -6530,6 +6530,27 @@
   "zh-Hans": "开始听写…",
   "ja": "音声入力を開始…"
  },
+ "Still working on the last change…": {
+  "uk": "Ще працюю над попередньою зміною…",
+  "cs": "Na předchozí změně se ještě pracuje…",
+  "de": "Die letzte Änderung wird noch berechnet…",
+  "es": "Aún se está procesando el último cambio…",
+  "fr": "Le dernier changement est encore en cours…",
+  "it": "L'ultima modifica è ancora in corso…",
+  "hu": "Az előző módosítás még folyamatban van…",
+  "nl": "De vorige wijziging is nog bezig…",
+  "nb": "Forrige endring pågår fortsatt…",
+  "pl": "Poprzednia zmiana wciąż trwa…",
+  "ro": "Ultima modificare este încă în lucru…",
+  "fi": "Edellinen muutos on vielä kesken…",
+  "sv": "Den senaste ändringen pågår fortfarande…",
+  "kk": "Соңғы өзгеріс әлі орындалуда…",
+  "ka": "ბოლო ცვლილება ჯერ კიდევ მუშავდება…",
+  "ar": "لا يزال التغيير الأخير قيد التنفيذ…",
+  "hi": "पिछला बदलाव अभी चल रहा है…",
+  "zh-Hans": "上一个更改仍在进行中…",
+  "ja": "前の変更をまだ処理中です…"
+ },
  "Strawberry": {
   "uk": "Полуниця",
   "cs": "Jahoda",

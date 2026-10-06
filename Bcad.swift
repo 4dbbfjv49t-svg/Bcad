@@ -2628,7 +2628,8 @@ final class Workbench: DesignHost {
     // Builds the new shapes first and runs `apply` (which commits them) only when all of them came out, so a rounding,
     // hollow, bevel, merge or split that doesn't work never enters the document: it is said once, and nothing changes.
     func tryThen(_ nodes: [Node], apply: @escaping () -> Void) {
-        guard !trying else { return }
+        // (A second change asked for while the first is still being built: said, not silently dropped.)
+        guard !trying else { flash(L("Still working on the last change…")); return }
         trying = true
         let fit = settings.fit, note = L("Building…"), generation = self.generation
         // Only a slow try shows that it's working.
@@ -4333,8 +4334,9 @@ final class Workbench: DesignHost {
         let bodies = doc.bodies
         let fit = settings.fit
         var todo: [(id: UUID, node: Node, name: String)] = []
-        let rebuildAll = fit != builtFit
-        for b in bodies where rebuildAll || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node, b.name)) }
+        // (Another fit changes only the shapes with bolts or nuts in them.)
+        let refit = fit != builtFit
+        for b in bodies where (refit && b.node.hasFastener) || built[b.id] != b.node || meshes[b.id] == nil { todo.append((b.id, b.node, b.name)) }
         let alive = Set(bodies.map(\.id))
         meshes = meshes.filter { alive.contains($0.key) }
         built = built.filter { alive.contains($0.key) }
@@ -4346,6 +4348,12 @@ final class Workbench: DesignHost {
         let slow = todo.count > 1 || todo.contains { if case .fastener = $0.node.base { true } else { false } }
         let note = L("Building…"), generation = self.generation
         if slow { busy = note }
+        // (One shape says it's working only once it has taken a moment.)
+        let shown: Task<Void, Never>? = slow ? nil : Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.building else { return }
+            withAnimation(Neon.spring) { self.busy = note }
+        }
         Kernel.shared.queue.async {
             Kernel.shared.fit = fit
             // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
@@ -4371,7 +4379,8 @@ final class Workbench: DesignHost {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.building = false
-                    if slow { self.ended(note) }
+                    shown?.cancel()
+                    self.ended(note)
                     self.sceneVersion += 1
                     self.applyDrops()
                     // With several shapes built (a file opened), the message says which one.
@@ -4445,8 +4454,13 @@ final class Workbench: DesignHost {
         default: break
         }
         if e.keyCode == 53 { cancelMode(); return true }
-        if name.hasPrefix("Digit"), let n = Int(name.dropFirst(5)), n <= 6 { camera.preset(n); sceneVersion += 1; return true }
-        if mode == .split, name == settings.key(.split) { return false }
+        if name.hasPrefix("Digit"), let n = Int(name.dropFirst(5)), n <= 6 {
+            // Glides there, as the Views menu does.
+            var c = camera
+            c.preset(n)
+            fly(to: camera.target, yaw: c.yaw, pitch: c.pitch, distance: camera.distance)
+            return true
+        }
         if mode == .split, name == "KeyY" { withAnimation(Neon.spring) { splitAxis = 1 }; return true }
         guard !name.isEmpty, let a = settings.owner(of: name) else { return false }
         perform(a)

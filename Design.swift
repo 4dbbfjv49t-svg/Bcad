@@ -1804,7 +1804,8 @@ enum Art {
 
 extension Keys {
     static let reserved: Set<String> = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Enter", "Space", "Tab", "KeyA", "KeyX",
-                                         "KeyZ", "Backspace", "Delete", "Digit0", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"]
+                                         "KeyZ", "Backspace", "Delete", "Digit0", "Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6",
+                                         "BracketLeft", "BracketRight"]
 }
 
 struct KeyField: View {

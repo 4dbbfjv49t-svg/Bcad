@@ -1331,6 +1331,41 @@ enum SelfTest {
             settle()
             let threaded: Bool = { if case .fastener(let f) = lib.body(bolt.id)?.node { return f.size == 5 } else { return false } }()
             check("a bolt's thread changed is built", threaded && !(lib.meshes[bolt.id]?.vertices.isEmpty ?? true))
+            // Another clearance rebuilds the bolt, not the box beside it.
+            let beside = Solid(name: "Beside", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(40, 0, 10)))
+            use([beside, bolt])
+            let boxStamp = lib.meshes[beside.id]?.stamp, boltStamp = lib.meshes[bolt.id]?.stamp
+            lib.updateSettings { $0.clearance = 0.35 }
+            settle()
+            check("another clearance rebuilds only the bolts and nuts", boxStamp != nil && lib.meshes[beside.id]?.stamp == boxStamp &&
+                  boltStamp != nil && lib.meshes[bolt.id]?.stamp != boltStamp)
+            // A number key glides to its view, as the Views menu does; S switches Split off, as O and M do theirs.
+            func press(_ code: UInt16) -> Bool {
+                NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "",
+                                 charactersIgnoringModifiers: "", isARepeat: false, keyCode: code).map { lib.key($0) } ?? false
+            }
+            lib.camera.yaw = 0.3
+            lib.camera.pitch = 0.2
+            var topView = lib.camera
+            topView.preset(5)
+            let pressed = press(23), atOnce = lib.camera.pitch
+            let flying = Date()
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) } while Date().timeIntervalSince(flying) < 0.8
+            let glided = pressed && atOnce == 0.2 && abs(lib.camera.pitch - topView.pitch) < 1e-4 && abs(lib.camera.yaw - topView.yaw) < 1e-4
+            lib.selection = [beside.id]
+            lib.enter(.split)
+            let splitting = lib.mode == .split
+            let splitOff = press(1) && lib.mode == .select
+            check("a number key glides to its view; S switches Split off", glided && splitting && splitOff,
+                  "pitch \(atOnce) → \(lib.camera.pitch), split \(splitting) \(lib.mode)")
+            // A change asked for while the last is still being built says so (it was dropped without a word).
+            lib.note = nil
+            lib.tryThen([box]) {}
+            lib.tryThen([box]) {}
+            let toldBusy = lib.note == L("Still working on the last change…")
+            settle()
+            lib.note = nil
+            check("a change asked for while the last is still being built says so", toldBusy)
             // Settings back to their defaults.
             lib.updateSettings { $0.snap = 5; $0.clearance = 0.4; $0.shrink = 1 }
             lib.restoreDefaults()

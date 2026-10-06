@@ -2181,7 +2181,14 @@ struct ThreadControls: View {
             SizeChips(title: L("Torx size"), options: (0..<Int(bk_torx_count())).map { Int(bk_torx_number(Int32($0))) }.filter { r.contains(Double($0)) },
                       label: { "T\($0)" }, chosen: Int(f.drive)) { change(f.setting(.drive, Double($0))) }
         } else if field == .drive && f.kind.phillips {
-            SizeChips(title: L("PH size"), options: [1, 2, 3, 4], label: { "PH\($0)" }, chosen: Int(f.drive)) { change(f.setting(.drive, Double($0))) }
+            // Only the sizes whose recess fits in the head (as for Torx).
+            let fits = [1, 2, 3, 4].filter { n in
+                let g = f.setting(.drive, Double(n))
+                return g.range(.recess)?.contains(g.recess) ?? false
+            }
+            SizeChips(title: L("PH size"), options: fits.isEmpty ? [Int(f.drive)] : fits, label: { "PH\($0)" }, chosen: Int(f.drive)) {
+                change(f.setting(.drive, Double($0)))
+            }
         } else {
             SizeLine(title: title(field), axis: nil, value: f[field], unit: field == .angle ? "°" : nil, range: bounded(field)) { v in
                 change(f.setting(field, v))
