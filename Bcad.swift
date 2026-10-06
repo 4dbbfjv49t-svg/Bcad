@@ -4617,9 +4617,48 @@ final class Workbench: DesignHost {
         }
     }
 
+    // Files being read (the self-test waits for them), and the latest asked for: one that comes in after a later one
+    // was asked for is dropped.
+    private(set) var opening = 0
+    @ObservationIgnored private var openToken = 0
+
+    // Read off the main thread (a big sculpt takes seconds to unpack and parse; the window froze), then put in place,
+    // unless another file was asked for or another document begun meanwhile.
     func open(_ url: URL) {
+        openToken += 1
+        opening += 1
+        let token = openToken, generation = self.generation, note = L("Opening…")
+        // (Said only when it takes a moment.)
+        let slow = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.opening > 0 else { return }
+            withAnimation(Neon.spring) { self.busy = note }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let read = Result { () throws -> (doc: Document, shown: [UUID: Mesh]) in
+                let (d, shapes) = try ThreeMF.read(url)
+                // The shapes as they were saved, to show at once (the kernel then rebuilds each exactly and replaces it).
+                var shown: [UUID: Mesh] = [:]
+                for b in d.bodies { shown[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
+                return (d, shown)
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.opening -= 1
+                    if self.opening == 0 {
+                        slow.cancel()
+                        self.ended(note)
+                    }
+                    guard token == self.openToken, generation == self.generation else { return }
+                    self.opened(url, read)
+                }
+            }
+        }
+    }
+
+    private func opened(_ url: URL, _ read: Result<(doc: Document, shown: [UUID: Mesh]), Error>) {
         do {
-            let (d, shapes) = try ThreeMF.read(url)
+            let (d, shown) = try read.get()
             resetEditing()
             doc = d
             saved = d
@@ -4630,9 +4669,7 @@ final class Workbench: DesignHost {
             dropUnsaved()
             noteRecent(url)
             Self.fileLog.notice("Opened \(url.lastPathComponent, privacy: .public)")
-            // The shapes show at once as they were saved; the kernel then rebuilds each exactly and replaces it.
-            meshes = [:]
-            for b in d.bodies { meshes[b.id] = shapes[b.id].flatMap { Mesh(saved: $0, place: b.place) } }
+            meshes = shown
             built = [:]
             requestFit = true
             rebuildScene()

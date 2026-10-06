@@ -422,8 +422,21 @@ enum SelfTest {
 
         // Opening and editing (last: the workbench builds on the kernel's thread from here on).
         let lib = Workbench.shared
-        lib.open(u3)
+        // A file opened, and waited for (it's read in the background).
+        func opened(_ url: URL) {
+            lib.open(url)
+            let t = Date()
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) } while lib.opening > 0 && Date().timeIntervalSince(t) < 60
+        }
+        opened(u3)
         check("open loads the file unchanged", lib.doc == doc && !lib.dirty)
+        // Read in the background: the window isn't held up while a file is unpacked and parsed.
+        let openAsked = Date()
+        lib.open(u3)
+        let reading = lib.opening > 0, openReturned = Date().timeIntervalSince(openAsked)
+        while lib.opening > 0 && Date().timeIntervalSince(openAsked) < 60 { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        check("a file is read in the background, then put in place", reading && openReturned < 0.05 && lib.doc == doc && !lib.dirty,
+              "\(openReturned) s")
         let shown = zip(doc.bodies, meshes).allSatisfy { b, m in
             guard let p = lib.meshes[b.id], !p.vertices.isEmpty else { return false }
             return abs(p.volume - m.1.volume) < m.1.volume * 0.02
@@ -441,7 +454,7 @@ enum SelfTest {
             lib.enter(.hollow)
             lib.angleEdit = AngleEdit(body: id, picks: [], section: Section(loops: [], angle: 90, point: .zero, direction: SIMD3(0, 0, 1)))
         }
-        lib.open(u3)
+        opened(u3)
         check("open leaves the tools behind", lib.mode == .select && lib.angleEdit == nil && lib.editBody == nil && lib.selection.isEmpty)
         let copy = dir.appendingPathComponent("saved.3mf")
         lib.fileURL = copy
@@ -464,7 +477,7 @@ enum SelfTest {
         }
         // A save that ends after another file was opened leaves that file's name and state as they are.
         let before = dir.appendingPathComponent("before.3mf")
-        let savedBefore = saveAs(before) { lib.open(u3) }
+        let savedBefore = saveAs(before) { opened(u3) }
         check("a save ending after another file opened leaves that file be", savedBefore && lib.fileURL == u3 && !lib.dirty && FileManager.default.fileExists(atPath: before.path))
         // Unsaved work set aside comes back after a crash: the same document, still unsaved, its file still its own; once
         // saved, nothing is set aside.
@@ -476,7 +489,7 @@ enum SelfTest {
         Workbench.recoveryQueue.sync {}
         try? FileManager.default.removeItem(at: recoveryCopy)
         try? FileManager.default.copyItem(at: recovery, to: recoveryCopy)
-        lib.open(u3)
+        opened(u3)
         Workbench.recoveryQueue.sync {}
         let droppedOnOpen = !FileManager.default.fileExists(atPath: recovery.path)
         try? FileManager.default.copyItem(at: recoveryCopy, to: recovery)
@@ -494,7 +507,7 @@ enum SelfTest {
         let keptSaved = saveAs(dir.appendingPathComponent("recovered.3mf"))
         Workbench.recoveryQueue.sync {}
         check("saved, nothing is set aside", keptSaved && !lib.dirty && !FileManager.default.fileExists(atPath: recovery.path))
-        lib.open(u3)
+        opened(u3)
         lib.fileURL = copy
 
         // Renaming: a saved file is renamed where it is and a name already taken is refused; an unsaved document keeps the
@@ -889,7 +902,7 @@ enum SelfTest {
         let oldJSON = String(decoding: (try? encoder.encode(earlier)) ?? Data(), as: UTF8.self).replacingOccurrences(of: "\"color\":[255,184,51]", with: "\"color\":2")
         let oldURL = dir.appendingPathComponent("old.3mf")
         try? Zip.write([(ThreeMF.docPath, Data(oldJSON.utf8))]).write(to: oldURL)
-        lib.open(oldURL)
+        opened(oldURL)
         settle()
         check("a file from an earlier version opens", oldJSON.contains("\"color\":2") && lib.doc.bodies.first?.color == Palette.colors[2]
               && lib.doc.bodies.first?.node == oldNode && lib.doc.bodies.first.map { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) } == true)
@@ -905,7 +918,7 @@ enum SelfTest {
         let keptURL = dir.appendingPathComponent("kept.3mf")
         try? ThreeMF.write(keptURL, meshes: keptMeshes, doc: kept, bed: bed)
         lib.note = nil
-        lib.open(keptURL)
+        opened(keptURL)
         settle()
         check("a saved rounded cup, ring and torus reopen", keptMeshes.count == 3 && lib.doc == kept && lib.note == nil
               && kept.bodies.allSatisfy { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) }, lib.note ?? "")
@@ -1268,7 +1281,7 @@ enum SelfTest {
         nothingDoc.bodies = [nothing]
         let nothingURL = dir.appendingPathComponent("nothing.3mf"), nothingAgain = dir.appendingPathComponent("nothing-again.3mf")
         try? ThreeMF.write(nothingURL, meshes: meshes.first.map { [(nothing, $0.1)] } ?? [], doc: nothingDoc, bed: bed)
-        lib.open(nothingURL)
+        opened(nothingURL)
         settle()
         check("a shape the engine can't build is saved as it's shown", saveAs(nothingAgain) && (try? ThreeMF.read(nothingAgain))?.meshes[nothing.id] != nil)
 
@@ -1668,7 +1681,7 @@ enum SelfTest {
             lib.selection = [plainAgain.id]
             lib.perform(.sculpt)
             waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
-            let opened = lib.mode == .sculpt
+            let sculptOpened = lib.mode == .sculpt
             lib.camera = Camera()
             lib.camera.target = SIMD3(0, 0, 10)
             lib.camera.distance = 110
@@ -1681,7 +1694,7 @@ enum SelfTest {
             lib.undo()
             settle()
             check("Esc after a stroke leaves Sculpt keeping it (unsaved meanwhile), one ⌘Z takes it back",
-                  opened && stroked && unsavedWhileSculpting && strokesKept && lib.mode == .select && lib.sculpt == nil && lib.doc == untouched)
+                  sculptOpened && stroked && unsavedWhileSculpting && strokesKept && lib.mode == .select && lib.sculpt == nil && lib.doc == untouched)
             // Every other way out keeps the strokes too: D again, another tool's key.
             for (way, leave) in [("D again", { lib.perform(.sculpt) }), ("another tool", { lib.enter(.measure) })] as [(String, () -> Void)] {
                 use([plainAgain])
@@ -1962,7 +1975,7 @@ enum SelfTest {
                 lib.renameDocument("free-a3")
                 let a3 = dir.appendingPathComponent("free-a3.3mf")
                 lib.newDocument()
-                lib.open(a3)
+                opened(a3)
                 settle()
                 let reopened = lib.docID == claimA?.doc
                 check("free: today's file renamed and opened again is still today's", reopened && saveAs(a3))
@@ -2037,7 +2050,7 @@ enum SelfTest {
                 for _ in 0..<40 { shop.nextDay() }
                 plans.refresh()
                 let lapsed = plans.plan == .free
-                lib.open(dir.appendingPathComponent("figure.3mf"))
+                opened(dir.appendingPathComponent("figure.3mf"))
                 settle()
                 let fig = lib.doc.bodies.first { b in if case .figure = b.node { true } else { false } }
                 if let fig, case .figure(let f) = fig.node { lib.setFigure(fig.id, f.setting(.height, 50)) }

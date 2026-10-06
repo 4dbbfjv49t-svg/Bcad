@@ -4283,6 +4283,27 @@
   "zh-Hans": "打开最近使用",
   "ja": "最近使った項目を開く"
  },
+ "Opening…": {
+  "uk": "Відкриття…",
+  "cs": "Otevírání…",
+  "de": "Wird geöffnet…",
+  "es": "Abriendo…",
+  "fr": "Ouverture…",
+  "it": "Apertura…",
+  "hu": "Megnyitás…",
+  "nl": "Openen…",
+  "nb": "Åpner…",
+  "pl": "Otwieranie…",
+  "ro": "Se deschide…",
+  "fi": "Avataan…",
+  "sv": "Öppnar…",
+  "kk": "Ашылуда…",
+  "ka": "იხსნება…",
+  "ar": "جارٍ الفتح…",
+  "hi": "खोला जा रहा है…",
+  "zh-Hans": "正在打开…",
+  "ja": "開いています…"
+ },
  "Open…": {
   "uk": "Відкрити…",
   "cs": "Otevřít…",
