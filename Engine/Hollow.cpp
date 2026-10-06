@@ -1330,6 +1330,25 @@ static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &ou
     double v = out.meshVolume(), all = whole.meshVolume();
     return shut(out) && v > 0 && v < all * 0.999 && pieces(out) == pieces(whole);
   }
+  // Walls that leave nothing inside: along an axis no opened face lies across (each of its triangles parallel to the
+  // axis), a line through the shape leaves it through walls at both ends, so walls together wider than the shape is
+  // along it leave no room (worked out face by face, such walls took tens of seconds to be refused).
+  {
+    double thinnest = INFINITY;
+    for (double w : depth)
+      if (w >= 0) thinnest = std::min(thinnest, w);
+    bool across[3] = {false, false, false};
+    for (size_t t = 0; t < whole.triFace.size(); t++) {
+      uint32_t f = whole.triFace[t];
+      if (f >= depth.size() || depth[f] >= 0) continue;
+      V3 a = whole.p[whole.tri[3 * t]], b = whole.p[whole.tri[3 * t + 1]], c = whole.p[whole.tri[3 * t + 2]];
+      V3 n = cross(b - a, c - a);
+      double size = norm(n);
+      for (int k = 0; k < 3; k++) across[k] = across[k] || std::fabs(n[k]) > 1e-9 * size;
+    }
+    for (int k = 0; k < 3; k++)
+      if (!across[k] && std::isfinite(thinnest) && 2 * thinnest >= hi[k] - lo[k]) return false;
+  }
   double all = whole.meshVolume();
   int parts = pieces(whole);
   // Walls from the finished faces.

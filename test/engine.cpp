@@ -4076,6 +4076,25 @@ int main() {
           fmt("%.0f ms (", pt) + (pc ? "made" : pw) + fmt("), %.0f ms (", qt) + qw + ")");
     bk_mesh_free(pm), bk_free(pc), bk_free(qc), bk_free(p), bk_free(q);
   }
+  // Walls wider than the shape across, with an opening: refused at once (the glass took 18 s to be refused), while a slab
+  // opened top and bottom, its walls more than half its height, still makes a frame.
+  {
+    double glass[4] = {35.13453739601632, 41.235330992092678, 19.782493985647612, 16.231606460841988};
+    BKShape *g = bk_primitive(BK_GLASS, glass);
+    double bottom[6] = {0, 0, -1, 0, 0, -20.617665496046335}, own[1] = {0.5};
+    int miss = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *gh = g ? bk_hollow(g, nullptr, 0, bottom, 1, bottom, own, 1, 50, &miss) : nullptr;
+    double took = ms(t0);
+    std::string why = gh ? "" : bk_last_error();
+    double slab[3] = {60, 60, 4}, open[12] = {0, 0, 1, 0, 0, 2, 0, 0, -1, 0, 0, -2};
+    BKShape *b = bk_primitive(BK_BOX, slab), *frame = b ? bk_hollow(b, nullptr, 0, open, 2, nullptr, nullptr, 0, 3, &miss) : nullptr;
+    BKMesh *fm = frame ? bk_mesh(frame, 0.05) : nullptr;
+    check("walls wider than the shape across, an opening besides: refused at once; a slab opened both ways still a frame",
+          g && !gh && why.find("walls") != std::string::npos && (!timed || took < 1000) && fm && near(fm->volume, 60.0 * 60 * 4 - 54.0 * 54 * 4, 1e-6),
+          fmt("%.0f ms; frame %.3f mm³", took, fm ? fm->volume : -1));
+    bk_mesh_free(fm), bk_free(frame), bk_free(b), bk_free(gh), bk_free(g);
+  }
   // A long way between two dabs at a narrow tip, mirrored twice, over a dense mesh with the detail on: one call takes its
   // steps until it has looked at so many points, the rest of the way left to the next (its thousand steps took 3 s here,
   // half a minute on a coarser mesh being made finer).
