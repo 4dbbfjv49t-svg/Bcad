@@ -663,21 +663,39 @@ std::vector<int> facesAt(const Solid &s, V3 p) {
 
 // Whether a mesh is closed: every side of a triangle met by one running the other way (points by position).
 bool closed(const Solid &s) {
-  std::unordered_map<PKey, uint32_t, PKeyHash> id;
-  std::vector<uint32_t> at(s.p.size());
-  for (size_t i = 0; i < s.p.size(); i++) at[i] = id.emplace(pkey(s.p[i]), (uint32_t)id.size()).first->second;
-  std::unordered_map<uint64_t, int> sides;
-  for (size_t t = 0; t < s.tri.size(); t += 3)
+  // Points in one place made one (a flat table: no allocation per point), then every side, and every side turned round,
+  // sorted: closed when the two lists are the same.
+  size_t n = s.p.size(), cap = 16;
+  while (cap < 2 * n) cap *= 2;
+  std::vector<uint32_t> table(cap, UINT32_MAX), at(n);
+  std::vector<PKey> keys;
+  keys.reserve(n);
+  for (size_t i = 0; i < n; i++) {
+    PKey q = pkey(s.p[i]);
+    uint64_t h = (q.x * 0x9E3779B97F4A7C15ull) ^ (q.y * 0xC2B2AE3D27D4EB4Full) ^ (q.z * 0x165667B19E3779F9ull);
+    h ^= h >> 33, h *= 0xFF51AFD7ED558CCDull, h ^= h >> 33, h *= 0xC4CEB9FE1A85EC53ull, h ^= h >> 33;
+    for (size_t k = h & (cap - 1);; k = (k + 1) & (cap - 1)) {
+      if (table[k] == UINT32_MAX) {
+        table[k] = at[i] = (uint32_t)keys.size();
+        keys.push_back(q);
+        break;
+      }
+      if (keys[table[k]] == q) {
+        at[i] = table[k];
+        break;
+      }
+    }
+  }
+  std::vector<uint64_t> sides, back;
+  sides.reserve(s.tri.size()), back.reserve(s.tri.size());
+  for (size_t t = 0; t + 2 < s.tri.size(); t += 3)
     for (int k = 0; k < 3; k++) {
       uint32_t a = at[s.tri[t + k]], b = at[s.tri[t + (k + 1) % 3]];
       if (a == b) return false;
-      sides[(uint64_t)a << 32 | b]++;
+      sides.push_back((uint64_t)a << 32 | b), back.push_back((uint64_t)b << 32 | a);
     }
-  for (auto [k, n] : sides) {
-    auto o = sides.find(k << 32 | k >> 32);
-    if (o == sides.end() || o->second != n) return false;
-  }
-  return true;
+  std::sort(sides.begin(), sides.end()), std::sort(back.begin(), back.end());
+  return sides == back;
 }
 
 // The merge count past which a treatment's merges are refused (see treated).

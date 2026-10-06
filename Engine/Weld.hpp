@@ -34,7 +34,9 @@ inline Welded weld(const Solid &s, double step = 0) {
     uint64_t a, b, c;
     std::memcpy(&a, &q.x, 8), std::memcpy(&b, &q.y, 8), std::memcpy(&c, &q.z, 8);
     uint64_t h = (a * 0x9E3779B97F4A7C15ull) ^ (b * 0xC2B2AE3D27D4EB4Full) ^ (c * 0x165667B19E3779F9ull);
-    h ^= h >> 29;
+    // (Mixed through all its bits: points on a grid, as a remeshed flat face's are, have numbers ending in long runs of
+    // zeros, and all came to one slot.)
+    h ^= h >> 33, h *= 0xFF51AFD7ED558CCDull, h ^= h >> 33, h *= 0xC4CEB9FE1A85EC53ull, h ^= h >> 33;
     for (size_t k = h & (cap - 1);; k = (k + 1) & (cap - 1)) {
       uint32_t at = table[k];
       if (at == UINT32_MAX) {

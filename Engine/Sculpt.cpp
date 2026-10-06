@@ -712,8 +712,13 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
         for (int i = r0[0]; i <= r1[0]; i++) {
           if (!inside(i, j, k)) continue;
           V3 p{g.at(0, i), g.at(1, j), g.at(2, k)};
-          double d = norm(p - nearestOnTriangle(p, a, b, c));
           float &at = dist[g.index(i, j, k)];
+          // (Not looked at when the triangle's box is further than the nearest found so far, or than the reach, past
+          // which every distance counts the same: the same distances, found in a fraction of the time.)
+          double lim = std::min((double)at, reach);
+          double ex = std::max({bl.x - p.x, 0.0, p.x - bh.x}), ey = std::max({bl.y - p.y, 0.0, p.y - bh.y}), ez = std::max({bl.z - p.z, 0.0, p.z - bh.z});
+          if (ex * ex + ey * ey + ez * ez > lim * lim * 1.002) continue;
+          double d = norm(p - nearestOnTriangle(p, a, b, c));
           if (d < at) at = (float)d;
         }
   }
