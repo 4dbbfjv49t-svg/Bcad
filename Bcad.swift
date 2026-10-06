@@ -1288,6 +1288,15 @@ final class Kernel: @unchecked Sendable {
 
     func takeProblems() -> [String] { defer { problems = [] }; return problems }
 
+    // The document being worked on, as the window last said (set from the main thread, read here): a rebuild for one
+    // since closed stops between shapes.
+    private let documentLock = NSLock()
+    private var documentNow = 0
+    var document: Int {
+        get { documentLock.withLock { documentNow } }
+        set { documentLock.withLock { documentNow = newValue } }
+    }
+
     // keep: false for a shape shown only for a moment (a step of a live resize), so it doesn't crowd out the others.
     func shape(_ node: Node, keep: Bool = true) -> ShapeRef? {
         let k = key(node)
@@ -2595,7 +2604,12 @@ final class Workbench: DesignHost {
 
     func body(_ id: UUID?) -> Solid? { doc.bodies.first { $0.id == id } }
     var primary: Solid? { body(selection.last) }
-    var selected: [Solid] { doc.bodies.filter { selection.contains($0.id) } }
+    var selected: [Solid] {
+        // (Many chosen, as with Select All: looked up in a set, not each shape against each of them.)
+        if selection.count < 16 { return doc.bodies.filter { selection.contains($0.id) } }
+        let ids = Set(selection)
+        return doc.bodies.filter { ids.contains($0.id) }
+    }
 
     // Records an undo step before a change (drags call begin once, then edit freely).
     func begin() {
@@ -4359,8 +4373,10 @@ final class Workbench: DesignHost {
             // Nothing left over from other work (a save, a cut for the angle editor) is said as if it happened here.
             _ = Kernel.shared.takeProblems()
             var trouble: (name: String, problems: [String])?
-            // Each shape shows as soon as it's built, rather than all of them at the end.
+            // Each shape shows as soon as it's built, rather than all of them at the end (none once another document
+            // is open: what's left would only be thrown away).
             for (id, node, name) in todo {
+                if Kernel.shared.document != generation { break }
                 let mesh = Kernel.shared.mesh(node)
                 let problems = Kernel.shared.takeProblems()
                 if trouble == nil, !problems.isEmpty { trouble = (name, problems) }
@@ -4577,6 +4593,7 @@ final class Workbench: DesignHost {
     // Leaves every tool, editor and pending step of the current document behind, before another one comes in.
     private func resetEditing() {
         generation += 1
+        Kernel.shared.document = generation
         docID = UUID()
         reach(nil)
         flight?.cancel()

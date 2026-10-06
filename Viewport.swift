@@ -420,7 +420,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.setVertexBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
         enc.setFragmentBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
         let accent = color(lib.accent), accent2 = color(lib.accent2), glow = Float(max(0.35, lib.brightness))
-        let alive = Set(lib.doc.bodies.map(\.id))
+        let alive = Set(lib.doc.bodies.map(\.id)), chosen = Set(lib.selection)
         bodies = bodies.filter { alive.contains($0.key) }
 
         drawBed(enc, accent: accent)
@@ -447,7 +447,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    SIMD3(model.columns.1.x, model.columns.1.y, model.columns.1.z),
                                    SIMD3(model.columns.2.x, model.columns.2.y, model.columns.2.z)).inverse.transpose
             let nm = simd_float4x4(SIMD4(n3.columns.0, 0), SIMD4(n3.columns.1, 0), SIMD4(n3.columns.2, 0), SIMD4(0, 0, 0, 1))
-            let selected = lib.selection.contains(b.id), hovered = lib.hover.body == b.id
+            let selected = chosen.contains(b.id), hovered = lib.hover.body == b.id
             var rim = SIMD4<Float>(accent.x, accent.y, accent.z, 0)
             if let (lo, hi) = lib.worldBounds(b),
                lo.x < -bed.x / 2 - 0.01 || lo.y < -bed.y / 2 - 0.01 || hi.x > bed.x / 2 + 0.01 || hi.y > bed.y / 2 + 0.01 || lo.z < -0.01 || hi.z > bed.z + 0.01 {
@@ -1784,7 +1784,8 @@ final class CadView: MTKView {
         startBox = lo.x.isFinite ? Box(lo: lo, hi: hi) : nil
         var found: [[Mark]] = [[], [], []]
         others = []
-        for b in lib.doc.bodies where !b.hidden && !lib.selection.contains(b.id) {
+        let chosen = Set(lib.selection)
+        for b in lib.doc.bodies where !b.hidden && !chosen.contains(b.id) {
             guard let (l, h) = lib.worldBounds(b), let m = lib.meshes[b.id] else { continue }
             let box = Box(lo: l, hi: h)
             others.append(box)
