@@ -271,7 +271,8 @@ void bk_sculpt_begin_brush(BKSculpt *s, const BKBrush *b, const double *at) {
   if (!s || !b || !at || !finite(at, 3) || !std::isfinite(b->radius) || !std::isfinite(b->strength)) return;
   BrushTip tip;
   tip.hardness = b->hardness, tip.rigidity = b->rigidity, tip.oval = b->oval, tip.angle = b->angle, tip.tilt = b->tilt;
-  s->sculptor.begin(b->brush, {at[0], at[1], at[2]}, b->radius, b->strength, b->mirror, b->invert != 0, tip, {b->across[0], b->across[1], b->across[2]});
+  s->sculptor.begin(b->brush, {at[0], at[1], at[2]}, b->radius, b->strength, b->mirror, b->invert != 0, tip, {b->across[0], b->across[1], b->across[2]},
+                    {b->middle[0], b->middle[1], b->middle[2]});
 }
 
 void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size) {

@@ -51,8 +51,8 @@ bool isoSurface(V3 mid, double h, const int n[3], const std::function<double(V3)
 // snake hook (pulled along with the pointer, the points under it taken again at every step: horns and tentacles),
 // twist (turned round the brush's axis). The brush weighs points by how near its middle they are (none at its rim):
 // its tip (Tip) sets how (a core at full strength, the fade soft or crisp, the footprint an oval at an angle to the
-// stroke's way) and leans its push. `mirror` (bits: x, y, z) does the same across those planes through the body's
-// origin as well, in every combination of them.
+// stroke's way) and leans its push. `mirror` (bits: x, y, z) does the same across those planes through `middle`
+// (the body's origin unless given) as well, in every combination of them.
 //
 // With a detail size set, every brush also makes the triangles it passes over that size: sides much longer than it asks
 // are halved, sides much shorter merged away where that keeps the surface sound, and sides between thin triangles turned
@@ -83,7 +83,8 @@ class Sculptor {
   enum Brush { Grab, Draw, Inflate, Smooth, Flatten, Pinch, Crease, Detail, Clay, Layer, Blob, Scrape, Smudge, SnakeHook, Twist };
   using Tip = BrushTip;
   // `across`: the way the stroke is taken to go before it has moved (the view's right, say), for the oval and the tilt.
-  void begin(int brush, V3 at, double radius, double strength, int mirror, bool invert, const Tip &tip = Tip(), V3 across = {0, 0, 0});
+  void begin(int brush, V3 at, double radius, double strength, int mirror, bool invert, const Tip &tip = Tip(), V3 across = {0, 0, 0},
+             V3 middle = {0, 0, 0});
   // `tilt` (degrees), when a number, leans this dab's push instead of the tip's (a pen held at a slant).
   void dab(V3 at, double pressure, double size = 1, double tilt = NAN);
   void end();
@@ -164,6 +165,7 @@ class Sculptor {
   int brush = 0;
   double radius = 1, strength = 0.5, strokeDetail = 0;
   int mirror = 0;
+  V3 middle{0, 0, 0};  // where the mirrors' planes meet
   bool invert = false;
   Tip tip;
   double tiltNow = 0;     // this dab's lean (degrees)
@@ -215,6 +217,8 @@ class Sculptor {
   // The mirrors in use (k: bits x, y, z flipped), in order; where they put a point.
   int copies(int out[8]) const;
   static V3 flip(V3 v, int k) { return {k & 1 ? -v.x : v.x, k & 2 ? -v.y : v.y, k & 4 ? -v.z : v.z}; }
+  // A point's mirror k: across the planes through `middle` (a way's is flip's).
+  V3 mirrored(V3 q, int k) const { return middle.x == 0 && middle.y == 0 && middle.z == 0 ? flip(q, k) : middle + flip(q - middle, k); }
   // The points under a dab at c, and each one's weight, as the tip has it (the stroke's way there: dir).
   void weigh(V3 c, double radius, V3 dir, std::vector<uint32_t> &which, std::vector<double> &weight, V3 &out) const;
   static V3 wayAlong(V3 dir, V3 out);

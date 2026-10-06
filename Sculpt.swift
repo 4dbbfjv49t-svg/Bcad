@@ -126,11 +126,11 @@ struct SculptSettings: Codable, Equatable {
 }
 
 // The brush where the pointer is (the body's own coordinates): its rim, an oval turned from the stroke's way; its core,
-// where it works at full strength, fainter; a tick along its push; each again across every mirror in use. Each line its
-// points and how strongly it's drawn (0…1).
+// where it works at full strength, fainter; a tick along its push; each again across every mirror in use (planes
+// through `middle`). Each line its points and how strongly it's drawn (0…1).
 enum SculptCursor {
     static func lines(at c: SIMD3<Double>, normal: SIMD3<Double>, way: SIMD3<Double>, radius r: Double, tip: SculptTip,
-                      mirror: Int) -> [(points: [SIMD3<Double>], alpha: Double)] {
+                      mirror: Int, middle: SIMD3<Double> = .zero) -> [(points: [SIMD3<Double>], alpha: Double)] {
         let up = length(normal) > 0.5 ? normalize(normal) : SIMD3<Double>(0, 0, 1)
         var t = way - up * dot(way, up)
         if length(t) < 1e-9 { t = abs(up.z) < 0.9 ? cross(up, SIMD3(0, 0, 1)) : cross(up, SIMD3(1, 0, 0)) }
@@ -149,7 +149,7 @@ enum SculptCursor {
         var all = one
         for k in 1..<8 where (k & ~mirror) == 0 {
             let s = SIMD3<Double>(k & 1 != 0 ? -1 : 1, k & 2 != 0 ? -1 : 1, k & 4 != 0 ? -1 : 1)
-            for line in one { all.append((points: line.points.map { $0 * s }, alpha: line.alpha * 0.45)) }
+            for line in one { all.append((points: line.points.map { middle + ($0 - middle) * s }, alpha: line.alpha * 0.45)) }
         }
         return all
     }
@@ -169,6 +169,9 @@ final class SculptSession {
     // The detail it was made at (mm), and its largest side.
     let detail: Double
     let size: Double
+    // Where the mirrors' planes meet: the body's own origin where that's within it (a shape, a sculpt), else the middle
+    // of its box (a merge, placed away from the origin); a figure's spine (set when it's opened).
+    var middle = SIMD3<Double>(0, 0, 0)
     // Changes, in the order they happened: a point's slot, or a triangle's with `triangleMark` added; how many changes
     // came before the first of them.
     static let triangleMark: UInt32 = 1 << 31
@@ -193,6 +196,9 @@ final class SculptSession {
             i += 3
         }
         size = d.positions.isEmpty ? 0 : Double(simd_reduce_max(hi - lo))
+        if !d.positions.isEmpty && !(all(lo .<= SIMD3<Float>(repeating: 0)) && all(hi .>= SIMD3<Float>(repeating: 0))) {
+            middle = SIMD3<Double>((lo + hi) / 2)
+        }
     }
 
     deinit { bk_sculpt_free(ptr) }
@@ -218,8 +224,8 @@ final class SculptSession {
     // The size the strokes begun after make the triangles under them (mm; 0: leaves them as they are).
     func setDetail(_ d: Double) { bk_sculpt_set_detail(ptr, d) }
 
-    // mirror: bits for x, y and z (across those planes through the body's origin); across: the way the stroke is taken
-    // to go until it moves (for an oval and a tilt).
+    // mirror: bits for x, y and z (across those planes through `middle`); across: the way the stroke is taken to go until
+    // it moves (for an oval and a tilt).
     func begin(_ b: SculptBrush, at p: SIMD3<Double>, radius: Double, strength: Double, mirror: Int, invert: Bool, tip: SculptTip = SculptTip(),
                across: SIMD3<Double> = .zero) {
         var br = BKBrush()
@@ -234,6 +240,7 @@ final class SculptSession {
         br.angle = tip.angle
         br.tilt = tip.tilt
         br.across = (across.x, across.y, across.z)
+        br.middle = (middle.x, middle.y, middle.z)
         let a = [p.x, p.y, p.z]
         bk_sculpt_begin_brush(ptr, &br, a)
     }
@@ -292,10 +299,11 @@ final class SculptSession {
                           indices: Array(UnsafeBufferPointer(start: c.pointee.indices, count: 3 * Int(c.pointee.triangleCount))))
     }
 
-    // Shown as its body's mesh (one smooth face) until the kernel's own takes its place.
-    func mesh() -> Mesh {
+    // Shown as its body's mesh (one smooth face) until the kernel's own takes its place: from its data, when that's been
+    // read already.
+    func mesh(from given: SculptData? = nil) -> Mesh {
         var m = Mesh()
-        let d = data(), p = d.positions
+        let d = given ?? data(), p = d.positions
         let count = p.count / 3
         m.vertices = (0..<count).map { SIMD4(p[3 * $0], p[3 * $0 + 1], p[3 * $0 + 2], 0) }
         m.indices = d.indices

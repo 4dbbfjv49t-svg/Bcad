@@ -5144,6 +5144,27 @@
   "zh-Hans": "重新网格化",
   "ja": "リメッシュ"
  },
+ "Remesh is still working…": {
+  "uk": "Перебудова сітки ще триває…",
+  "cs": "Přestavba sítě ještě běží…",
+  "de": "Neu vernetzen läuft noch…",
+  "es": "La remalla aún está en curso…",
+  "fr": "Le remaillage est encore en cours…",
+  "it": "La rimagliatura è ancora in corso…",
+  "hu": "Az újrahálózás még folyamatban van…",
+  "nl": "Opnieuw vermazen is nog bezig…",
+  "nb": "Ny maskering pågår fortsatt…",
+  "pl": "Przebudowa siatki wciąż trwa…",
+  "ro": "Refacerea plasei încă rulează…",
+  "fi": "Verkon uudelleenrakennus on yhä käynnissä…",
+  "sv": "Ny nätning pågår fortfarande…",
+  "kk": "Торды қайта құру әлі жүріп жатыр…",
+  "ka": "ბადის ხელახლა აგება ჯერ კიდევ მიმდინარეობს…",
+  "ar": "لا تزال إعادة بناء الشبكة جارية…",
+  "hi": "मेश फिर से बनाना अभी चल रहा है…",
+  "zh-Hans": "重新网格化仍在进行…",
+  "ja": "リメッシュはまだ実行中です…"
+ },
  "Remove": {
   "uk": "Вилучити",
   "cs": "Odebrat",

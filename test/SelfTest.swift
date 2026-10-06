@@ -1300,6 +1300,15 @@ enum SelfTest {
             let redone = lib.body(b.id) == nil
             lib.undo()
             check("delete, undo, redo", deleted && undone && redone && lib.doc == before)
+            // A click that changes nothing (as on a shape, or the colour mixer opened and closed) keeps what Redo would do.
+            lib.setPlace(b.id) { $0.move.x += 1 }
+            let movedOn = lib.doc
+            lib.undo()
+            lib.begin()
+            lib.undoLastIfUnchanged()
+            lib.redo()
+            check("a click that changes nothing keeps Redo", lib.doc == movedOn)
+            lib.undo()
             lib.selection = [b.id]
             lib.cutSelection()
             let cut = lib.body(b.id) == nil
@@ -1529,6 +1538,10 @@ enum SelfTest {
             check("brush settings kept; an older Bcad's settings get the defaults; numbers out of range brought in", keptBack == kept &&
                   older?.sculpt == SculptSettings() && older?.penTilt == false && wild?.sculpt.brush == "draw" && wild?.sculpt.size == 200 &&
                   wild?.sculpt.tips["draw"]?.oval == 0.05 && wild?.sculpt.tips["draw"]?.hardness == 1 && wild?.sculpt.tips["trowel"] == nil)
+            // A state file with a style a newer Bcad added and a bed kilometres across: the rest kept, the bed the standard.
+            let newer = try? JSONDecoder().decode(Store.self, from: Data(#"{"style": "aurora", "language": "uk", "settings": {"snap": 2, "bed": [1e9, 1e9, 1e9]}}"#.utf8))
+            check("an odd state file: what can't be read left at its standard, the rest kept", newer?.style == nil && newer?.language == "uk" &&
+                  newer?.settings?.snap == 2 && newer?.settings?.bed == SIMD3(256, 256, 256))
 
             // A drawing tablet's pen: its pressure read from the tablet's events (a mouse's are full strength and size),
             // and a dab pressed at a quarter raising a quarter as much as one pressed fully.
@@ -1626,10 +1639,52 @@ enum SelfTest {
             lib.camera.distance = 110
             lib.camera.pitch = 1.0
             if let a = view.project(SIMD3(-3, 0, 20)), let b = view.project(SIMD3(3, 0, 20)) { drag(a, b) }
-            let stroked = lib.sculptStrokes > made
+            let stroked = lib.sculptStrokes > made, unsavedWhileSculpting = lib.dirty
             lib.cancelMode()
             settle()
-            check("Esc after a stroke leaves Sculpt with the body as it was", opened && stroked && lib.mode == .select && lib.doc == untouched && lib.sculpt == nil)
+            let kept: Bool = { if case .sculpt? = lib.body(plainAgain.id)?.node { return true } else { return false } }()
+            lib.undo()
+            settle()
+            check("Esc after a stroke leaves Sculpt keeping it (unsaved meanwhile), one ⌘Z takes it back",
+                  opened && stroked && unsavedWhileSculpting && kept && lib.mode == .select && lib.sculpt == nil && lib.doc == untouched)
+            // Every other way out keeps the strokes too: D again, another tool's key.
+            for (way, leave) in [("D again", { lib.perform(.sculpt) }), ("another tool", { lib.enter(.measure) })] as [(String, () -> Void)] {
+                use([plainAgain])
+                let before = lib.doc
+                lib.selection = [plainAgain.id]
+                lib.perform(.sculpt)
+                waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
+                if let a = view.project(SIMD3(-3, 0, 20)), let b = view.project(SIMD3(3, 0, 20)) { drag(a, b) }
+                leave()
+                settle()
+                let keptHere: Bool = { if case .sculpt? = lib.body(plainAgain.id)?.node { return true } else { return false } }()
+                if lib.mode != .select { lib.cancelMode() }
+                lib.undo()
+                settle()
+                check("leaving Sculpt by \(way) keeps the strokes, one step to undo", keptHere && lib.sculpt == nil && lib.doc == before)
+            }
+            // A merge placed away from the origin (its own coordinates the world's) mirrors across its own middle.
+            let far = Solid(name: "Far", color: Palette.colors[1],
+                            node: .group(op: Int32(BK_UNION), parts: [Part(node: clayBox, place: Placement(move: SIMD3(100, 0, 0))),
+                                                                      Part(node: clayBox, place: Placement(move: SIMD3(110, 0, 0)))]),
+                            place: Placement())
+            use([far])
+            lib.selection = [far.id]
+            lib.perform(.sculpt)
+            waitFor { lib.sculpt != nil || !lib.sculptBusy && lib.mode != .sculpt }
+            let middle = lib.sculpt?.middle ?? .zero
+            lib.cancelMode()
+            settle()
+            check("a merge away from the origin mirrors across its own middle", abs(middle.x - 105) < 0.5 && abs(middle.y) < 0.5, "\(middle)")
+            // ⌘Z while it's being got ready: Sculpt doesn't open on the shape as it was (which Done would put back).
+            use([plainAgain])
+            lib.selection = [plainAgain.id]
+            lib.setPlace(plainAgain.id) { $0.move.x += 5 }
+            let moved = lib.doc
+            lib.perform(.sculpt)
+            lib.undo()
+            waitFor { !lib.sculptBusy }
+            check("⌘Z while Sculpt is being got ready: it isn't opened, the undo stands", lib.mode == .select && lib.sculpt == nil && lib.doc != moved)
         }
 
         // Figures: Human adds a man standing on the bed with the Figure tab open; taller, a woman or in a T-pose, the point

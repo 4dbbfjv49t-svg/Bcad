@@ -216,6 +216,12 @@ final class L10n {
 
 @MainActor func L(_ key: String, _ args: [String: Any] = [:]) -> String { L10n.text(key, L10n.shared.id, args) }
 
+// Whether a name is how `key` reads in any language: one Bcad gave (it follows its shape's kind, whatever the language
+// is now), not one typed in.
+@MainActor func inAnyLanguage(_ name: String, _ key: String, _ args: [String: Any] = [:]) -> Bool {
+    name == L10n.text(key, "en", args) || Languages.all.contains { L10n.text(key, $0.id, args) == name }
+}
+
 // Lays the interface out smaller or larger and draws it scaled, so every control, gap and text follows Interface scale.
 // Arabic mirrors inside; the scaling frame itself always runs left to right.
 struct ScaledUI<Content: View>: View {
@@ -710,6 +716,11 @@ struct WindowConfigurator: NSViewRepresentable {
             w.styleMask.insert(.fullSizeContentView)
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.isReleasedWhenClosed = false
+            // The close button quits as ⌘W does: unsaved changes asked about first, Cancel keeping the window.
+            if let close = w.standardWindowButton(.closeButton) {
+                close.target = NSApp
+                close.action = #selector(NSApplication.terminate(_:))
+            }
         }
         return v
     }

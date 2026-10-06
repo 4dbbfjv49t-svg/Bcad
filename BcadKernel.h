@@ -84,8 +84,8 @@ void bk_sculpt_mesh_free(BKSculptMesh *m);
 enum { BK_BRUSH_GRAB, BK_BRUSH_DRAW, BK_BRUSH_INFLATE, BK_BRUSH_SMOOTH, BK_BRUSH_FLATTEN, BK_BRUSH_PINCH, BK_BRUSH_CREASE, BK_BRUSH_DETAIL,
        BK_BRUSH_CLAY, BK_BRUSH_LAYER, BK_BRUSH_BLOB, BK_BRUSH_SCRAPE, BK_BRUSH_SMUDGE, BK_BRUSH_SNAKE_HOOK, BK_BRUSH_TWIST, BK_BRUSH_COUNT };
 enum { BK_MIRROR_X = 1, BK_MIRROR_Y = 2, BK_MIRROR_Z = 4 };
-// A stroke's brush in full: mirror any of BK_MIRROR_… (across those planes through the body's origin, in every
-// combination); the tip: hardness, the part of the radius at full strength (0…1); rigidity, how crisp the fade from there
+// A stroke's brush in full: mirror any of BK_MIRROR_… (across those planes through `middle`, in every combination; all
+// 0: the body's origin); the tip: hardness, the part of the radius at full strength (0…1); rigidity, how crisp the fade from there
 // to the rim (0 soft and rounded … 1 a straight slope); oval, how wide the footprint is across as along (0.05…1) and
 // angle, how far it's turned from the stroke's way (degrees); tilt, how far the push leans from straight out toward the
 // stroke's way (degrees, ±85). across: the way the stroke is taken to go before it has moved (the view's right, say).
@@ -96,6 +96,7 @@ typedef struct {
   int mirror, invert;
   double hardness, rigidity, oval, angle, tilt;
   double across[3];
+  double middle[3];
 } BKBrush;
 typedef struct BKSculpt BKSculpt;
 BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount);

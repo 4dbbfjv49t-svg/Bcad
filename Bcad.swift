@@ -189,6 +189,12 @@ struct Primitive: Codable, Hashable, Sendable {
         return L(kind == .prism ? "{n}-sided prism" : "{n}-sided pyramid", ["n": sides])
     }
 
+    // Whether a name is its title in any language.
+    @MainActor func titled(_ s: String) -> Bool {
+        guard kind == .prism || kind == .pyramid, ![3, 4, 5, 6, 8].contains(sides) else { return inAnyLanguage(s, name) }
+        return inAnyLanguage(s, kind == .prism ? "{n}-sided prism" : "{n}-sided pyramid", ["n": sides])
+    }
+
     var name: String {
         let n = ["3": "Triangle", "4": "Square", "5": "Pentagon", "6": "Hexagon", "8": "Octagon"][String(sides)] ?? "\(sides)-sided"
         switch kind {
@@ -367,6 +373,20 @@ struct Fastener: Codable, Hashable, Sendable {
         }
     }
 
+    // Whether a name is its name in any language.
+    @MainActor func named(_ s: String) -> Bool {
+        let m = String(cString: bk_thread_name(Int32(size)))
+        let key = switch kind {
+        case .rod: "{m} threaded rod"
+        case .sleeve: "{m} threaded sleeve"
+        case .squareNut: "{m} square nut"
+        case .coneNut: "{m} cone nut"
+        case .hexNut: "{m} nut"
+        default: "{m} bolt"
+        }
+        return inAnyLanguage(s, key, ["m": m])
+    }
+
     // Its bounding size as built; the kernel centres it on its own origin like a primitive.
     func extent(fit: Fit) -> SIMD3<Double> {
         var b = c, out = [0.0, 0.0, 0.0]
@@ -532,6 +552,7 @@ struct Figure: Hashable, Sendable {
     }
 
     @MainActor var name: String { woman ? L("Woman") : L("Man") }
+    @MainActor func named(_ s: String) -> Bool { inAnyLanguage(s, woman ? "Woman" : "Man") }
 
     // The detail its mesh is made at (mm): what sculpting it starts from.
     var detail: Double { self[.height] / 160 }
@@ -681,6 +702,15 @@ indirect enum Node: Codable, Hashable, Sendable {
         case .figure: 4
         case .group(_, let parts): parts.map(\.node.fileVersion).max() ?? 1
         default: inner?.fileVersion ?? 1
+        }
+    }
+
+    // The sculpted meshes in it, each once by what it is, and its size in bytes (what undo steps hold).
+    func sculptBytes(_ out: inout [ObjectIdentifier: Int]) {
+        switch self {
+        case .sculpt(let s): out[ObjectIdentifier(s.data)] = 4 * (s.data.positions.count + s.data.indices.count)
+        case .group(_, let parts): for p in parts { p.node.sculptBytes(&out) }
+        default: inner?.sculptBytes(&out)
         }
     }
 
@@ -1182,7 +1212,8 @@ final class Worker: @unchecked Sendable {
                 let job = jobs.removeFirst()
                 running = true
                 lock.unlock()
-                job()
+                // (What a job leaves to be released later — saving, exporting, thumbnails — released after each.)
+                autoreleasepool { job() }
                 lock.lock()
                 running = false
                 lock.unlock()
@@ -1258,18 +1289,24 @@ final class Kernel: @unchecked Sendable {
         }
         let ref = ShapeRef(p)
         guard keep else { return ref }
-        if cache.count > 400 { cache.removeAll(); figures.removeAll() }
+        if cache.count > 400 { cache.removeAll(); figures.removeAll(); sculpts.removeAll() }
         cache[k] = ref
-        // A figure is a few megabytes: only the last few made are kept (each number typed in makes another).
+        // A figure is a few megabytes, a sculpt up to a few hundred: only the last few made are kept (each number typed
+        // in makes another figure; each Done, Remesh and stroke saved, another sculpt).
         if case .figure = node {
             figures.removeAll { $0 == k }
             figures.append(k)
             if figures.count > 8 { cache[figures.removeFirst()] = nil }
+        } else if case .sculpt = node {
+            sculpts.removeAll { $0 == k }
+            sculpts.append(k)
+            if sculpts.count > 6 { cache[sculpts.removeFirst()] = nil }
         }
         return ref
     }
 
     private var figures: [Key] = []
+    private var sculpts: [Key] = []
 
     // A figure's quick draft, shown while one of its numbers is dragged (the engine keeps its last few).
     func draft(_ f: Figure) -> Mesh? {
@@ -1782,7 +1819,9 @@ struct Settings: Codable, Equatable {
         snap = min(100, max(0.01, (try? c.decode(Double.self, forKey: .snap)) ?? 1))
         turnStep = min(90, max(0.1, (try? c.decode(Double.self, forKey: .turnStep)) ?? 15))
         dropToBed = (try? c.decode(Bool.self, forKey: .dropToBed)) ?? true
-        bed = (try? c.decode(SIMD3<Double>.self, forKey: .bed)) ?? SIMD3(256, 256, 256)
+        // (A bed of no size, or kilometres across, from a damaged file: the standard one.)
+        let b = (try? c.decode(SIMD3<Double>.self, forKey: .bed)) ?? SIMD3(256, 256, 256)
+        bed = b.x.isFinite && b.y.isFinite && b.z.isFinite && simd_reduce_min(b) >= 10 && simd_reduce_max(b) <= 5000 ? b : SIMD3(256, 256, 256)
         clearance = min(2, max(0, (try? c.decode(Double.self, forKey: .clearance)) ?? 0.2))
         shrink = min(5, max(0, (try? c.decode(Double.self, forKey: .shrink)) ?? 0.5))
         autoLink = (try? c.decode(Bool.self, forKey: .autoLink)) ?? true
@@ -1817,6 +1856,25 @@ struct Store: Codable {
     var recent: [String]?
     // A bookmark for each recent file (by its path), so a sandboxed Bcad can open it again in a later run.
     var recentMarks: [String: Data]?
+
+    enum CodingKeys: String, CodingKey {
+        case style, language, brightness, settings, look, shapes, recent, recentMarks
+    }
+}
+
+extension Store {
+    // Each part read on its own: one this Bcad can't read (a style a newer one added) is left at its standard, the rest kept.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        style = try? c.decode(Style.self, forKey: .style)
+        language = try? c.decode(String.self, forKey: .language)
+        brightness = try? c.decode(Double.self, forKey: .brightness)
+        settings = try? c.decode(Settings.self, forKey: .settings)
+        look = try? c.decode(SkinSettings.self, forKey: .look)
+        shapes = try? c.decode([String: String].self, forKey: .shapes)
+        recent = try? c.decode([String].self, forKey: .recent)
+        recentMarks = try? c.decode([String: Data].self, forKey: .recentMarks)
+    }
 }
 
 // Unsaved work set aside: the document, and the file it came from or the name it was given.
@@ -2140,9 +2198,10 @@ final class Workbench: DesignHost {
     var fileURL: URL?
     // The name given to a document that isn't saved yet; the Save panel offers it.
     var docName: String?
-    // The document as last opened or saved; it has changes while it differs from that.
+    // The document as last opened or saved; it has changes while it differs from that, or while a sculpt has strokes the
+    // document doesn't have yet.
     private var saved = Document()
-    var dirty: Bool { doc != saved }
+    var dirty: Bool { sculptEdited || doc != saved }
     // The plan in force and the Plans card; the document's id this session (new with each document opened or begun).
     let plans: Plans
     @ObservationIgnored private(set) var docID = UUID()
@@ -2171,6 +2230,8 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var sculptPast: [SculptSession] = []
     @ObservationIgnored private var sculptAhead: [SculptSession] = []
     var sculptStrokes = 0
+    // Whether the sculpt open now has changes the document doesn't (a stroke, one undone, a Remesh).
+    private(set) var sculptEdited = false
     var sculptDetail = 1.0
     var sculptLocal = false
     var sculptTriangles = 0
@@ -2347,6 +2408,8 @@ final class Workbench: DesignHost {
 
     func keepUnsaved() {
         guard dirty else { dropUnsaved(); return }
+        // (With the strokes of a sculpt still open.)
+        let doc = withSculpt()
         guard doc != keptAside else { return }
         keptAside = doc
         if let f = fileURL, markFor?.url != f { markFor = Marks.make(f).map { (url: f, data: $0) } }
@@ -2529,8 +2592,23 @@ final class Workbench: DesignHost {
     func begin() {
         undoStack.append(doc)
         if undoStack.count > 200 { undoStack.removeFirst() }
+        trimUndo()
+        redoBefore = redoStack
         redoStack.removeAll()
     }
+
+    // Undo keeps at most about a gigabyte of sculpted meshes (each counted once, however many steps share it): the oldest
+    // steps past that go.
+    private func trimUndo() {
+        while undoStack.count > 1 {
+            var held: [ObjectIdentifier: Int] = [:]
+            for d in undoStack { for b in d.bodies { b.node.sculptBytes(&held) } }
+            if held.values.reduce(0, +) <= 1 << 30 { return }
+            undoStack.removeFirst()
+        }
+    }
+    // What could be done again before the last step was begun (should nothing change after all).
+    @ObservationIgnored private var redoBefore: [Document]?
 
     func commit(_ change: (inout Document) -> Void) {
         begin()
@@ -2543,7 +2621,7 @@ final class Workbench: DesignHost {
     func tryThen(_ nodes: [Node], apply: @escaping () -> Void) {
         guard !trying else { return }
         trying = true
-        let fit = settings.fit, note = L("Building…")
+        let fit = settings.fit, note = L("Building…"), generation = self.generation
         // Only a slow try shows that it's working.
         let shown = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
@@ -2562,8 +2640,10 @@ final class Workbench: DesignHost {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     shown.cancel()
-                    self.trying = false
                     self.ended(note)
+                    // (Another document opened or begun meanwhile: what was tried belonged to the one before.)
+                    guard self.generation == generation else { return }
+                    self.trying = false
                     if ok { apply() }
                     self.report(problems)
                 }
@@ -2574,6 +2654,7 @@ final class Workbench: DesignHost {
     func undo() {
         if mode == .sculpt { sculptUndo(); return }
         guard let d = undoStack.popLast() else { return }
+        redoBefore = nil
         redoStack.append(doc)
         restore(d)
     }
@@ -2581,6 +2662,7 @@ final class Workbench: DesignHost {
     func redo() {
         if mode == .sculpt { sculptRedo(); return }
         guard let d = redoStack.popLast() else { return }
+        redoBefore = nil
         undoStack.append(doc)
         restore(d)
     }
@@ -2588,6 +2670,8 @@ final class Workbench: DesignHost {
     // Puts back an earlier or later document: an open tool closes (its picks belong to the shapes as they were), and the
     // selection keeps the shapes that are still there.
     private func restore(_ d: Document) {
+        // (Sculpt being got ready for the shape as it was: not opened on it.)
+        if sculptBusy && sculpt == nil { leaveSculpt() }
         doc = d
         selection = selection.filter { id in d.bodies.contains { $0.id == id } }
         if angleEdit != nil { closeAngles() }
@@ -2771,7 +2855,7 @@ final class Workbench: DesignHost {
     private func refigured(_ b: Solid, _ f: Figure) -> (node: Node, move: SIMD3<Double>, name: String)? {
         guard case .figure(let was) = b.node.base, f != was else { return nil }
         let move = b.place.move + b.place.rotation * (b.place.scale * (was.box.anchor - f.box.anchor))
-        return (followed(b.node, to: .figure(f)), move, b.name == was.name ? f.name : b.name)
+        return (followed(b.node, to: .figure(f)), move, was.named(b.name) ? f.name : b.name)
     }
 
     // New numbers typed in, chosen or a pose: one step to undo.
@@ -2978,7 +3062,8 @@ final class Workbench: DesignHost {
 
     func deleteSelection() {
         guard !selection.isEmpty else { return }
-        if mode == .sculpt || sculptBusy { leaveSculpt() }
+        if mode == .sculpt || sculptBusy { finishSculpt() }
+        if angleEdit != nil { closeAngles() }
         let ids = Set(selection)
         commit { $0.bodies.removeAll { ids.contains($0.id) } }
         selection = []
@@ -3071,6 +3156,8 @@ final class Workbench: DesignHost {
                 added = true
             } catch FileError.notBcad {
                 problem = L("This 3MF wasn't made by Bcad and can't be edited")
+            } catch FileError.newer {
+                problem = L("This file was made by a newer version of Bcad")
             } catch {
                 problem = L("This file is damaged and can't be opened")
             }
@@ -3413,7 +3500,7 @@ final class Workbench: DesignHost {
         }
         // A shape still called by its kind follows it (a hexagon prism made 7-sided is a 7-sided prism).
         var renamed: String?
-        if case .primitive(let was) = b.node.base, case .primitive(let now) = next, b.name == was.title, now.title != was.title { renamed = now.title }
+        if case .primitive(let was) = b.node.base, case .primitive(let now) = next, was.titled(b.name), now.title != b.name { renamed = now.title }
         mutate(id) {
             $0.node = followed($0.node, to: next)
             $0.place.move = move
@@ -3432,7 +3519,11 @@ final class Workbench: DesignHost {
 
     // A click without dragging leaves no undo step behind.
     func undoLastIfUnchanged() {
-        if undoStack.last == doc { undoStack.removeLast() }
+        guard undoStack.last == doc else { return }
+        undoStack.removeLast()
+        // (A click that changed nothing, the colour mixer opened and closed: what could be done again still can.)
+        if let r = redoBefore { redoStack = r }
+        redoBefore = nil
     }
 
     // MARK: hollow
@@ -3535,7 +3626,13 @@ final class Workbench: DesignHost {
             detail = Workbench.round2(min(5, max(0.05, f.detail * simd_reduce_max(simd_abs(b.place.scale)))))
             own = b.node == .figure(f)
         }
+        let spine: SIMD3<Double>? = {
+            guard case .figure(let f) = b.node.base else { return nil }
+            let a = f.box.anchor * b.place.scale
+            return SIMD3(a.x, a.y, 0)
+        }()
         made(b.id, b.node, scale: b.place.scale, detail: detail, own: own) { [weak self] n in
+            if let spine { n.middle = spine }
             self?.openSculpt(b.id, n)
             self?.flash(L("{body} is now a mesh to shape: its exact sizes and roundings become part of its surface", ["body": b.name]))
         }
@@ -3547,31 +3644,61 @@ final class Workbench: DesignHost {
         let node = Node.sculpt(Sculpt(data: s.data(), detail: s.detail))
         made(id, node, scale: SIMD3(1, 1, 1), detail: sculptDetail) { [weak self] n in
             guard let self else { return }
+            n.middle = s.middle
             self.sculptPast.append(s)
             if self.sculptPast.count > 3 { self.sculptPast.removeFirst() }
             self.sculptAhead = []
             self.useSculpt(n)
+            self.markSculpted()
         }
     }
 
-    // The body takes the sculpted mesh (its stretch now in it): one step to undo.
+    // Done: the body takes the sculpted mesh (its stretch now in it: one step to undo), and Sculpt is left. A Remesh under
+    // way is waited for (Done is off meanwhile; Enter says so).
     func commitSculpt() {
-        guard let id = sculptBody, let s = sculpt, !sculptBusy, let b = body(id) else { leaveSculpt(); return }
-        let node = Node.sculpt(Sculpt(data: s.data(), detail: s.detail))
-        if node == b.node && b.place.scale == SIMD3(1, 1, 1) { leaveSculpt(); return }
+        if sculptBusy && sculpt != nil { flash(L("Remesh is still working…")); return }
+        finishSculpt()
+    }
+
+    // Sculpt left, whichever way (Done, Esc, another tool, a shape deleted, a file opened, quitting): the strokes are kept,
+    // as one step to undo (a Remesh under way is dropped).
+    func finishSculpt() {
+        let kept = keepSculpt()
+        leaveSculpt()
+        if kept { rebuildScene() }
+    }
+
+    // The strokes so far put into the document as one step to undo, Sculpt left open (saving while sculpting, Done):
+    // false when there were none.
+    @discardableResult
+    func keepSculpt() -> Bool {
+        guard sculptEdited, let id = sculptBody, let s = sculpt, let b = body(id) else { return false }
+        sculptEdited = false
+        let data = s.data()
+        let node = Node.sculpt(Sculpt(data: data, detail: s.detail))
+        if node == b.node && b.place.scale == SIMD3(1, 1, 1) { return false }
         begin()
         mutate(id) {
             $0.node = node
             $0.place.scale = SIMD3(1, 1, 1)
         }
         // (Shown as it was while sculpting until the kernel's own mesh of it is built.)
-        meshes[id] = s.mesh()
-        leaveSculpt()
-        rebuildScene()
+        meshes[id] = s.mesh(from: data)
+        return true
+    }
+
+    // The document with the strokes so far in it (for setting unsaved work aside), the document itself unchanged.
+    private func withSculpt() -> Document {
+        guard sculptEdited, let id = sculptBody, let s = sculpt, let i = doc.bodies.firstIndex(where: { $0.id == id }) else { return doc }
+        var d = doc
+        d.bodies[i].node = .sculpt(Sculpt(data: s.data(), detail: s.detail))
+        d.bodies[i].place.scale = SIMD3(1, 1, 1)
+        return d
     }
 
     func leaveSculpt() {
         sculptToken += 1
+        sculptEdited = false
         withAnimation(Neon.spring) {
             sculptBody = nil
             sculptBusy = false
@@ -3593,6 +3720,7 @@ final class Workbench: DesignHost {
         }
         sculptPast = []
         sculptAhead = []
+        sculptEdited = false
         // The size last set; never set, a brush a tenth of the body across, at least four triangles wide.
         sculptSize = settings.sculpt.size ?? min(200, max(1, (10 * max(4 * s.detail, s.size / 10)).rounded()))
         useSculpt(s)
@@ -3631,9 +3759,14 @@ final class Workbench: DesignHost {
             if data != nil && s == nil { problems.append(String(cString: bk_last_error())) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // (Left meanwhile: a run begun since has the flag and the note now.)
+                    guard token == self.sculptToken else {
+                        if !self.sculptBusy { self.ended(note) }
+                        return
+                    }
                     self.sculptBusy = false
                     self.ended(note)
-                    guard token == self.sculptToken, self.body(id) != nil else { return }
+                    guard self.body(id) != nil else { return }
                     guard let s else {
                         self.report(problems.isEmpty ? ["failed"] : problems)
                         return
@@ -3679,6 +3812,7 @@ final class Workbench: DesignHost {
 
     func sculptEnd() {
         sculpt?.end()
+        markSculpted()
         sculptStrokes += 1
         countSculpt()
         sceneVersion += 1
@@ -3688,25 +3822,34 @@ final class Workbench: DesignHost {
     func sculptUndo() {
         guard let s = sculpt, !sculptBusy else { return }
         if s.undo() {
+            markSculpted()
             sculptStrokes += 1
             countSculpt()
             sceneVersion += 1
         } else if let before = sculptPast.popLast() {
             sculptAhead.append(s)
             useSculpt(before)
+            markSculpted()
         }
     }
 
     func sculptRedo() {
         guard let s = sculpt, !sculptBusy else { return }
         if s.redo() {
+            markSculpted()
             sculptStrokes += 1
             countSculpt()
             sceneVersion += 1
         } else if let after = sculptAhead.popLast() {
             sculptPast.append(s)
             useSculpt(after)
+            markSculpted()
         }
+    }
+
+    // (Only when it changes: the window isn't drawn again for every stroke.)
+    private func markSculpted() {
+        if !sculptEdited { sculptEdited = true }
     }
 
     // [ and ]: the brush smaller or larger, by about a seventh, at least by one.
@@ -3795,11 +3938,18 @@ final class Workbench: DesignHost {
         }
     }
 
-    // Edits one wrapper layer (a rounding, split or hollow) of a body.
+    // Edits one wrapper layer (a rounding, split or hollow) of a body: built first, so a size the shape can't take is said
+    // and nothing changes (as for every other change of shape).
     func editLayer(_ id: UUID, level: Int, _ f: (Node) -> Node) {
-        begin()
-        mutate(id) { b in b.node = rewrite(b.node, level: level) { f($0) } }
-        rebuildScene()
+        guard let b = body(id) else { return }
+        let node = rewrite(b.node, level: level) { f($0) }
+        guard node != b.node else { return }
+        tryThen([node]) { [weak self] in
+            guard let self, self.body(id)?.node == b.node else { return }
+            self.commit { d in
+                if let i = d.bodies.firstIndex(where: { $0.id == id }) { d.bodies[i].node = node }
+            }
+        }
     }
 
     func setPlace(_ id: UUID, record: Bool = true, _ f: (inout Placement) -> Void) {
@@ -3835,7 +3985,7 @@ final class Workbench: DesignHost {
     func choose(_ s: Screen) {
         // The current screen again does nothing, unless a tool (split, hollow, the ruler) has the inspector hidden.
         guard s != screen || mode.isTool else { return }
-        if mode == .sculpt || sculptBusy { leaveSculpt() }
+        if mode == .sculpt || sculptBusy { finishSculpt() }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
             switch s {
@@ -4082,7 +4232,7 @@ final class Workbench: DesignHost {
 
     func enter(_ m: Mode) {
         if m == .split && selection.isEmpty { flash(L("Select a shape to split")); return }
-        if mode == .sculpt || sculptBusy { leaveSculpt() }
+        if mode == .sculpt || sculptBusy { finishSculpt() }
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
@@ -4095,7 +4245,7 @@ final class Workbench: DesignHost {
 
     func cancelMode() {
         if angleEdit != nil { closeAngles(); return }
-        if mode == .sculpt || sculptBusy { leaveSculpt(); return }
+        if mode == .sculpt || sculptBusy { finishSculpt(); return }
         if mode == .measure, measureA != nil { clearMeasure(); return }
         withAnimation(Neon.spring) {
             if mode != .select { mode = .select } else { selection = [] }
@@ -4294,7 +4444,7 @@ final class Workbench: DesignHost {
         case .split: enter(.split)
         case .hollow: enter(.hollow)
         case .measure: enter(.measure)
-        case .sculpt: if mode == .sculpt { leaveSculpt() } else { enterSculpt() }
+        case .sculpt: if mode == .sculpt || sculptBusy { finishSculpt() } else { enterSculpt() }
         case .drop: dropToBed()
         case .frame: requestFit = true; sceneVersion += 1
         case .hide: hideSelection()
@@ -4414,6 +4564,9 @@ final class Workbench: DesignHost {
         sculptAhead = []
         sculptRing = nil
         sculptBusy = false
+        sculptEdited = false
+        // (A shape still being tried belongs to the document before.)
+        trying = false
         hover = Hover()
         selection = []
         dropQueue = []
@@ -4469,6 +4622,8 @@ final class Workbench: DesignHost {
             return
         }
         guard mayWrite() else { done(false); return }
+        // Strokes made while sculpting are saved too (Sculpt stays open).
+        if keepSculpt() { rebuildScene() }
         var url = fileURL
         if url == nil || `as` {
             let panel = NSSavePanel()
@@ -4654,7 +4809,9 @@ struct BcadApp: App {
                 }
             }
             CommandGroup(replacing: .saveItem) {
-                Button(L("Close")) { NSApp.keyWindow?.performClose(nil) }.keyboardShortcut("w")
+                // (Bcad's one window closed is Bcad quit: asked about unsaved changes first, as quitting is, so Cancel
+                // keeps the window.)
+                Button(L("Close")) { NSApp.terminate(nil) }.keyboardShortcut("w")
                 Divider()
                 Button(L("Save")) { lib.saveDocument() }.keyboardShortcut("s")
                 Button(L("Save As…")) { lib.saveDocument(as: true) }.keyboardShortcut("s", modifiers: [.command, .shift])
@@ -4690,7 +4847,10 @@ struct BcadApp: App {
             }
             CommandMenu(L("Shape")) {
                 Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u")
-                Button(L("Subtract")) { lib.combine(Int32(BK_SUBTRACT)) }.keyboardShortcut(.delete, modifiers: .command)
+                // (⌘⌫ in a text field clears the line, as it does everywhere.)
+                Button(L("Subtract")) {
+                    if !Edits.send(#selector(NSResponder.deleteToBeginningOfLine(_:))) { lib.combine(Int32(BK_SUBTRACT)) }
+                }.keyboardShortcut(.delete, modifiers: .command)
                 Button(L("Intersect")) { lib.combine(Int32(BK_INTERSECT)) }.keyboardShortcut("i")
                 Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift])
                 Divider()

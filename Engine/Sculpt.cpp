@@ -1317,12 +1317,13 @@ void Sculptor::weigh(V3 c, double r, V3 dir, std::vector<uint32_t> &which, std::
   which.resize(kept), w.resize(kept);
 }
 
-void Sculptor::begin(int b, V3 at, double r, double s, int mir, bool inv, const Tip &t, V3 acrossWay) {
+void Sculptor::begin(int b, V3 at, double r, double s, int mir, bool inv, const Tip &t, V3 acrossWay, V3 mid) {
   if (stroking) end();
   stroking = true, dabbed = false;
   brush = b >= Grab && b <= Twist ? b : Draw;
   radius = r > 1e-9 ? r : 1e-9, strength = std::min(1.0, std::max(0.0, s));
   mirror = mir & 7, invert = inv;
+  middle = std::isfinite(mid.x) && std::isfinite(mid.y) && std::isfinite(mid.z) ? mid : V3{0, 0, 0};
   auto kept = [](double v, double lo, double hi, double otherwise) { return std::isfinite(v) ? std::min(hi, std::max(lo, v)) : otherwise; };
   tip.hardness = kept(t.hardness, 0, 1, 0), tip.rigidity = kept(t.rigidity, 0, 1, 0), tip.oval = kept(t.oval, 0.05, 1, 1);
   tip.angle = std::isfinite(t.angle) ? std::fmod(t.angle, 360.0) : 0, tip.tilt = kept(t.tilt, -85, 85, 0);
@@ -1344,7 +1345,7 @@ void Sculptor::begin(int b, V3 at, double r, double s, int mir, bool inv, const 
   int ks[8], m = copies(ks);
   V3 out;
   for (int j = 0; j < m; j++) {
-    weigh(flip(at, ks[j]), radius, flip(way, ks[j]), idx[j], wt[j], out);
+    weigh(mirrored(at, ks[j]), radius, flip(way, ks[j]), idx[j], wt[j], out);
     merged.clear();
     std::set_union(grabbed.begin(), grabbed.end(), idx[j].begin(), idx[j].end(), std::back_inserter(merged));
     grabbed.swap(merged);
@@ -1444,7 +1445,7 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
   if (strokeDetail > 0) {
     sum.clear();
     for (int j = 0; j < m; j++) {
-      touching(flip(c, ks[j]), r, idx[j]);
+      touching(mirrored(c, ks[j]), r, idx[j]);
       merged.clear();
       std::set_union(sum.begin(), sum.end(), idx[j].begin(), idx[j].end(), std::back_inserter(merged));
       sum.swap(merged);
@@ -1454,7 +1455,7 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
     dabBudget -= retopo(seeds,
                         [&](uint32_t a, uint32_t b) {
                           for (int j = 0; j < m; j++)
-                            if (toSegment(flip(c, ks[j]), p[a], p[b]) < r) return true;
+                            if (toSegment(mirrored(c, ks[j]), p[a], p[b]) < r) return true;
                           return false;
                         },
                         false, std::min(8000, dabBudget), brush != Detail);
@@ -1463,7 +1464,7 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
     fresh.clear();
   }
   if (brush == Detail) return;
-  for (int j = 0; j < m; j++) offsets(flip(c, ks[j]), pressure, r, ks[j], idx[j], wt[j], off[j]);
+  for (int j = 0; j < m; j++) offsets(mirrored(c, ks[j]), pressure, r, ks[j], idx[j], wt[j], off[j]);
   sum = idx[0], offSum = off[0];
   bool higher = brush == Layer && !invert;
   for (int j = 1; j < m; j++) {

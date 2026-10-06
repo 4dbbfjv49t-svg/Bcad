@@ -351,7 +351,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func drawBrush(_ enc: MTLRenderCommandEncoder, _ r: SculptRing, _ place: Placement, accent: SIMD4<Float>) {
         var lines: [LineV] = []
         let tip = lib.sculptTip
-        for line in SculptCursor.lines(at: r.at, normal: r.normal, way: lib.sculptWay, radius: lib.sculptRadius, tip: tip, mirror: lib.sculptMirror) {
+        for line in SculptCursor.lines(at: r.at, normal: r.normal, way: lib.sculptWay, radius: lib.sculptRadius, tip: tip, mirror: lib.sculptMirror,
+                                       middle: lib.sculpt?.middle ?? .zero) {
             Renderer.polyline(line.points.map { SIMD3<Float>($0) }, width: 2, color: SIMD4(accent.x, accent.y, accent.z, Float(line.alpha)), into: &lines)
         }
         drawLines(enc, lines, model: simd_float4x4(place.matrix), depth: depthOff)

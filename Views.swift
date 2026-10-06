@@ -595,7 +595,12 @@ struct ModeBar: View {
         }
         if let i = lib.focusWall, lib.hollowWalls.indices.contains(i) {
             Text(L("This face")).foregroundStyle(lib.accent2)
-            MMField(value: lib.hollowWalls[i].thickness, unit: L("mm"), range: 0.01...1000, width: 58) { lib.hollowWalls[i].thickness = $0 }
+            // (Its wall found by its face when the value is set: a field saving as it goes, after the wall was removed,
+            // changes nothing.)
+            let face = lib.hollowWalls[i].face
+            MMField(value: lib.hollowWalls[i].thickness, unit: L("mm"), range: 0.01...1000, width: 58) { v in
+                if let j = lib.hollowWalls.firstIndex(where: { $0.face == face }) { lib.hollowWalls[j].thickness = v }
+            }
                 .id(i)
             ToolButton(icon: "xmark", title: L("Use the default wall here"), tint: lib.accent2, size: 24) { lib.removeWall(i) }
         } else if !lib.hollowWalls.isEmpty {
@@ -1650,9 +1655,8 @@ struct ThreadScreen: View {
     var body: some View {
         if items.count == 1, let b = items.first, case .fastener(let f) = b.node.base {
             ThreadControls(f: f) { n in
-                let old = f.name
                 lib.reshape(b.id) { _ in .fastener(n) }
-                lib.mutate(b.id) { if $0.name == old { $0.name = n.name } }
+                lib.mutate(b.id) { if f.named($0.name) { $0.name = n.name } }
             }
         } else {
             ThreadControls(f: lib.thread) { lib.thread = $0 }

@@ -2297,6 +2297,24 @@ int main() {
     check("sculpting: the mirror does the same across x = 0",
           sm && right1 - right0 > 0.1 && near(left1 - left0, right1 - right0, 0.01) && left2 == left1,
           fmt("raised %.4f and %.4f", right1 - right0, left1 - left0) + fmt(", then %.2g", left2 - left1));
+    // Across a plane through a middle given (a body merged off the origin): on the box's flat top, a dab at x = 6 with the
+    // middle at x = 2 raises x = −2 as much, and x = −6 not at all.
+    BKSculpt *smid = make(rb);
+    double m0 = 0, m1 = 0, o0 = 0, o1 = 0, r0 = 0, r1 = 0;
+    if (smid) {
+      m0 = surface(smid, -2, 0.2), o0 = surface(smid, -6, 0.2), r0 = surface(smid, 6, 0.2);
+      BKBrush br{};
+      br.brush = BK_BRUSH_DRAW, br.radius = 3, br.strength = 0.5, br.mirror = BK_MIRROR_X, br.oval = 1;
+      br.middle[0] = 2;
+      double a[3] = {6, 0.2, r0};
+      bk_sculpt_begin_brush(smid, &br, a);
+      bk_sculpt_dab(smid, a, 1, 1);
+      bk_sculpt_end(smid);
+      m1 = surface(smid, -2, 0.2), o1 = surface(smid, -6, 0.2), r1 = surface(smid, 6, 0.2);
+    }
+    check("sculpting: the mirror across a plane through the middle given",
+          smid && r1 - r0 > 0.1 && near(m1 - m0, r1 - r0, 0.01) && o1 == o0, fmt("raised %.4f and %.4f, beyond %.2g", r1 - r0, m1 - m0, o1 - o0));
+    bk_sculpt_free(smid);
 
     // A pen: a dab pressed at a quarter raises a quarter as much; one at half size leaves all beyond half the radius be.
     BKSculpt *sp = make(rb);
