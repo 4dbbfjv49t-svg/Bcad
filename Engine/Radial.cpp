@@ -290,6 +290,9 @@ class ZoneMesh {
     const auto &c = cols[jj];
     if (level(z) <= 1) return {t, c.front().z, c.front().id};
     if (level(z) >= 3) return {t, c.back().z, c.back().id};
+    // (By height first, the column being in order of it: a long bolt's columns hold thousands of points.)
+    auto at = std::lower_bound(c.begin(), c.end(), z, [](const ColPt &e, double v) { return e.z < v; });
+    if (at != c.end() && at->row == kk) return {t, at->z, at->id};
     for (const auto &e : c)
       if (e.row == kk) return {t, e.z, e.id};
     fail("a row missing from a column");
@@ -330,15 +333,18 @@ class ZoneMesh {
         if (it->t < t0 && it->t > t1) out.push_back(*it);
     }
   }
+  // (The column in order of height: only the part between looked at.)
   void betweenCol(int j, double z0, double z1, std::vector<P> &out) {
     const auto &c = cols[j == N ? 0 : j];
     double t = j == N ? twoPi : col[j];
+    auto above = [&](double v) { return std::upper_bound(c.begin(), c.end(), v, [](double x, const ColPt &e) { return x < e.z; }); };
     if (z0 < z1) {
-      for (const auto &e : c)
-        if (e.z > z0 && e.z < z1) out.push_back({t, e.z, e.id});
+      for (auto it = above(z0); it != c.end() && it->z < z1; ++it) out.push_back({t, it->z, it->id});
     } else {
-      for (auto it = c.rbegin(); it != c.rend(); ++it)
-        if (it->z < z0 && it->z > z1) out.push_back({t, it->z, it->id});
+      // (Those below z0, downward, while above z1.)
+      for (auto it = std::make_reverse_iterator(std::lower_bound(c.begin(), c.end(), z0, [](const ColPt &e, double v) { return e.z < v; }));
+           it != c.rend() && it->z > z1; ++it)
+        out.push_back({t, it->z, it->id});
     }
   }
 };
