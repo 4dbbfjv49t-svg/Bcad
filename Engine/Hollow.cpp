@@ -1349,6 +1349,36 @@ static bool hollowedHere(const Shape &s, const Hollowing &h, double d, Solid &ou
     for (int k = 0; k < 3; k++)
       if (!across[k] && std::isfinite(thinnest) && 2 * thinnest >= hi[k] - lo[k]) return false;
   }
+  // And in general: a point of the void lies at least its wall from each face with one, a distance a step changes by no
+  // more than the step. Looked for at the middles of a coarse grid over the shape's box (allowing for half a cell and the
+  // mesh's chord error), none anywhere near far enough from every wall means none at all (a bowl opened round its
+  // dome, its walls wider than it is deep, took twenty seconds to be refused).
+  {
+    std::vector<uint32_t> walled;
+    for (size_t t = 0; t < whole.triFace.size(); t++)
+      if (whole.triFace[t] < depth.size() && depth[whole.triFace[t]] >= 0) walled.push_back((uint32_t)t);
+    if (!walled.empty() && walled.size() <= 50000) {
+      const int n = 12;
+      V3 step = (hi - lo) / (double)n;
+      double reach = 0.5 * norm(step) + 3 * d;
+      bool room = false;
+      for (int i = 0; i < n && !room; i++)
+        for (int j = 0; j < n && !room; j++)
+          for (int k = 0; k < n && !room; k++) {
+            V3 q = lo + V3{(i + 0.5) * step.x, (j + 0.5) * step.y, (k + 0.5) * step.z};
+            bool near = false;
+            for (uint32_t t : walled) {
+              V3 a = whole.p[whole.tri[3 * t]], b = whole.p[whole.tri[3 * t + 1]], c = whole.p[whole.tri[3 * t + 2]];
+              if (norm(q - nearestOnTriangle(q, a, b, c)) < depth[whole.triFace[t]] - reach) {
+                near = true;
+                break;
+              }
+            }
+            room = !near;
+          }
+      if (!room) return false;
+    }
+  }
   double all = whole.meshVolume();
   int parts = pieces(whole);
   // Walls from the finished faces.

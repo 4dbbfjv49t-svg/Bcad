@@ -19,6 +19,8 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
 
 // Whether a mesh passes through itself: two of its triangles that share no corner crossing (touching doesn't count).
 bool selfCrossing(const std::vector<V3> &pts, const std::vector<uint32_t> &tris);
+// The nearest point of triangle abc to q.
+V3 nearestOnTriangle(V3 q, V3 a, V3 b, V3 c);
 
 // The void that hollows a closed mesh with walls `t` thick: every point inside it further than t from its surface, as a
 // closed mesh facing into the void (a part of the body thinner than twice the walls stays solid). Found on a grid half
@@ -150,10 +152,10 @@ class Sculptor {
   // into) changing at most dabBudget sides, so it stays quick (the next carries on).
   static constexpr size_t mostTriangles = 1500000;
   int dabBudget = 0;
-  // Points looked at under dabs so far: each call to dab() takes its steps until it has looked at mostVisited more (the
-  // rest of its way left for the next to carry on).
+  // Triangles looked at under dabs so far: each call to dab() takes its steps until it has looked at mostVisited more
+  // (the rest of its way left for the next to carry on).
   mutable size_t visited = 0;
-  static constexpr size_t mostVisited = 400000;
+  static constexpr size_t mostVisited = 1000000;
 
   std::vector<TreeNode> nodes;  // a box tree over the triangles (a node's children always come after it)
   std::vector<int> leafOf, parentOf;

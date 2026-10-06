@@ -4076,8 +4076,8 @@ int main() {
           fmt("%.0f ms (", pt) + (pc ? "made" : pw) + fmt("), %.0f ms (", qt) + qw + ")");
     bk_mesh_free(pm), bk_free(pc), bk_free(qc), bk_free(p), bk_free(q);
   }
-  // Walls wider than the shape across, with an opening: refused at once (the glass took 18 s to be refused), while a slab
-  // opened top and bottom, its walls more than half its height, still makes a frame.
+  // Walls wider than the shape across, with an opening: refused at once (the glass took 18 s to be refused, the bowl up to
+  // 44), while a slab opened top and bottom, its walls more than half its height, still makes a frame.
   {
     double glass[4] = {35.13453739601632, 41.235330992092678, 19.782493985647612, 16.231606460841988};
     BKShape *g = bk_primitive(BK_GLASS, glass);
@@ -4090,10 +4090,37 @@ int main() {
     double slab[3] = {60, 60, 4}, open[12] = {0, 0, 1, 0, 0, 2, 0, 0, -1, 0, 0, -2};
     BKShape *b = bk_primitive(BK_BOX, slab), *frame = b ? bk_hollow(b, nullptr, 0, open, 2, nullptr, nullptr, 0, 3, &miss) : nullptr;
     BKMesh *fm = frame ? bk_mesh(frame, 0.05) : nullptr;
-    check("walls wider than the shape across, an opening besides: refused at once; a slab opened both ways still a frame",
-          g && !gh && why.find("walls") != std::string::npos && (!timed || took < 1000) && fm && near(fm->volume, 60.0 * 60 * 4 - 54.0 * 54 * 4, 1e-6),
+    // (The bowl opened at each of its faces, its curved ones too.)
+    double bowl[2] = {41.60257149769361, 34.92340739987705};
+    BKShape *bw = bk_primitive(BK_BOWL, bowl);
+    BKMesh *bm = bw ? bk_mesh(bw, 0.05) : nullptr;
+    bool bowlRefused = bm && bm->faceCount > 1;
+    t0 = std::chrono::steady_clock::now();
+    for (int f = 0; bm && f < bm->faceCount; f++) {
+      BKShape *bh = bk_hollow(bw, nullptr, 0, bm->faceInfo + 6 * f, 1, nullptr, nullptr, 0, 50, &miss);
+      bowlRefused = bowlRefused && !bh;
+      bk_free(bh);
+    }
+    double bowlTook = ms(t0);
+    bk_mesh_free(bm), bk_free(bw);
+    took = std::max(took, bowlTook);
+    check("walls wider than the shape across, an opening besides (a curved one too): refused at once; a slab opened both ways "
+          "still a frame",
+          bowlRefused && g && !gh && why.find("walls") != std::string::npos && (!timed || took < 1000) && fm && near(fm->volume, 60.0 * 60 * 4 - 54.0 * 54 * 4, 1e-6),
           fmt("%.0f ms; frame %.3f mm³", took, fm ? fm->volume : -1));
     bk_mesh_free(fm), bk_free(frame), bk_free(b), bk_free(gh), bk_free(g);
+  }
+  // A long flat oval (5 m by 44 cm, 1 mm thick) made ready to sculpt: each row of grid lines looks only where it crosses a
+  // triangle (its flat faces' long thin triangles had millions of lines in their boxes: 23 s). Timed runs only.
+  if (timed) {
+    double oval[4] = {1.0202194590192748, 5000, 0.001, 1};
+    const double I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKShape *o = bk_primitive(BK_OVAL, oval);
+    auto t0 = std::chrono::steady_clock::now();
+    BKSculptMesh *m = o ? bk_remesh(o, I, 0.3) : nullptr;
+    double took = ms(t0);
+    check("a long flat oval made ready to sculpt in good time", m && m->triangleCount > 0 && took < 12000, fmt("%.0f ms, %.0f triangles", took, m ? m->triangleCount : 0));
+    bk_sculpt_mesh_free(m), bk_free(o);
   }
   // A long way between two dabs at a narrow tip, mirrored twice, over a dense mesh with the detail on: one call takes its
   // steps until it has looked at so many points, the rest of the way left to the next (its thousand steps took 3 s here,

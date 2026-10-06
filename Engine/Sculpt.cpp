@@ -73,9 +73,22 @@ Lines cast(const std::vector<V3> &P, const std::vector<uint32_t> &T, const Grid 
     // (A step wider each way than its box: a line just past it by rounding is still tested.)
     int j0 = std::max(0, (int)std::floor((lb - g.o[b]) / g.h) - 1), j1 = std::min(g.n[b] - 1, (int)std::ceil((hb - g.o[b]) / g.h) + 1);
     int k0 = std::max(0, (int)std::floor((lc - g.o[c]) / g.h) - 1), k1 = std::min(g.n[c] - 1, (int)std::ceil((hc - g.o[c]) / g.h) + 1);
-    for (int k = k0; k <= k1; k++)
-      for (int j = j0; j <= j1; j++) {
-        double qb = g.at(b, j), qc = g.at(c, k);
+    for (int k = k0; k <= k1; k++) {
+      // Only the lines near where this row of them crosses the triangle are tested, a step either way past it (a long
+      // thin triangle's box held millions of lines it misses: a 5 m oval's took 20 s).
+      double qc = g.at(c, k), from = INFINITY, to = -INFINITY;
+      const V3 *corner[3] = {&A, &B, &C};
+      for (int e = 0; e < 3; e++) {
+        const V3 &P = *corner[e], &Q = *corner[(e + 1) % 3];
+        if ((P[c] - qc) * (Q[c] - qc) > 0) continue;
+        double x0 = P[b], x1 = Q[b];
+        if (P[c] != Q[c]) x0 = x1 = P[b] + (qc - P[c]) / (Q[c] - P[c]) * (Q[b] - P[b]);
+        from = std::min({from, x0, x1}), to = std::max({to, x0, x1});
+      }
+      if (!(from <= to)) continue;
+      int ja = std::max(j0, (int)std::floor((from - g.o[b]) / g.h) - 1), jb = std::min(j1, (int)std::ceil((to - g.o[b]) / g.h) + 1);
+      for (int j = ja; j <= jb; j++) {
+        double qb = g.at(b, j);
         if (turn(A[b], A[c], B[b], B[c], qb, qc) <= 0 || turn(B[b], B[c], C[b], C[c], qb, qc) <= 0 || turn(C[b], C[c], A[b], A[c], qb, qc) <= 0) continue;
         double at = A[a] - (nrm[b] * (qb - A[b]) + nrm[c] * (qc - A[c])) / nrm[a];
         // (Nearly edge-on, its normal's part along the axis can round to nothing or to the wrong sign: the crossing is
@@ -84,6 +97,7 @@ Lines cast(const std::vector<V3> &P, const std::vector<uint32_t> &T, const Grid 
         if (!std::isfinite(at) || at < la - (ha - la) || at > ha + (ha - la)) at = std::isfinite(at) ? std::min(ha, std::max(la, at)) : (la + ha) / 2;
         hits.push_back({(uint32_t)L.line(j, k, g), {at, sign}});
       }
+    }
   }
   L.start.assign(lines + 1, 0);
   for (const Hit &x : hits) L.start[x.line + 1]++;
@@ -478,6 +492,8 @@ void relax(std::vector<V3> &outPts, const std::vector<uint32_t> &outTris, int pa
   }
 }
 
+}  // namespace
+
 // The nearest point of triangle abc to q (Ericson's regions: a corner, a side or the inside).
 V3 nearestOnTriangle(V3 q, V3 a, V3 b, V3 c) {
   V3 ab = b - a, ac = c - a, aq = q - a;
@@ -498,8 +514,6 @@ V3 nearestOnTriangle(V3 q, V3 a, V3 b, V3 c) {
   double den = 1 / (va + vb + vc);
   return a + ab * (vb * den) + ac * (vc * den);
 }
-
-}  // namespace
 
 bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double detail, std::vector<V3> &outPts, std::vector<uint32_t> &outTris,
             std::string &why, size_t most) {
@@ -1233,6 +1247,7 @@ void Sculptor::within(V3 c, double r, std::vector<uint32_t> &out, std::vector<do
       stack.push_back(nd.right), stack.push_back(nd.left);
       continue;
     }
+    visited += nd.items.size();
     for (uint32_t t : nd.items)
       for (int q = 0; q < 3; q++) {
         uint32_t v = tri[3 * t + q];
@@ -1241,7 +1256,6 @@ void Sculptor::within(V3 c, double r, std::vector<uint32_t> &out, std::vector<do
         if (norm2(p[v] - c) < r2) out.push_back(v);
       }
   }
-  visited += out.size();
   std::sort(out.begin(), out.end());
   weight.resize(out.size());
   for (size_t k = 0; k < out.size(); k++) {
@@ -1269,6 +1283,7 @@ void Sculptor::touching(V3 c, double r, std::vector<uint32_t> &out) const {
       stack.push_back(nd.right), stack.push_back(nd.left);
       continue;
     }
+    visited += nd.items.size();
     for (uint32_t t : nd.items) {
       V3 a = p[tri[3 * t]], b = p[tri[3 * t + 1]], d = p[tri[3 * t + 2]];
       if (!(norm2(nearestOnTriangle(c, a, b, d) - c) < r2)) continue;
@@ -1278,7 +1293,6 @@ void Sculptor::touching(V3 c, double r, std::vector<uint32_t> &out) const {
       }
     }
   }
-  visited += out.size();
   std::sort(out.begin(), out.end());
 }
 
@@ -1595,7 +1609,7 @@ void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
   int steps = (int)std::min(1000.0, std::floor(gap / spacing)), done = 0;
   way = dir, moving = spacing;
   // (A long way at a narrow tip on a dense mesh, mirrored, took its thousand steps in half a minute: they stop once
-  // they've looked at mostVisited points, the rest of the way left to the next dab.)
+  // they've looked at mostVisited triangles, the rest of the way left to the next dab.)
   size_t from = visited;
   for (int s = 1; s <= steps; s++) {
     if (brush == SnakeHook) hook = dir * spacing, dabAt(last + dir * ((s - 1) * spacing), pressure, r);
