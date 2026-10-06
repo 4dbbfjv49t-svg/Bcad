@@ -555,6 +555,11 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
   const double d = 0.05;
   Solid made;
   int miss = 0;
+  // A big mesh body (a sculpt, a figure: over 100,000 triangles) straight on the grid: walls offset from each of its
+  // triangles took many seconds (a fine sphere's 500k, eleven), and the grid's void prints the same.
+  const Node &n = *s->shape.node;
+  if (n.kind == Node::Prim && n.model->kind == Model::Mesh && n.model->mesh && n.model->mesh->tri.size() > 300000 && h.open.empty() && h.walls.empty())
+    h.grid = true;
   bool ok = hollowed(s->shape, h, d, made, &miss);
   for (int k = 0; k < sharpCount && !ok; k++) {
     if (!sharp || !sharp[k]) continue;

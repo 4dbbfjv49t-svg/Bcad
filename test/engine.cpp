@@ -3991,6 +3991,55 @@ int main() {
     check("a flat cone with a hair-thin tip hollowed at once", hollow && (!timed || took < 2000), fmt("in %.0f ms", took));
     bk_free(hollow), bk_free(cone);
   }
+  // Speed of what the app waits on with big sculpts. A flat box remeshed (its points on a grid) and sculpted: its pieces
+  // counted (its points' hash once sent them all to one slot: 7 s), its mesh made (17 s after a cut). A fine sphere's
+  // 500k triangles: checked when made, then hollowed (on the grid: walls from every triangle took 11 s).
+  {
+    const double I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, b[3] = {200, 200, 20}, c[3] = {40, 40, 40}, r[1] = {30};
+    BKShape *box = bk_primitive(BK_BOX, b), *cube = bk_primitive(BK_BOX, c);
+    BKSculptMesh *rm = bk_remesh(box, I, 1.0);
+    BKSculpt *s = rm ? bk_sculpt_new(rm->positions, rm->vertexCount, rm->indices, rm->triangleCount) : nullptr;
+    double at[3] = {0, 0, 10};
+    if (s) {
+      bk_sculpt_begin(s, BK_BRUSH_DRAW, at, 10, 0.5, 1, 0);
+      for (int i = 0; i < 20; i++) {
+        double q[3] = {-50 + 5.0 * i, 0, 10};
+        bk_sculpt_dab(s, q, 1, 1);
+      }
+      bk_sculpt_end(s);
+    }
+    BKSculptMesh *sm = s ? bk_sculpt_mesh(s) : nullptr;
+    BKShape *body = sm ? bk_mesh_shape(sm->positions, sm->vertexCount, sm->indices, sm->triangleCount) : nullptr;
+    auto t0 = std::chrono::steady_clock::now();
+    int pieces = body ? bk_piece_count(body) : 0;
+    double count = ms(t0);
+    BKShape *cut = body ? bk_boolean(BK_SUBTRACT, body, cube) : nullptr;
+    t0 = std::chrono::steady_clock::now();
+    BKMesh *m = cut ? bk_mesh(cut, 0.05) : nullptr;
+    double meshed = ms(t0);
+    check("a sculpted flat box: its pieces counted at once, its mesh after a cut made quickly",
+          pieces == 1 && m && m->valid && (!timed || (count < 300 && meshed < 6000)), fmt("counted in %.0f ms, meshed in %.0f ms", count, meshed));
+    bk_mesh_free(m), bk_free(cut), bk_free(body), bk_sculpt_mesh_free(sm), bk_sculpt_free(s), bk_sculpt_mesh_free(rm);
+    BKShape *ball = bk_primitive(BK_SPHERE, r);
+    BKSculptMesh *fine = bk_remesh(ball, I, 0.17);
+    t0 = std::chrono::steady_clock::now();
+    BKShape *round = fine ? bk_mesh_shape(fine->positions, fine->vertexCount, fine->indices, fine->triangleCount) : nullptr;
+    double made = ms(t0);
+    t0 = std::chrono::steady_clock::now();
+    BKShape *hollow = round ? bk_hollow(round, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 1, nullptr) : nullptr;
+    double hollowed = ms(t0);
+    double before = 0, after = 0;
+    if (round && hollow) {
+      BKMesh *a = bk_mesh(round, 0.05), *h = bk_mesh(hollow, 0.05);
+      before = a->volume, after = h->volume;
+      bk_mesh_free(a), bk_mesh_free(h);
+    }
+    // (Walls 1 mm thick in a ball 30 mm across: about a fifth of it left.)
+    check("a fine sculpted ball (500k triangles) checked and hollowed quickly, its walls about as thick as asked",
+          fine && fine->triangleCount > 400000 && hollow && after > 0.15 * before && after < 0.25 * before && (!timed || (made < 2500 && hollowed < 5000)),
+          fmt("made in %.0f ms, hollowed in %.0f ms, %.0f%% left", made, hollowed, 100 * after / std::max(before, 1e-9)));
+    bk_free(hollow), bk_free(round), bk_sculpt_mesh_free(fine), bk_free(ball), bk_free(cube), bk_free(box);
+  }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
   return failures ? 1 : 0;
