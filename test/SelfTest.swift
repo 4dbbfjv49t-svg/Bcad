@@ -1642,11 +1642,11 @@ enum SelfTest {
             let stroked = lib.sculptStrokes > made, unsavedWhileSculpting = lib.dirty
             lib.cancelMode()
             settle()
-            let kept: Bool = { if case .sculpt? = lib.body(plainAgain.id)?.node { return true } else { return false } }()
+            let strokesKept: Bool = { if case .sculpt? = lib.body(plainAgain.id)?.node { return true } else { return false } }()
             lib.undo()
             settle()
             check("Esc after a stroke leaves Sculpt keeping it (unsaved meanwhile), one ⌘Z takes it back",
-                  opened && stroked && unsavedWhileSculpting && kept && lib.mode == .select && lib.sculpt == nil && lib.doc == untouched)
+                  opened && stroked && unsavedWhileSculpting && strokesKept && lib.mode == .select && lib.sculpt == nil && lib.doc == untouched)
             // Every other way out keeps the strokes too: D again, another tool's key.
             for (way, leave) in [("D again", { lib.perform(.sculpt) }), ("another tool", { lib.enter(.measure) })] as [(String, () -> Void)] {
                 use([plainAgain])
