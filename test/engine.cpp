@@ -3980,6 +3980,17 @@ int main() {
     bk_fastener_range(&f, -1, 1, none), bk_fastener_range(&f, 8, 1, past);
     check("a bolt's range for a number it hasn't is nothing", none[0] == 0 && none[1] == 0 && past[0] == 0 && past[1] == 0);
   }
+  // A flat cone a metre wide with a tip a thousandth of a millimetre across, hollowed: made at once (the sliver of its
+  // tip once took minutes and gigabytes; an end that thin is now a point).
+  {
+    const double flat[3] = {973.87617125178019, 0.001, 10};
+    BKShape *cone = bk_primitive(BK_CONE, flat);
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *hollow = cone ? bk_hollow(cone, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 0.1, nullptr) : nullptr;
+    double took = ms(t0);
+    check("a flat cone with a hair-thin tip hollowed at once", hollow && (!timed || took < 2000), fmt("in %.0f ms", took));
+    bk_free(hollow), bk_free(cone);
+  }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
   return failures ? 1 : 0;

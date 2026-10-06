@@ -802,6 +802,10 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   case BK_CONE: {
     double r1 = p[0] / 2, r2 = p[1] / 2, h = p[2] / 2;
     if (std::fabs(r1 - r2) < 1e-6) r2 = r1;
+    // (An end narrower than a hundredth of a millimetre made a point, as no printer tells them apart: a sliver of an
+    // end that thin took minutes to hollow.)
+    if (r1 < 0.005 && r2 >= 0.005) r1 = 0;
+    if (r2 < 0.005 && r1 >= 0.005) r2 = 0;
     m = turned(polyline({{0, -h}, {r1, -h}, {r2, h}, {0, h}}));
     break;
   }
@@ -860,6 +864,7 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   }
   case BK_RING: {
     double ro = p[0] / 2, ri = std::min(std::max(p[1] / 2, 0.0), ro - 0.05), h = p[2];
+    if (ri < 0.005) ri = 0;  // (as a cone's end)
     m = turned(polyline({{ri, 0}, {ro, 0}, {ro, h}, {ri, h}}));
     break;
   }
