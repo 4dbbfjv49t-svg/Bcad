@@ -606,11 +606,8 @@ bool crossing(const std::vector<V3> &P, const std::vector<uint32_t> &T, std::vec
       b.lo = vmin(b.lo, box[order[k]].lo), b.hi = vmax(b.hi, box[order[k]].hi);
       mlo = vmin(mlo, mid[order[k]]), mhi = vmax(mhi, mid[order[k]]);
     }
-    nodes[id].b = b;
-    if (count <= 4) {
-      nodes[id].first = first, nodes[id].count = count;
-      return id;
-    }
+    nodes[id].b = b, nodes[id].first = first, nodes[id].count = count;
+    if (count <= 4) return id;
     V3 span = mhi - mlo;
     int axis = span.x >= span.y && span.x >= span.z ? 0 : span.y >= span.z ? 1 : 2;
     int half = count / 2;
@@ -622,45 +619,60 @@ bool crossing(const std::vector<V3> &P, const std::vector<uint32_t> &T, std::vec
     return id;
   };
   build(0, (int)nt);
+  // The leaves' boxes in the tree's order, beside their numbers (read in a run).
+  std::vector<Box> leafBox(nt);
+  for (size_t k = 0; k < nt; k++) leafBox[k] = box[order[k]];
   auto overlap = [](const Box &x, const Box &y) {
     return x.lo.x <= y.hi.x && y.lo.x <= x.hi.x && x.lo.y <= y.hi.y && y.lo.y <= x.hi.y && x.lo.z <= y.hi.z && y.lo.z <= x.hi.z;
   };
-  std::vector<int> stack;
-  for (size_t t = 0; t < nt; t++) {
-    const uint32_t *x = &T[3 * t];
-    V3 a = P[x[0]], b = P[x[1]], c = P[x[2]];
-    stack.assign(1, 0);
-    while (!stack.empty()) {
-      const Node &nd = nodes[stack.back()];
-      stack.pop_back();
-      if (!overlap(nd.b, box[t])) continue;
-      if (nd.left >= 0) {
-        stack.push_back(nd.left), stack.push_back(nd.right);
-        continue;
-      }
-      for (int k = nd.first; k < nd.first + nd.count; k++) {
-        uint32_t u = order[k];
-        if (u <= t || !overlap(box[u], box[t])) continue;
-        const uint32_t *y = &T[3 * u];
-        // (Triangles meeting at a corner or a side are neighbours, not a crossing.)
-        bool shared = false;
-        for (int i = 0; i < 3; i++)
-          for (int j = 0; j < 3; j++) shared = shared || x[i] == y[j];
-        if (shared) continue;
-        V3 d = P[y[0]], e = P[y[1]], f = P[y[2]];
-        bool hit = through(d, e, a, b, c) || through(e, f, a, b, c) || through(f, d, a, b, c) || through(a, b, d, e, f) || through(b, c, d, e, f) ||
-                   through(c, a, d, e, f);
-        // In one plane: overlapping (as pieces laid over each other are).
-        if (!hit && !orient3d(a, b, c, d) && !orient3d(a, b, c, e) && !orient3d(a, b, c, f)) {
-          V3 nrm = cross(b - a, c - a);
-          int drop = std::fabs(nrm.x) >= std::fabs(nrm.y) && std::fabs(nrm.x) >= std::fabs(nrm.z) ? 0 : std::fabs(nrm.y) >= std::fabs(nrm.z) ? 1 : 2;
-          const V3 t3[3] = {a, b, c}, u3[3] = {d, e, f};
-          hit = overlapFlat(t3, u3, drop);
+  // Each pair of triangles whose boxes meet, once: the tree walked against itself (nodes whose boxes meet, down to
+  // their leaves).
+  auto pair = [&](uint32_t t, uint32_t u) {
+    const uint32_t *x = &T[3 * t], *y = &T[3 * u];
+    // (Triangles meeting at a corner or a side are neighbours, not a crossing.)
+    for (int i = 0; i < 3; i++)
+      for (int j = 0; j < 3; j++)
+        if (x[i] == y[j]) return false;
+    V3 a = P[x[0]], b = P[x[1]], c = P[x[2]], d = P[y[0]], e = P[y[1]], f = P[y[2]];
+    // (One wholly to one side of the other's plane, none of it on it: neither passes through the other, nor do they lie
+    // in one plane. Most pairs are told so here, at a third of the tests.)
+    int sd = orient3d(a, b, c, d);
+    if (sd && orient3d(a, b, c, e) == sd && orient3d(a, b, c, f) == sd) return false;
+    int sa = orient3d(d, e, f, a);
+    if (sa && orient3d(d, e, f, b) == sa && orient3d(d, e, f, c) == sa) return false;
+    if (through(d, e, a, b, c) || through(e, f, a, b, c) || through(f, d, a, b, c) || through(a, b, d, e, f) || through(b, c, d, e, f) ||
+        through(c, a, d, e, f))
+      return true;
+    // In one plane: overlapping (as pieces laid over each other are).
+    if (!orient3d(a, b, c, d) && !orient3d(a, b, c, e) && !orient3d(a, b, c, f)) {
+      V3 nrm = cross(b - a, c - a);
+      int drop = std::fabs(nrm.x) >= std::fabs(nrm.y) && std::fabs(nrm.x) >= std::fabs(nrm.z) ? 0 : std::fabs(nrm.y) >= std::fabs(nrm.z) ? 1 : 2;
+      const V3 t3[3] = {a, b, c}, u3[3] = {d, e, f};
+      return overlapFlat(t3, u3, drop);
+    }
+    return false;
+  };
+  std::vector<std::pair<int, int>> stack{{0, 0}};
+  while (!stack.empty()) {
+    auto [i, j] = stack.back();
+    stack.pop_back();
+    const Node &A = nodes[i], &B = nodes[j];
+    if (i != j && !overlap(A.b, B.b)) continue;
+    if (A.left < 0 && B.left < 0) {
+      for (int k = A.first; k < A.first + A.count; k++)
+        for (int l = i == j ? k + 1 : B.first; l < B.first + B.count; l++) {
+          if (!overlap(leafBox[k], leafBox[l])) continue;
+          uint32_t t = order[k], u = order[l];
+          if (!pair(std::min(t, u), std::max(t, u))) continue;
+          if (!mark) return true;
+          any = true, (*mark)[t] = (*mark)[u] = 1;
         }
-        if (!hit) continue;
-        if (!mark) return true;
-        any = true, (*mark)[t] = (*mark)[u] = 1;
-      }
+    } else if (i == j) {
+      stack.push_back({A.left, A.left}), stack.push_back({A.left, A.right}), stack.push_back({A.right, A.right});
+    } else if (B.left < 0 || (A.left >= 0 && A.count >= B.count)) {
+      stack.push_back({A.left, j}), stack.push_back({A.right, j});
+    } else {
+      stack.push_back({i, B.left}), stack.push_back({i, B.right});
     }
   }
   return any;

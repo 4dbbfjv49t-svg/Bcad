@@ -18,18 +18,21 @@ namespace bce {
 
 namespace {
 
-// A number as STEP writes it: the shortest that reads back the same, always with a point (1., 0.5, 1.E-07).
-std::string num(double v) {
-  if (v == 0) return "0.";
+// A number as STEP writes it: the shortest that reads back the same, always with a point (1., 0.5, 1.E-07), put on the
+// end of `o` (no string of its own made).
+void numTo(std::string &o, double v) {
+  if (v == 0) {
+    o += "0.";
+    return;
+  }
   char buf[64];
-  auto r = std::to_chars(buf, buf + sizeof buf, v);
-  std::string s(buf, r.ptr);
-  size_t e = s.find_first_of("eE");
-  std::string mant = s.substr(0, e), exp = e == std::string::npos ? "" : s.substr(e + 1);
-  if (mant.find('.') == std::string::npos) mant += '.';
-  if (exp.empty()) return mant;
-  if (exp[0] == '+') exp.erase(0, 1);
-  return mant + "E" + exp;
+  char *end = std::to_chars(buf, buf + sizeof buf, v).ptr, *e = buf;
+  while (e < end && *e != 'e' && *e != 'E') e++;
+  o.append(buf, e);
+  if (std::find(buf, e, '.') == e) o += '.';
+  if (e == end) return;
+  o += 'E';
+  o.append(e[1] == '+' ? e + 2 : e + 1, end);
 }
 
 // A string as STEP writes it: ' and \ doubled, characters past plain ASCII as \X2\ (or, past 16 bits, \X4\) runs of
@@ -98,8 +101,47 @@ struct Out {
     text += ";\n";
     return id;
   }
-  int point(V3 p) { return add("CARTESIAN_POINT(''," + std::string("(") + num(p.x) + "," + num(p.y) + "," + num(p.z) + "))"); }
-  int direction(V3 d) { return add("DIRECTION(''," + std::string("(") + num(d.x) + "," + num(d.y) + "," + num(d.z) + "))"); }
+  // An entity written straight into the text, piece by piece: begun (its number given out), references, numbers and
+  // lists of references put on, ended.
+  int begin(const char *head) {
+    int id = next++;
+    text += '#';
+    number(id);
+    text += '=';
+    text += head;
+    return id;
+  }
+  void number(int v) {
+    char b[16];
+    text.append(b, std::to_chars(b, b + sizeof b, v).ptr);
+  }
+  void ref(int id) { text += '#', number(id); }
+  void refs(const std::vector<int> &ids) {
+    text += '(';
+    for (size_t i = 0; i < ids.size(); i++) {
+      if (i) text += ',';
+      ref(ids[i]);
+    }
+    text += ')';
+  }
+  int end(const char *tail, int id) {
+    text += tail;
+    text += ";\n";
+    return id;
+  }
+  int point(V3 p) { return triple("CARTESIAN_POINT('',(", p); }
+  int direction(V3 d) { return triple("DIRECTION('',(", d); }
+  // (Written straight into the text.)
+  int triple(const char *head, V3 v) {
+    int id = next++;
+    text += '#';
+    text += std::to_string(id);
+    text += '=';
+    text += head;
+    numTo(text, v.x), text += ',', numTo(text, v.y), text += ',', numTo(text, v.z);
+    text += "));\n";
+    return id;
+  }
 };
 
 // One body's solids, written into `o` (in the representation context `context`): the solids' numbers in `solids`.
@@ -201,15 +243,25 @@ bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &sol
   auto edgeCurve = [&](uint32_t e, int shell) {
     if (curve[e]) return curve[e];
     auto vertex = [&](uint32_t v) {
-      if (vpShell[v] != shell) vpShell[v] = shell, vp[v] = o.add("VERTEX_POINT(''," + ref(pointAt(v)) + ")");
+      if (vpShell[v] != shell) {
+        int at = pointAt(v), id = o.begin("VERTEX_POINT('',");
+        o.ref(at);
+        vpShell[v] = shell, vp[v] = o.end(")", id);
+      }
       return vp[v];
     };
     auto [u, v] = edges[e];
     V3 d = P[v] - P[u];
     int a = vertex(u), b = vertex(v);
-    int vec = o.add("VECTOR(''," + ref(o.direction(unit(d))) + "," + num(norm(d)) + ")");
-    int line = o.add("LINE(''," + ref(pointAt(u)) + "," + ref(vec) + ")");
-    return curve[e] = o.add("EDGE_CURVE(''," + ref(a) + "," + ref(b) + "," + ref(line) + ",.T.)");
+    int dir = o.direction(unit(d)), vec = o.begin("VECTOR('',");
+    o.ref(dir), o.text += ',', numTo(o.text, norm(d));
+    o.end(")", vec);
+    int at = pointAt(u), line = o.begin("LINE('',");
+    o.ref(at), o.text += ',', o.ref(vec);
+    o.end(")", line);
+    int id = o.begin("EDGE_CURVE('',");
+    o.ref(a), o.text += ',', o.ref(b), o.text += ',', o.ref(line);
+    return curve[e] = o.end(",.T.)", id);
   };
   std::vector<int> shellId(nsh, 0);
   for (size_t sh = 0; sh < nsh; sh++) {
@@ -223,16 +275,28 @@ bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &sol
         if (turned) std::reverse(sides.begin(), sides.end());
         for (uint32_t side : sides) {
           bool along = (from(side) == edges[edgeOf[side]].first) != turned;
-          oriented.push_back(o.add("ORIENTED_EDGE('',*,*," + ref(edgeCurve(edgeOf[side], (int)sh)) + (along ? ",.T.)" : ",.F.)")));
+          int curveId = edgeCurve(edgeOf[side], (int)sh), id = o.begin("ORIENTED_EDGE('',*,*,");
+          o.ref(curveId);
+          oriented.push_back(o.end(along ? ",.T.)" : ",.F.)", id));
         }
-        int loop = o.add("EDGE_LOOP(''," + list(oriented) + ")");
-        bounds.push_back(o.add(std::string(l == 0 ? "FACE_OUTER_BOUND" : "FACE_BOUND") + "(''," + ref(loop) + ",.T.)"));
+        int loop = o.begin("EDGE_LOOP('',");
+        o.refs(oriented);
+        o.end(")", loop);
+        int bound = o.begin(l == 0 ? "FACE_OUTER_BOUND(''," : "FACE_BOUND('',");
+        o.ref(loop);
+        bounds.push_back(o.end(",.T.)", bound));
       }
       // (One entity per statement: within one expression, the order they're numbered in is the compiler's choice.)
       int at = pointAt(anchor), up = o.direction(turned ? -n : n);
-      int ax = o.add("AXIS2_PLACEMENT_3D(''," + ref(at) + "," + ref(up) + ",$)");
-      int plane = o.add("PLANE(''," + ref(ax) + ")");
-      faces.push_back(o.add("ADVANCED_FACE(''," + list(bounds) + "," + ref(plane) + ",.T.)"));
+      int ax = o.begin("AXIS2_PLACEMENT_3D('',");
+      o.ref(at), o.text += ',', o.ref(up);
+      o.end(",$)", ax);
+      int plane = o.begin("PLANE('',");
+      o.ref(ax);
+      o.end(")", plane);
+      int id = o.begin("ADVANCED_FACE('',");
+      o.refs(bounds), o.text += ',', o.ref(plane);
+      faces.push_back(o.end(",.T.)", id));
     };
     std::vector<char> done(nt, 0);
     for (uint32_t t = 0; t < nt; t++) {

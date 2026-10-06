@@ -40,12 +40,27 @@ bool shells(const Solid &s, Shells &out, std::string &why) {
   auto &T = out.T;
   T.resize(s.tri.size());
   {
-    std::unordered_map<Key, uint32_t, Hash> at;
+    // (A flat table, no allocation per point; numbered in the order they first come, as before.)
+    size_t cap = 16;
+    while (cap < 2 * s.tri.size()) cap *= 2;
+    std::vector<uint32_t> table(cap, UINT32_MAX);
+    std::vector<Key> keys;
     for (size_t i = 0; i < s.tri.size(); i++) {
       V3 q = s.p[s.tri[i]];
-      auto [it, fresh] = at.emplace(key(q.x, q.y, q.z), (uint32_t)P.size());
-      if (fresh) P.push_back(q);
-      T[i] = it->second;
+      Key k = key(q.x, q.y, q.z);
+      uint64_t h = Hash()(k);
+      h ^= h >> 33, h *= 0xFF51AFD7ED558CCDull, h ^= h >> 33, h *= 0xC4CEB9FE1A85EC53ull, h ^= h >> 33;
+      for (size_t j = h & (cap - 1);; j = (j + 1) & (cap - 1)) {
+        if (table[j] == UINT32_MAX) {
+          table[j] = T[i] = (uint32_t)P.size();
+          P.push_back(q), keys.push_back(k);
+          break;
+        }
+        if (keys[table[j]] == k) {
+          T[i] = table[j];
+          break;
+        }
+      }
     }
   }
   size_t nt = T.size() / 3, ns = T.size();
