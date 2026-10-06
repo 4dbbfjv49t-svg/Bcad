@@ -3916,9 +3916,16 @@ int main() {
     auto t0 = std::chrono::steady_clock::now();
     BKShape *coved = bk_cove(prism, &kb, body, 1, 0.5, &most, &miss);
     double took = ms(t0);
-    check("a cove wider than the faces beside it on a many-sided prism refused at once", !coved && (!timed || took < 2000) && most > 0 && most < 0.5,
-          fmt("in %.0f ms; at most %.2f", took, most));
-    bk_free(coved), bk_free(prism);
+    // (And on a needle of a pyramid, its 48 edges' coves each a hundred times wider than the faces: it took 90 s.)
+    const double needle[3] = {24, 0.01, 9.5984283412729852};
+    BKShape *spike = bk_primitive(BK_PYRAMID, needle);
+    double most2 = 0;
+    t0 = std::chrono::steady_clock::now();
+    BKShape *coved2 = bk_cove(spike, &kb, body, 1, 0.1, &most2, &miss);
+    double took2 = ms(t0);
+    check("a cove wider than the faces beside it on a many-sided prism, or a needle, answered at once",
+          !coved && (!timed || took < 2000) && most > 0 && most < 0.5 && (!timed || took2 < 2000), fmt("in %.0f ms; at most %.2f", took, most) + fmt("; needle in %.0f ms", took2));
+    bk_free(coved), bk_free(prism), bk_free(coved2), bk_free(spike);
   }
   // A section across the rim of a hemisphere 5 m wide for a hair-thin rounding: quick (meshed no finer than the body's
   // size asks, it once took tens of millions of triangles).

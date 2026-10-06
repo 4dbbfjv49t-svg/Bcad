@@ -1966,15 +1966,17 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     return s;
   }
   // An inward rounding past that may still do: cut, then checked (below); but not one wider than twice the whole body,
-  // which can't (its tools that size took minutes to cut, only to be refused), nor along more than 48 edges at once
-  // (many such tools overlapping took minutes to merge, only to be refused).
+  // which can't (its tools that size took minutes to cut, only to be refused), nor along more than 48 edges at once,
+  // nor where so many are so much wider than their faces (their count times that, past 300) that they overlap all
+  // round (such tools took minutes to merge).
   double largest = 0;
   if (!s.p.empty()) {
     V3 lo = s.p[0], hi = s.p[0];
     for (V3 q : s.p) lo = vmin(lo, q), hi = vmax(hi, q);
     largest = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
   }
-  bool coveChecked = t.kind == Treatment::Cove && t.radius >= most * (1 - 1e-6) && !(t.radius > 2 * largest) && work.size() <= 48;
+  bool coveChecked = t.kind == Treatment::Cove && t.radius >= most * (1 - 1e-6) && !(t.radius > 2 * largest) && work.size() <= 48 &&
+                     (double)work.size() * t.radius <= 300 * most;
   auto tooWide = [&]() {
     fit.fits = false;
     fit.most = std::max(0.0, std::floor(most * 0.999 * 100) / 100);

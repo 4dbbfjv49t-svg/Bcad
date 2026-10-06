@@ -506,7 +506,11 @@ int main() {
       if (rnd() % 3 == 0) bk_fastener_fit(&f);
       if (rnd() % 5 == 0) bk_fastener_drive(&f, pick(fsizes));
       bk_fastener_extent(&f, pick(clearances), ext);
-      BKShape *s = bk_fastener(&f, pick(clearances));
+      double clearance = pick(clearances);
+      if (verbose)
+        printf("  size %d: length %.17g width %.17g height %.17g angle %.17g seat %.17g drive %.17g recess %.17g depth %.17g, clearance %.17g\n", f.size,
+               f.length, f.width, f.height, f.angle, f.seat, f.drive, f.recess, f.depth, clearance);
+      BKShape *s = bk_fastener(&f, clearance);
       judge(s, fmt("fastener kind %.0f size %.0f (case %.0f)", f.kind, f.size, k));
       bk_free(s);
     }
