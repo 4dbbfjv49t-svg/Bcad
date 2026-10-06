@@ -610,8 +610,15 @@ BKSection *bk_section(const BKShape *s, int kind, const double *pick, double rad
     lastError = "section: pick must be numbers";
     return nullptr;
   }
+  // Meshed finely enough to show the rounding's arc, but not finer than a fifty-thousandth of the body (a small rounding
+  // on a body metres across once took tens of millions of triangles).
+  double d = std::max(radius > 0 ? radius / 400 : 0.05, 1e-4);
+  V3 lo, hi;
+  placedBounds(s->shape, lo, hi);
+  double size = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+  if (std::isfinite(size) && size > 0) d = std::max(d, size * 2e-5);
   Solid solid;
-  mesh(s->shape, std::max(radius > 0 ? radius / 400 : 0.05, 1e-4), solid);
+  mesh(s->shape, d, solid);
   Crease c;
   size_t at = 0;
   if (!creaseAt(solid, kind, q, c, at)) {

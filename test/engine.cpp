@@ -3917,6 +3917,21 @@ int main() {
           fmt("in %.0f ms; at most %.2f", took, most));
     bk_free(coved), bk_free(prism);
   }
+  // A section across the rim of a hemisphere 5 m wide for a hair-thin rounding: quick (meshed no finer than the body's
+  // size asks, it once took tens of millions of triangles).
+  {
+    const double d5[1] = {5000};
+    BKShape *dome = bk_primitive(BK_HEMISPHERE, d5);
+    double rim[6] = {2500, 0, -1250, 0, 1, 0};
+    int ke = BK_PICK_EDGE;
+    auto t0 = std::chrono::steady_clock::now();
+    BKSection *sec = bk_section(dome, ke, rim, 1e-9);
+    double took = ms(t0);
+    check("a section across a huge body's edge for a hair-thin rounding is quick", sec && sec->loopCount == 1 && (!timed || took < 2000),
+          fmt("in %.0f ms", took));
+    if (sec) bk_section_free(sec);
+    bk_free(dome);
+  }
   // A bolt's range asked for a number it hasn't, loosely: nothing (it once read past the end of its list).
   {
     BKFastener f{};
