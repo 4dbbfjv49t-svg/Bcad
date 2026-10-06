@@ -86,19 +86,24 @@ struct Boxes {
     int left = -1, right = -1, first = 0, count = 0;
   };
   std::vector<Node> nodes;
-  std::vector<uint32_t> order;
-  std::vector<Box> boxes;
+  // Each box with its number, in the tree's order (while it's made, then for its leaves): read in a run, not looked up
+  // all over (the same tree as by numbers alone, made several times faster).
+  struct Item {
+    Box b;
+    uint32_t id;
+  };
+  std::vector<Item> items;
 
-  explicit Boxes(const std::vector<Box> &bx) : boxes(bx) {
-    order.resize(bx.size());
-    std::iota(order.begin(), order.end(), 0);
+  explicit Boxes(const std::vector<Box> &bx) {
+    items.resize(bx.size());
+    for (size_t i = 0; i < bx.size(); i++) items[i] = {bx[i], (uint32_t)i};
     if (!bx.empty()) make(0, (int)bx.size());
   }
   int make(int first, int count) {
     int at = (int)nodes.size();
     nodes.push_back({});
-    Box b = boxes[order[first]];
-    for (int i = first + 1; i < first + count; i++) b.lo = vmin(b.lo, boxes[order[i]].lo), b.hi = vmax(b.hi, boxes[order[i]].hi);
+    Box b = items[first].b;
+    for (int i = first + 1; i < first + count; i++) b.lo = vmin(b.lo, items[i].b.lo), b.hi = vmax(b.hi, items[i].b.hi);
     nodes[at].b = b;
     if (count <= 4) {
       nodes[at].first = first, nodes[at].count = count;
@@ -107,9 +112,9 @@ struct Boxes {
     V3 ext = b.hi - b.lo;
     int axis = ext.x >= ext.y && ext.x >= ext.z ? 0 : ext.y >= ext.z ? 1 : 2;
     int half = count / 2;
-    std::nth_element(order.begin() + first, order.begin() + first + half, order.begin() + first + count, [&](uint32_t u, uint32_t v) {
-      double cu = boxes[u].lo[axis] + boxes[u].hi[axis], cv = boxes[v].lo[axis] + boxes[v].hi[axis];
-      return cu < cv || (cu == cv && u < v);
+    std::nth_element(items.begin() + first, items.begin() + first + half, items.begin() + first + count, [&](const Item &u, const Item &v) {
+      double cu = u.b.lo[axis] + u.b.hi[axis], cv = v.b.lo[axis] + v.b.hi[axis];
+      return cu < cv || (cu == cv && u.id < v.id);
     });
     int l = make(first, half), r = make(first + half, count - half);
     nodes[at].left = l, nodes[at].right = r;
@@ -125,7 +130,7 @@ struct Boxes {
       if (!meets(n.b)) continue;
       if (n.left < 0) {
         for (int i = n.first; i < n.first + n.count; i++)
-          if (meets(boxes[order[i]])) f(order[i]);
+          if (meets(items[i].b)) f(items[i].id);
       } else {
         stack[top++] = n.left, stack[top++] = n.right;
       }
@@ -1122,10 +1127,11 @@ static Solid combineOnce(const std::vector<const Solid *> &in, const Rule &rule,
     for (int k = 0; k < shapes; k++) S.owner.insert(S.owner.end(), S.start[k + 1] - S.start[k], (uint32_t)k);
   }
   size_t nt = S.w.count();
-  // Triangles known not to cross each other: each shape's own marks, while its points stayed on this grid.
+  // Triangles known not to cross each other: each shape's own marks, while its points stayed on this grid (or, a grid
+  // below zero, marks that hold on any).
   S.w.sound.assign(nt, 0);
   for (int k = 0; k < shapes; k++)
-    if (in[k]->grid == step && ws[k].sound.size() == ws[k].count()) std::copy(ws[k].sound.begin(), ws[k].sound.end(), S.w.sound.begin() + S.start[k]);
+    if ((in[k]->grid == step || in[k]->grid < 0) && ws[k].sound.size() == ws[k].count()) std::copy(ws[k].sound.begin(), ws[k].sound.end(), S.w.sound.begin() + S.start[k]);
   c.E = ExactPoints(step);
   for (V3 q : S.w.pts) c.E.grid(q);
   c.parent.resize(c.P.size());

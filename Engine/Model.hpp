@@ -98,7 +98,8 @@ struct Solid {
   // exactly its share. Empty where every face is flat.
   std::vector<double> gap;
   // The grid a merge last put its points on (0: none, or moved off it since): a merge of this keeps to that grid, so its
-  // points stay where they are and a part made afresh lands on them.
+  // points stay where they are and a part made afresh lands on them. (Below zero, for a mesh about to be merged: its
+  // marks below hold on any grid.)
   double grid = 0;
   // Per triangle, whether it's known to cross none of the others so marked (a merge marks those it let through whole), so
   // the next merge on the same grid needn't look at those pairs again. Empty, or not one per triangle: none known.

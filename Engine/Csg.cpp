@@ -136,6 +136,12 @@ std::shared_ptr<const Solid> evaluate(const Node &node, double d) {
     else mesh(node.a, d, a);
     if (lb.ok) lathe(node.b, lb, fb, lb.count, atB, b);
     else mesh(node.b, d, b);
+    // A mesh body as it is was checked not to cross itself when it was made: its triangles needn't be looked at against
+    // each other again (should moving or rounding have made two cross, the merge finds it and looks at every pair).
+    auto apart = [](const Shape &s, Solid &m) {
+      if (s.node->kind == Node::Prim && s.node->model->kind == Model::Mesh) m.sound.assign(m.tri.size() / 3, 1), m.grid = -1;
+    };
+    apart(node.a, a), apart(node.b, b);
     *out = combine(a, b, node.op, 1e-11, true);
     finish(*out, d);
   } else {
