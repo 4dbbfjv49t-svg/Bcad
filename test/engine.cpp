@@ -3881,6 +3881,28 @@ int main() {
           fmt("walls refused in %.0f ms, the cove in %.0f ms (largest %.2f)", thickTook, wideTook, largest));
     for (BKShape *x : {many, p64, bw, thick, thin, bar, wide}) bk_free(x);
   }
+  // A cove wider than the faces beside it along every edge of a 64-sided prism: refused at once (it took three minutes).
+  {
+    const double p64[3] = {64, 4.1341596068988542, 51.091373069366874};
+    BKShape *prism = bk_primitive(BK_PRISM, p64);
+    int kb = BK_PICK_BODY, miss = 0;
+    double body[6] = {0, 0, 0, 0, 0, 0}, most = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *coved = bk_cove(prism, &kb, body, 1, 0.5, &most, &miss);
+    double took = ms(t0);
+    check("a cove wider than the faces beside it on a many-sided prism refused at once", !coved && (!timed || took < 2000) && most > 0 && most < 0.5,
+          fmt("in %.0f ms; at most %.2f", took, most));
+    bk_free(coved), bk_free(prism);
+  }
+  // A bolt's range asked for a number it hasn't, loosely: nothing (it once read past the end of its list).
+  {
+    BKFastener f{};
+    f.kind = BK_HEX, f.size = 4;
+    bk_fastener_defaults(&f, 1);
+    double none[2] = {-1, -1}, past[2] = {-1, -1};
+    bk_fastener_range(&f, -1, 1, none), bk_fastener_range(&f, 8, 1, past);
+    check("a bolt's range for a number it hasn't is nothing", none[0] == 0 && none[1] == 0 && past[0] == 0 && past[1] == 0);
+  }
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
   return failures ? 1 : 0;

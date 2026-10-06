@@ -216,6 +216,7 @@ static void sculptRun(int run, const BKShape *shape, double detail) {
     }
     bk_sculpt_sync(w.api);
     w.ref->takeChanged(), w.ref->takeChangedTriangles();
+    if (verbose) printf("    %.0f triangle slots\n", (double)bk_sculpt_triangle_count(w.api)), fflush(stdout);
     std::string bad = bk_sculpt_check(w.api);
     if (bad.empty()) bad = w.ref->check();
     if (bad.empty()) bad = w.differs();
@@ -402,6 +403,7 @@ int main() {
       judge(t, fmt("primitive %.0f placed", kind) + fmt(" at scale %g, moved %g", sc, mv) + fmt(" (case %.0f)", k), placedTame);
       // Merged with another.
       BKShape *o = primitive((int)(rnd() % 14));
+      if (verbose) printf("  and %s\n", last.c_str());
       if (o && !wild) {
         int op = (int)(rnd() % 3);
         doing(fmt("extremes %.0f: boolean %.0f", k, op), 120);

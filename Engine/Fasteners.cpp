@@ -96,9 +96,11 @@ static double driveRoom(const BKFastener &f) {
 static const int fitOrder[] = {BK_DRIVE, BK_RECESS, BK_DEPTH, BK_HEIGHT, BK_SEAT, BK_ANGLE, BK_WIDTH, BK_LENGTH};
 
 void bk_fastener_range(const BKFastener *fp, int field, int loose, double *out) {
+  if (!fp || !out) return;
   BKFastener f = *fp;
   // Loose: the sizes fitted before this one may shrink to their least to make room for it.
-  for (int i = 0; loose && fitOrder[i] != field; i++) {
+  // (A field not among them: none.)
+  for (int i = 0; loose && i < (int)(sizeof fitOrder / sizeof *fitOrder) && fitOrder[i] != field; i++) {
     switch (fitOrder[i]) {
     case BK_DRIVE: if (keyDrive(f.kind)) f.drive = 0.7; else if (torxDrive(f.kind)) f.drive = torxSizes[0].n; break;
     case BK_RECESS: f.recess = 2 * phWing[std::max(1, std::min(4, (int)lround(f.drive)))] + 0.4; break;

@@ -6,6 +6,7 @@
 namespace bce {
 
 thread_local long bigOverflows = 0;
+long bigOverflowCount() { return bigOverflows; }
 
 // MARK: - whole numbers
 

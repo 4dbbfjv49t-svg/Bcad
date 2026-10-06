@@ -1059,7 +1059,7 @@ Welded gridded(const Solid &s, double step) {
 // One merge, looking for where each shape meets itself only where it isn't known not to (or, `everywhere`, all over);
 // `open` says whether the result came out not closed.
 static Solid combineOnce(const std::vector<const Solid *> &in, const Rule &rule, bool keepGrid, bool everywhere, bool &open) {
-  long overflows = bigOverflows;
+  long overflows = bigOverflowCount();
   Cutter c;
   double step;
   int shapes = (int)in.size();
@@ -1261,7 +1261,7 @@ static Solid combineOnce(const std::vector<const Solid *> &in, const Rule &rule,
   // Points a rounding apart made one, and pieces left with no area at all (points on one cut) swapped away, so the next
   // merge or cut never meets them.
   open = !balanced(out);
-  combineReport.overflows += bigOverflows - overflows;
+  combineReport.overflows += bigOverflowCount() - overflows;
   clean(out, 1e-9 * scale, &fresh);
   unweld(out, result);
   result.grid = step;

@@ -34,8 +34,11 @@ struct Big {
 Big operator+(const Big &a, const Big &b);
 Big operator-(const Big &a, const Big &b);
 Big operator*(const Big &a, const Big &b);
-// Sums that came out too wide to hold (never expected: counted, for the tests).
+// Sums that came out too wide to hold (never expected: counted, for the tests), on this thread. (Read through a call: an
+// optimised build with the undefined-behaviour sanitizer took the thread's own counter, read from another file, for a
+// null pointer.)
 extern thread_local long bigOverflows;
+long bigOverflowCount();
 
 // A plane through three grid points (by number). With `lift` 0, 1 or 2 the third is the first moved one step along
 // that axis instead: a plane standing on the line through the first two, across the plane they lie in.
