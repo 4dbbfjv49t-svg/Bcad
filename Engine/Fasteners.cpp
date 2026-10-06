@@ -121,7 +121,7 @@ void bk_fastener_range(const BKFastener *fp, int field, int loose, double *out) 
   switch (field) {
   case BK_LENGTH:
     lo = k == BK_CONE_NUT ? f.seat + p : nut ? 2 * p : k == BK_ROD ? 4 * p : coneDrop(f, d) + 2 * p;
-    hi = 10000;
+    hi = 1000;  // (A metre: far past any printer's bed; a ten-metre thread took a minute to make.)
     break;
   case BK_WIDTH:
     if (k == BK_SLEEVE) {
@@ -215,6 +215,7 @@ const char *fastenerMisfit(const BKFastener &f) {
     if (!(fields & (1 << i))) continue;
     double r[2];
     bk_fastener_range(&f, i, 0, r);
+    if (i == BK_LENGTH && v[i] > r[1] + 1e-6) return "a bolt or nut is at most 1000 mm long";
     if (!(v[i] >= r[0] - 1e-6 && v[i] <= r[1] + 1e-6)) return misfit(i);
   }
   return nullptr;

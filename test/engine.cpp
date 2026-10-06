@@ -3954,18 +3954,22 @@ int main() {
     check("a thin body half a metre long hollowed with hair-thin walls answered at once", oval && (!timed || took < 5000), fmt("in %.0f ms", took));
     bk_free(hollow), bk_free(oval);
   }
-  // A bolt two metres long: made quickly (its thread's mesher looked through a whole column of points for every cell, so
-  // a ten-metre one took 70 s).
+  // A bolt a metre long (the longest): made quickly (its thread's mesher looked through a whole column of points for every
+  // cell, so a ten-metre one took 70 s); a longer one refused, saying so.
   {
     BKFastener f{};
     f.kind = BK_HEX, f.size = 9;
     bk_fastener_defaults(&f, 1);
-    f.length = 2000;
+    f.length = 1000;
     auto t0 = std::chrono::steady_clock::now();
     BKShape *bolt = bk_fastener(&f, 0.2);
     double took = ms(t0);
-    check("a bolt two metres long made quickly", bolt && (!timed || took < 6000), fmt("in %.0f ms", took));
-    bk_free(bolt);
+    f.length = 1001;
+    BKShape *longer = bk_fastener(&f, 0.2);
+    std::string why = longer ? "" : bk_last_error();
+    check("a bolt a metre long made quickly; a longer one refused, saying so", bolt && (!timed || took < 3000) && !longer && why.find("1000 mm") != std::string::npos,
+          fmt("in %.0f ms; ", took) + why);
+    bk_free(bolt), bk_free(longer);
   }
   // A bolt's range asked for a number it hasn't, loosely: nothing (it once read past the end of its list).
   {
