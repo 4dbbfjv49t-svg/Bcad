@@ -265,12 +265,183 @@ static bool figureSound(const std::vector<double> &p, int draft, std::string &wh
   return ok;
 }
 
+// Everything else the app calls, with numbers it would and wouldn't give: picks taken from a shape's own mesh (faces,
+// edges, corners, and some off it), roundings, bevels and coves of them, hollows opened and walled, edges listed,
+// distances from edges and faces, meshes given as bodies (broken ones too), STEP and print files, figures given fewer
+// numbers or none, a sculpt's changed lists, its plain dabs and its mesh. Refused saying why, or made sound.
+static int apiMade = 0, apiRefused = 0;
+static void judged(BKShape *s, const std::string &what) {
+  if (!s) {
+    apiRefused++;
+    if (!*bk_last_error()) fail(what + ": refused without saying why");
+    return;
+  }
+  std::string why;
+  if (sound(s, why)) apiMade++;
+  else fail(what + ": made but not sound: " + why);
+  bk_free(s);
+}
+static void apiRun(int k) {
+  static const int kinds[] = {BK_BOX, BK_CYLINDER, BK_CONE, BK_SPHERE, BK_PRISM, BK_TORUS, BK_WEDGE, BK_PYRAMID, BK_HEMISPHERE, BK_BOWL, BK_RING,
+                              BK_GLASS, BK_OVAL};
+  int kind = pick(kinds);
+  double p[5];
+  for (double &v : p) v = 2 + uni() * 40;
+  if (kind == BK_PRISM || kind == BK_PYRAMID) p[0] = 3 + (double)(rnd() % 10);
+  if (kind == BK_TORUS) p[0] = 0, p[1] = 30 + uni() * 20, p[2] = 4 + uni() * 8;
+  if (kind == BK_OVAL) p[2] = 5 + uni() * 170;
+  std::string shape = fmt("api %.0f: kind %.0f", k, kind) + fmt(" %.17g %.17g %.17g", p[0], p[1], p[2]);
+  if (verbose) printf("  %s\n", shape.c_str());
+  BKShape *s = bk_primitive(kind, p);
+  if (!s) return;
+  BKMesh *m = bk_mesh(s, 0.05);
+  if (!m || m->faceCount == 0) {
+    bk_mesh_free(m), bk_free(s);
+    return;
+  }
+  // Picks: a face, an edge, a corner of its own (or a point beside it, now and then, or numbers that aren't).
+  auto facePick = [&](double *out) {
+    int f = (int)(rnd() % m->faceCount);
+    for (int i = 0; i < 6; i++) out[i] = m->faceInfo[6 * f + i];
+  };
+  auto edgePick = [&](double *out) {
+    if (m->edgeCount == 0) return facePick(out);
+    int e = (int)(rnd() % m->edgeCount), a = (int)m->edgeStart[e], b = (int)m->edgeStart[e + 1];
+    int i = a + std::max(0, (b - a) / 2 - 1), j = std::min(b - 1, i + 1);
+    for (int c = 0; c < 3; c++) out[c] = (m->edgePoints[3 * i + c] + m->edgePoints[3 * j + c]) / 2, out[3 + c] = m->edgePoints[3 * j + c] - m->edgePoints[3 * i + c];
+  };
+  auto cornerPick = [&](double *out) {
+    if (m->cornerCount == 0) return facePick(out);
+    int c = (int)(rnd() % m->cornerCount), f = (int)(rnd() % m->faceCount);
+    for (int i = 0; i < 3; i++) out[i] = m->faceInfo[6 * f + i], out[3 + i] = m->corners[3 * c + i];
+  };
+  int n = 1 + (int)(rnd() % 4);
+  std::vector<int> ks(n);
+  std::vector<double> picks(6 * n);
+  for (int i = 0; i < n; i++) {
+    ks[i] = (int)(rnd() % 4);
+    double *q = &picks[6 * i];
+    if (ks[i] == BK_PICK_EDGE) edgePick(q);
+    else if (ks[i] == BK_PICK_CORNER) cornerPick(q);
+    else facePick(q);
+    if (rnd() % 8 == 0) q[rnd() % 6] += (uni() - 0.5) * 20;
+    if (rnd() % 40 == 0) q[rnd() % 6] = NAN;
+  }
+  static const double radii[] = {0.2, 0.5, 1, 2, 5, 1e-4, 50};
+  double r = pick(radii), most = 0;
+  int missing = 0;
+  doing(shape + fmt(": fillet %g on %.0f picks", r, n), 120);
+  judged(bk_fillet(s, ks.data(), picks.data(), n, r, &most, &missing), shape + fmt(": fillet %g", r));
+  doing(shape + fmt(": chamfer %g", r), 120);
+  judged(bk_chamfer(s, ks.data(), picks.data(), n, r, rnd() % 2 ? r : pick(radii), rnd() % 3 ? 0 : pick(radii), &missing), shape + fmt(": chamfer %g", r));
+  doing(shape + fmt(": cove %g", r), 120);
+  judged(bk_cove(s, ks.data(), picks.data(), n, r, &most, &missing), shape + fmt(": cove %g", r));
+  // The edges they stand for, counted and listed (into too small a list too).
+  doing(shape + ": pick edges", 60);
+  int count = bk_pick_edges(s, ks.data(), picks.data(), n, nullptr, 0);
+  std::vector<double> edges(6 * (size_t)std::max(1, count));
+  int listed = bk_pick_edges(s, ks.data(), picks.data(), n, edges.data(), std::max(0, count / 2));
+  if (count < 0 || listed != count) fail(shape + fmt(": pick edges counted %.0f, listed %.0f", count, listed));
+  // Hollowed with an opening and a wall of its own.
+  double open[6], wall[6], thick[1] = {pick(radii)};
+  facePick(open), facePick(wall);
+  int opens = (int)(rnd() % 2), walls = (int)(rnd() % 2);
+  double t = pick(radii);
+  doing(shape + fmt(": hollow %g, %.0f open", t, opens) + fmt(", %.0f walled", walls), 120);
+  judged(bk_hollow(s, nullptr, 0, open, opens, wall, thick, walls, t, &missing), shape + fmt(": hollow %g", t));
+  // Distances: from an edge and a face to a point and to another shape, by index (some past the end).
+  doing(shape + ": distances", 60);
+  double pt[3] = {(uni() - 0.5) * 100, (uni() - 0.5) * 100, (uni() - 0.5) * 100}, out[6], moved[12] = {1, 0, 0, 60, 0, 1, 0, 0, 0, 0, 1, 0};
+  int ei = (int)(rnd() % (m->edgeCount + 2)) - 1, fi = (int)(rnd() % (m->faceCount + 2)) - 1;
+  double d1 = bk_distance(s, I, BK_END_EDGE, ei, nullptr, nullptr, nullptr, BK_END_POINT, 0, pt, out);
+  double d2 = bk_distance(s, I, BK_END_FACE, fi, nullptr, s, moved, BK_END_EDGE, ei, nullptr, out);
+  if ((d1 != -1 && !(d1 >= 0)) || (d2 != -1 && !(d2 >= 0))) fail(shape + fmt(": a distance not a size %g, %g", d1, d2));
+  // Merges with nothing; copies and print meshes; a remesh placed any way, its mesh a body, that body's own mesh back.
+  if (bk_boolean((int)(rnd() % 3), s, nullptr) || bk_boolean(BK_UNION, nullptr, s)) fail(shape + ": merged with nothing");
+  BKShape *c = bk_copy(s);
+  BKPrintMesh *pm = bk_print_mesh(c);
+  if (!pm || !pm->valid) fail(shape + ": its print mesh " + bk_last_error());
+  bk_print_mesh_free(pm), bk_free(c);
+  double placed[12];
+  for (int i = 0; i < 12; i++) placed[i] = I[i];
+  if (rnd() % 2) {
+    double a = uni() * 6.28, sc = 0.5 + uni();
+    placed[0] = std::cos(a) * sc, placed[1] = -std::sin(a) * sc, placed[4] = std::sin(a) * sc, placed[5] = std::cos(a) * sc, placed[10] = rnd() % 4 ? sc : -sc;
+    placed[3] = (uni() - 0.5) * 100;
+  }
+  doing(shape + ": remesh placed", 120);
+  BKSculptMesh *rm = bk_remesh(s, placed, 1 + uni() * 2);
+  if (rm) {
+    BKShape *body = bk_mesh_shape(rm->positions, rm->vertexCount, rm->indices, rm->triangleCount);
+    if (!body) fail(shape + ": its remesh not taken as a body: " + bk_last_error());
+    BKSculptMesh *own = body ? bk_mesh_body(body, placed) : nullptr;
+    if (body && !own) fail(shape + ": a mesh body's own mesh not given back: " + bk_last_error());
+    // Broken copies of it: a triangle gone (open), turned round (two the same way), a corner out of range, a point not a
+    // number, all turned (inside out): each refused saying why.
+    if (rm->triangleCount > 4) {
+      std::vector<uint32_t> idx(rm->indices, rm->indices + 3 * rm->triangleCount);
+      std::vector<float> pos(rm->positions, rm->positions + 3 * rm->vertexCount);
+      int how = (int)(rnd() % 5);
+      int tris = rm->triangleCount;
+      if (how == 0) tris--;
+      else if (how == 1) std::swap(idx[1], idx[2]);
+      else if (how == 2) idx[rnd() % idx.size()] = (uint32_t)rm->vertexCount + 7;
+      else if (how == 3) pos[rnd() % pos.size()] = NAN;
+      else
+        for (size_t q = 0; q + 2 < idx.size(); q += 3) std::swap(idx[q + 1], idx[q + 2]);
+      BKShape *broken = bk_mesh_shape(pos.data(), rm->vertexCount, idx.data(), tris);
+      if (broken) fail(shape + fmt(": a broken mesh (%.0f) taken", how));
+      else if (!*bk_last_error()) fail(shape + ": a broken mesh refused without saying why");
+      bk_free(broken);
+    }
+    bk_sculpt_mesh_free(own), bk_free(body);
+    // Sculpted: plain dabs, the changed lists within the mesh's slots, the live count, its mesh read back.
+    BKSculpt *sc = bk_sculpt_new(rm->positions, rm->vertexCount, rm->indices, rm->triangleCount);
+    if (sc) {
+      double at[3] = {rm->positions[0], rm->positions[1], rm->positions[2]};
+      bk_sculpt_set_detail(sc, rnd() % 2 ? 0 : 1.5);
+      bk_sculpt_begin(sc, (int)(rnd() % BK_BRUSH_COUNT), at, 2 + uni() * 5, uni(), (int)(rnd() % 2), (int)(rnd() % 2));
+      for (int d = 0; d < 6; d++) {
+        double q[3] = {at[0] + uni(), at[1] + uni(), at[2] + uni()};
+        bk_sculpt_dab(sc, q, uni(), uni());
+      }
+      bk_sculpt_end(sc);
+      int changed = bk_sculpt_sync(sc), tch = bk_sculpt_changed_triangle_count(sc), vc = bk_sculpt_vertex_count(sc), tc = bk_sculpt_triangle_count(sc);
+      const uint32_t *cv = bk_sculpt_changed(sc), *ct = bk_sculpt_changed_triangles(sc);
+      for (int i = 0; i < changed; i++)
+        if (cv[i] >= (uint32_t)vc) fail(shape + ": a changed point past the slots");
+      for (int i = 0; i < tch; i++)
+        if (ct[i] >= (uint32_t)tc) fail(shape + ": a changed triangle past the slots");
+      int live = bk_sculpt_live_triangle_count(sc);
+      BKSculptMesh *back = bk_sculpt_mesh(sc);
+      if (!back || back->triangleCount != live) fail(shape + ": a sculpt's mesh not its live triangles");
+      bk_sculpt_mesh_free(back), bk_sculpt_free(sc);
+    }
+    bk_sculpt_mesh_free(rm);
+  }
+  // STEP: written into a temporary file (a name or none; a path that can't be written refused saying why).
+  doing(shape + ": STEP", 120);
+  char path[] = "/tmp/bcad-fuzz-XXXXXX";
+  int fd = mkstemp(path);
+  if (fd >= 0) {
+    close(fd);
+    const BKShape *list[1] = {s};
+    const char *names[1] = {rnd() % 2 ? "Fuzzed ‘body’ \\ ü" : nullptr};
+    if (!bk_export_step(list, rnd() % 2 ? names : nullptr, 1, path)) fail(shape + ": STEP not written: " + bk_last_error());
+    unlink(path);
+  }
+  if (bk_export_step(nullptr, nullptr, 1, path) || !*bk_last_error()) fail(shape + ": STEP of nothing written");
+  const BKShape *list[1] = {s};
+  if (bk_export_step(list, nullptr, 1, "/nonexistent-dir/x.step") || !*bk_last_error()) fail(shape + ": STEP into nowhere written");
+  bk_mesh_free(m), bk_free(s);
+}
+
 int main() {
   signal(SIGALRM, watchdog);
   int iters = getenv("BCAD_FUZZ_ITERS") ? std::max(1, atoi(getenv("BCAD_FUZZ_ITERS"))) : 1;
   if (getenv("BCAD_FUZZ_SEED")) seed ^= strtoull(getenv("BCAD_FUZZ_SEED"), nullptr, 10) * 0x2545f4914f6cdd1dull;
   printf("fuzz: %d× (seed %llu)\n", iters, (unsigned long long)seed);
-  // BCAD_FUZZ_ONLY: sculpting, figures or extremes alone.
+  // BCAD_FUZZ_ONLY: sculpting, figures, extremes or api alone.
   std::string only = getenv("BCAD_FUZZ_ONLY") ? getenv("BCAD_FUZZ_ONLY") : "";
 
   // Sculpting.
@@ -522,6 +693,29 @@ int main() {
     check("extremes: shapes, placements, merges, meshes, roundings, bevels, coves, hollows, remeshes, splits, sections, distances and fasteners: "
           "refused (saying why) or made sound",
           failures == before, fmt("%.0f made, %.0f refused", made, refused));
+  }
+  // The rest of the API.
+  if (only.empty() || only == "api") {
+    printf("— the rest of the API\n");
+    int before = failures;
+    for (int k = 0; k < 30 * iters; k++) apiRun(k);
+    // Figures from fewer numbers (the rest standard), none, or none at all; their pose named.
+    std::vector<double> few(BK_FIG_COUNT);
+    bk_figure_defaults(1, few.data());
+    for (int count : {0, 1, 5, 12, BK_FIG_COUNT - 1}) {
+      doing(fmt("figure of %.0f numbers", count), 60);
+      BKShape *f = bk_figure(few.data(), count, 1);
+      std::string why;
+      if (f && !sound(f, why)) fail(fmt("a figure of %.0f numbers: ", count) + why);
+      bk_free(f);
+      bk_figure_pose_of(few.data(), count);
+    }
+    if (bk_figure(nullptr, BK_FIG_COUNT, 1) || bk_figure_pose_of(nullptr, 3) != -1) fail("a figure of no numbers");
+    if (bk_torx_count() <= 0) fail("no Torx sizes");
+    check("the rest of the API: picks of its own faces, edges and corners rounded, bevelled, coved; hollows opened and walled; edges "
+          "listed; distances; broken meshes; mesh bodies; STEP; figures of fewer numbers; a sculpt's changed lists: refused saying why, or "
+          "made sound",
+          failures == before, fmt("%.0f made, %.0f refused", apiMade, apiRefused));
   }
   alarm(0);
   printf(failures ? "%d FAILED\n" : "ALL OK\n", failures);
