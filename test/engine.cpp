@@ -3888,8 +3888,8 @@ int main() {
     // (Found by test/fuzz.cpp.) A prism of thousands of sides refused (rounding it took minutes); walls as thick as half
     // the body refused at once (working them out took minutes), thinner ones still made; a cove far wider than the body
     // refused at once (cutting it took most of a minute), saying how large one may be.
-    double manySides[3] = {1e4, 3, 1.35}, sides64[3] = {64, 20, 10}, bowl[2] = {98.445, 227.195}, slim[3] = {3, 22.97, 3.805};
-    BKShape *many = bk_primitive(BK_PYRAMID, manySides), *p64 = bk_primitive(BK_PRISM, sides64), *bw = bk_primitive(BK_BOWL, bowl);
+    double manySides[3] = {1e4, 3, 1.35}, sides24[3] = {24, 20, 10}, bowl[2] = {98.445, 227.195}, slim[3] = {3, 22.97, 3.805};
+    BKShape *many = bk_primitive(BK_PYRAMID, manySides), *p24 = bk_primitive(BK_PRISM, sides24), *bw = bk_primitive(BK_BOWL, bowl);
     auto t0 = std::chrono::steady_clock::now();
     BKShape *thick = bk_hollow(bw, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 60, nullptr);
     double thickTook = ms(t0);
@@ -3899,15 +3899,18 @@ int main() {
     t0 = std::chrono::steady_clock::now();
     BKShape *wide = bk_cove(bar, &kb, body, 1, 1000, &largest, &miss);
     double wideTook = ms(t0);
-    check("thousands of sides refused, 64 taken; walls too thick for the body refused at once, thinner ones made; a cove far wider than it refused at once",
-          !many && p64 && !thick && thickTook < 2000 && thin && !wide && wideTook < 2000 && near(largest, 1.49, 0.01),
+    const double sides25[3] = {25, 20, 10};
+    BKShape *p25 = bk_primitive(BK_PRISM, sides25);
+    check("thousands of sides refused, and 25; 24 taken; walls too thick for the body refused at once, thinner ones made; a cove far wider than it refused at once",
+          !many && !p25 && p24 && !thick && thickTook < 2000 && thin && !wide && wideTook < 2000 && near(largest, 1.49, 0.01),
           fmt("walls refused in %.0f ms, the cove in %.0f ms (largest %.2f)", thickTook, wideTook, largest));
-    for (BKShape *x : {many, p64, bw, thick, thin, bar, wide}) bk_free(x);
+    for (BKShape *x : {many, p24, p25, bw, thick, thin, bar, wide}) bk_free(x);
   }
-  // A cove wider than the faces beside it along every edge of a 64-sided prism: refused at once (it took three minutes).
+  // A cove wider than the faces beside it along every edge of a 24-sided prism: refused at once (on 64 sides, it took
+  // three minutes).
   {
-    const double p64[3] = {64, 4.1341596068988542, 51.091373069366874};
-    BKShape *prism = bk_primitive(BK_PRISM, p64);
+    const double p24[3] = {24, 4.1341596068988542, 51.091373069366874};
+    BKShape *prism = bk_primitive(BK_PRISM, p24);
     int kb = BK_PICK_BODY, miss = 0;
     double body[6] = {0, 0, 0, 0, 0, 0}, most = 0;
     auto t0 = std::chrono::steady_clock::now();
