@@ -145,6 +145,10 @@ class Sculptor {
   std::priority_queue<uint32_t, std::vector<uint32_t>, std::greater<uint32_t>> freeTris, freePts;
   size_t live = 0;
   double detail = 0;
+  // Made finer no further than this many triangles in all (as a remesh); and each dab (however many steps it's cut
+  // into) changing at most dabBudget sides, so it stays quick (the next carries on).
+  static constexpr size_t mostTriangles = 1500000;
+  int dabBudget = 0;
 
   std::vector<TreeNode> nodes;  // a box tree over the triangles (a node's children always come after it)
   std::vector<int> leafOf, parentOf;
@@ -220,10 +224,11 @@ class Sculptor {
   void offsets(V3 c, double pressure, double radius, int k, std::vector<uint32_t> &which, std::vector<double> &weight, std::vector<V3> &by) const;
   void dabAt(V3 c, double pressure, double radius);
   // The triangles made the detail size round `seeds`' points (the sides for which inside(a, b) holds), at most `most`
-  // changes; `mark`: a point made on a side between two points of `region` joins it. The points changed are left in
-  // `fresh`; their normals made again unless `later` (the caller moves them with the rest).
+  // changes (how many it made, returned), none splitting past mostTriangles; `mark`: a point made on a side between two
+  // points of `region` joins it. The points changed are left in `fresh`; their normals made again unless `later` (the
+  // caller moves them with the rest).
   template <class Inside>
-  void retopo(const std::vector<uint32_t> &seeds, Inside inside, bool mark, int most, bool later);
+  int retopo(const std::vector<uint32_t> &seeds, Inside inside, bool mark, int most, bool later);
   bool split(uint32_t e, uint32_t &m);
   bool collapse(uint32_t e);
   bool flip(uint32_t e);

@@ -3057,6 +3057,29 @@ int main() {
       bk_sculpt_free(s);
     }
 
+    // A snake hook pulled far in one move, with the detail on: that move makes the stretch finer only so far (it stays
+    // quick), the next carries on, the mesh sound. (Pulled far fast, it once grew past a million triangles at once.)
+    {
+      BKSculpt *s = make(slab, 0.5);
+      uint32_t c = nearest(s, top);
+      V3 at = pt(s, c);
+      bk_sculpt_set_detail(s, 0.3);
+      BKBrush b = brushOf(BK_BRUSH_SNAKE_HOOK, 20, 1);
+      double a[3] = {at.x, at.y, at.z}, far1[3] = {at.x, at.y, at.z + 400}, far2[3] = {at.x, at.y, at.z + 800};
+      int before = bk_sculpt_live_triangle_count(s);
+      bk_sculpt_begin_brush(s, &b, a);
+      bk_sculpt_dab(s, far1, 1, 1);
+      int first = bk_sculpt_live_triangle_count(s);
+      bk_sculpt_dab(s, far2, 1, 1);
+      int second = bk_sculpt_live_triangle_count(s);
+      bk_sculpt_end(s), bk_sculpt_sync(s);
+      std::string why = bk_sculpt_check(s);
+      check("brushes: a snake hook pulled far in one move makes it finer only so far, the next move carries on",
+            first > before && first - before <= 2 * 40000 + 100 && second > first && why.empty(),
+            fmt("%.0f → %.0f → %.0f triangles ", before, first, second) + why);
+      bk_sculpt_free(s);
+    }
+
     // Each new brush (with a tip, mirrored), undone and done again to the bit; random strokes of every brush with any
     // tip and mirrors keep the mesh sound, all undone the start again.
     {

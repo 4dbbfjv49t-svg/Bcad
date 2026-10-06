@@ -1431,13 +1431,13 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
     }
     std::vector<uint32_t> seeds(sum);
     // (Their normals made again with the points the dab moves, but for the Detail brush, which moves none.)
-    retopo(seeds,
-           [&](uint32_t a, uint32_t b) {
-             for (int j = 0; j < m; j++)
-               if (toSegment(flip(c, ks[j]), p[a], p[b]) < r) return true;
-             return false;
-           },
-           false, 8000, brush != Detail);
+    dabBudget -= retopo(seeds,
+                        [&](uint32_t a, uint32_t b) {
+                          for (int j = 0; j < m; j++)
+                            if (toSegment(flip(c, ks[j]), p[a], p[b]) < r) return true;
+                          return false;
+                        },
+                        false, std::min(8000, dabBudget), brush != Detail);
     if (brush == Layer) anchorLayer();
   } else {
     fresh.clear();
@@ -1510,6 +1510,7 @@ void Sculptor::anchorLayer() {
 
 void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
   if (!stroking) return;
+  dabBudget = 40000;
   pressure = std::min(1.0, std::max(0.0, pressure));
   tiltNow = std::isfinite(tilt) ? std::min(85.0, std::max(-85.0, tilt)) : tip.tilt;
   // (A pen pressed lightly may make the brush smaller, down to a twentieth.)
@@ -1562,9 +1563,9 @@ void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
 // much they ask for it, then by their points' numbers); at most `most` changes in all, so a dab stays quick (the next
 // dab carries on).
 template <class Inside>
-void Sculptor::retopo(const std::vector<uint32_t> &seeds, Inside inside, bool mark, int most, bool later) {
+int Sculptor::retopo(const std::vector<uint32_t> &seeds, Inside inside, bool mark, int most, bool later) {
   fresh.clear();
-  if (!(strokeDetail > 0) || seeds.empty()) return;
+  if (!(strokeDetail > 0) || seeds.empty() || most <= 0) return 0;
   const double side = strokeDetail * sideOfDetail, hi = side * 4 / 3, lo = side * 0.6, hi2 = hi * hi, lo2 = lo * lo;
   struct Side {
     double key;
@@ -1633,7 +1634,7 @@ void Sculptor::retopo(const std::vector<uint32_t> &seeds, Inside inside, bool ma
         x = swing(x);
       } while (x != c);
     }
-    while (!heap.empty() && left > 0) {
+    while (!heap.empty() && left > 0 && live < mostTriangles) {
       Side s = pop();
       if (!ptAlive[s.a] || !ptAlive[s.b] || !(norm2(p[s.a] - p[s.b]) > hi2)) continue;
       uint32_t e = sideOf(s.a, s.b), m;
@@ -1704,6 +1705,7 @@ void Sculptor::retopo(const std::vector<uint32_t> &seeds, Inside inside, bool ma
   fresh.erase(std::remove_if(fresh.begin(), fresh.end(), [&](uint32_t v) { return !ptAlive[v]; }), fresh.end());
   if (later) refreshBoxes();
   else moved(fresh);
+  return most - left;
 }
 
 // Side e (the one facing corner e) halved: a point at its middle, its two triangles four. False when its two triangles
