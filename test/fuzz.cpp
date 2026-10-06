@@ -349,7 +349,7 @@ int main() {
     static const double normals[] = {0, 1, -1, 1e-300, NAN}, clearances[] = {0, 0.2, -1, NAN, 1e3};
     auto size = [&]() { return rnd() % 3 ? std::exp(uni() * 9 - 2) : pick(sizes); };
     std::string last;  // the last primitive's numbers
-    double largest = 0;
+    double largest = 0, smallest = INFINITY;
     bool wild = false;
     auto primitive = [&](int kind) {
       double p[5];
@@ -359,8 +359,11 @@ int main() {
       if (kind == BK_OVAL) p[2] = rnd() % 4 ? 5 + uni() * 170 : pick(sizes);
       if (kind == BK_OVAL_TORUS) p[3] = rnd() % 4 ? 5 + uni() * 170 : pick(sizes);
       last = fmt("kind %.0f: %.17g", kind, p[0]) + fmt(" %.17g %.17g", p[1], p[2]) + fmt(" %.17g %.17g", p[3], p[4]);
-      largest = 0, wild = false;
-      for (double v : p) wild = wild || !(v >= 0 && v <= 1e4), largest = std::max(largest, std::fabs(v));
+      largest = 0, smallest = INFINITY, wild = false;
+      for (double v : p) {
+        wild = wild || !(v >= 0 && v <= 1e4), largest = std::max(largest, std::fabs(v));
+        if (v > 0) smallest = std::min(smallest, v);
+      }
       return bk_primitive(kind, p);
     };
     auto judge = [&](BKShape *s, const std::string &what, bool deep = true) {
@@ -397,7 +400,9 @@ int main() {
       for (int i = 0; i < 3; i++)
         for (int j = 0; j < 3; j++) m[4 * i + j] *= sc;
       m[3] = mv;
-      bool placedTame = sc >= 1e-3 && sc <= 3 && largest * sc <= 1e4 && std::fabs(mv) <= 1e4;
+      // (A mesh's points are floats: moved far, a part smaller than a float's step there can't be told apart from its
+      // neighbour, and its triangles come out with two corners in one place.)
+      bool placedTame = sc >= 1e-3 && sc <= 3 && largest * sc <= 1e4 && std::fabs(mv) <= 1e4 && smallest * sc >= 1e-6 * std::fabs(mv);
       doing(fmt("extremes %.0f: placed (scale %g, moved %g)", k, sc, mv), 60);
       BKShape *t = bk_transform(s, m);
       judge(t, fmt("primitive %.0f placed", kind) + fmt(" at scale %g, moved %g", sc, mv) + fmt(" (case %.0f)", k), placedTame);

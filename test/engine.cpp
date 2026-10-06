@@ -3935,6 +3935,18 @@ int main() {
     if (sec) bk_section_free(sec);
     bk_free(dome);
   }
+  // A thin oval half a metre long hollowed with walls a thousandth of a millimetre: answered at once (its void's surface
+  // on a grid that fine once took 67 million triangles and 14 GB).
+  {
+    const double thin[4] = {478.98941105551825, 0.18942293336042937, 83.946944730478322, 196.44236966108224};
+    BKShape *oval = bk_primitive(BK_OVAL, thin);
+    int miss = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *hollow = oval ? bk_hollow(oval, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 0.001, &miss) : nullptr;
+    double took = ms(t0);
+    check("a thin body half a metre long hollowed with hair-thin walls answered at once", oval && (!timed || took < 5000), fmt("in %.0f ms", took));
+    bk_free(hollow), bk_free(oval);
+  }
   // A bolt's range asked for a number it hasn't, loosely: nothing (it once read past the end of its list).
   {
     BKFastener f{};

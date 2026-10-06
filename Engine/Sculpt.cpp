@@ -677,10 +677,13 @@ bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris,
   V3 lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
   for (uint32_t i : tris) lo = vmin(lo, pts[i]), hi = vmax(hi, pts[i]);
   if (tris.empty() || !std::isfinite(lo.x + lo.y + lo.z + hi.x + hi.y + hi.z)) return why = "nothing to hollow", false;
-  // A grid half the wall apart (coarser where that would take more than 20 million points), over the box and a step
-  // round it.
+  // A grid half the wall apart (coarser where that would take more than 20 million points, or the void's surface, about
+  // three triangles a step squared, more than 3 million triangles: a thin body half a metre long once took 67 million),
+  // over the box and a step round it.
   V3 span = hi - lo;
-  double h = std::max(t / 2, trig::cbrt((span.x + t) * (span.y + t) * (span.z + t) / 2e7));
+  double area = 0;
+  for (size_t q = 0; q + 2 < tris.size(); q += 3) area += norm(cross(pts[tris[q + 1]] - pts[tris[q]], pts[tris[q + 2]] - pts[tris[q]])) / 2;
+  double h = std::max({t / 2, trig::cbrt((span.x + t) * (span.y + t) * (span.z + t) / 2e7), std::sqrt(3 * area / 3e6)});
   Grid g;
   g.h = h;
   for (int a = 0; a < 3; a++) g.o[a] = lo[a] - h, g.n[a] = (int)std::ceil(span[a] / h) + 3;
