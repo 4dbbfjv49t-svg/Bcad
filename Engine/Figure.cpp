@@ -752,8 +752,9 @@ struct Made {
   FigureSpec spec;
   std::shared_ptr<const Model> model;
 };
-std::mutex keptLock;
-std::list<Made> kept;
+// (Made once and never taken down: a figure still being made on another thread as the program ends finds them there.)
+std::mutex &keptLock = *new std::mutex;
+std::list<Made> &kept = *new std::list<Made>;
 
 bool same(const FigureSpec &a, const FigureSpec &b) {
   for (int i = 0; i < FigureNumbers; i++)

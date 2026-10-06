@@ -223,6 +223,7 @@ const char *fastenerMisfit(const BKFastener &f) {
 
 // Each size of the kind in turn into what the others leave it (after one size was changed, the ones depending on it follow).
 void bk_fastener_fit(BKFastener *f) {
+  if (!f) return;
   double *v[] = {&f->length, &f->width, &f->height, &f->angle, &f->seat, &f->drive, &f->recess, &f->depth};
   int fields = bk_fastener_fields(f->kind);
   for (int i : fitOrder) {
@@ -246,6 +247,7 @@ void bk_fastener_fit(BKFastener *f) {
 }
 
 void bk_fastener_defaults(BKFastener *f, int withLength) {
+  if (!f) return;
   const ThreadSize &t = threadOf(f->size);
   int k = f->kind;
   f->width = f->height = f->angle = f->seat = f->drive = f->recess = f->depth = 0;
@@ -275,15 +277,18 @@ void bk_fastener_defaults(BKFastener *f, int withLength) {
 
 // A Phillips size changes the recess with it, to what that size usually has, as far as the head allows.
 void bk_fastener_drive(BKFastener *f, double drive) {
+  if (!f) return;
   f->drive = drive;
   if (phillipsDrive(f->kind)) {
-    int ph = std::max(1, std::min(4, (int)lround(drive)));
+    // (A size that isn't a number, or past what an int holds, the nearest of PH1–PH4.)
+    int ph = (int)lround(std::isfinite(drive) ? std::max(1.0, std::min(4.0, drive)) : 1.0);
     f->recess = phRecess[ph], f->depth = phDepth[ph];
   }
   bk_fastener_fit(f);
 }
 
 void bk_fastener_extent(const BKFastener *fp, double clearance, double *out) {
+  if (!fp || !out) return;
   const BKFastener &f = *fp;
   const ThreadSize &t = threadOf(f.size);
   double c = std::isfinite(clearance) ? std::max(0.0, clearance) : 0, w = f.width, corners = 2 * w / sqrt(3.0);

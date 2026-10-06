@@ -1920,7 +1920,12 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
           return rollAt(A, B, rr, C, TA, TB, nA, nB, convex) && (spillA || alongCut(A, TA) + (r.aShared ? r.aOther * rr : 0) <= r.a) &&
                  (spillB || alongCut(B, TB) + (r.bShared ? r.bOther * rr : 0) <= r.b);
         };
-        double lo = 0, hi = std::max({ra, rb, 1e-6}) * 4;
+        // (Started from the sides' reaches that have one: a side spilling over has none, and halving from there never
+        // came down from infinity, so the most that fitted was said to be nothing.)
+        double from = 1e-6;
+        for (double x : {ra, rb})
+          if (std::isfinite(x)) from = std::max(from, x);
+        double lo = 0, hi = from * 4;
         while (fitsAt(hi) && hi < 1e6) lo = hi, hi *= 2;
         for (int k = 0; k < 60; k++) {
           double m = (lo + hi) / 2;

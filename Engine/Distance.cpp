@@ -176,8 +176,9 @@ struct Tree {
     V3 ext = cb - ca;
     int axis = ext.x >= ext.y && ext.x >= ext.z ? 0 : ext.y >= ext.z ? 1 : 2;
     int half = count / 2;
+    // (Ties broken by number: the same halves on every machine.)
     std::nth_element(order.begin() + first, order.begin() + first + half, order.begin() + first + count,
-                     [&](int u, int v) { return mid[u][axis] < mid[v][axis]; });
+                     [&](int u, int v) { return mid[u][axis] < mid[v][axis] || (mid[u][axis] == mid[v][axis] && u < v); });
     int l = make(first, half, lo, hi, mid);
     int r = make(first + half, count - half, lo, hi, mid);
     nodes[at].left = l, nodes[at].right = r;
@@ -196,12 +197,15 @@ double boxGap2(const Tree::Node &a, const Tree::Node &b) {
 
 // The nearest points between two sets: pairs of boxes taken nearest first, until none can come closer than the best.
 double nearest(const Set &a, const Tree &ta, const Set &b, const Tree &tb, V3 &pa, V3 &pb) {
+  // (Box pairs as near as each other taken in the order of their numbers, and pieces as near as the best kept by theirs:
+  // the same nearest points on every machine, as two faces face to face have many.)
   struct Item {
     double gap;
     int i, j;
-    bool operator<(const Item &o) const { return gap > o.gap; }
+    bool operator<(const Item &o) const { return gap != o.gap ? gap > o.gap : i != o.i ? i > o.i : j > o.j; }
   };
   double best = INFINITY;
+  int bestX = -1, bestY = -1;
   std::priority_queue<Item> queue;
   queue.push({boxGap2(ta.nodes[0], tb.nodes[0]), 0, 0});
   while (!queue.empty()) {
@@ -214,8 +218,9 @@ double nearest(const Set &a, const Tree &ta, const Set &b, const Tree &tb, V3 &p
       for (int x = na.first; x < na.first + na.count; x++)
         for (int y = nb.first; y < nb.first + nb.count; y++) {
           V3 u, v;
-          double d = closestPieces(a, ta.order[x], b, tb.order[y], u, v);
-          if (d < best) best = d, pa = u, pb = v;
+          int px = ta.order[x], py = tb.order[y];
+          double d = closestPieces(a, px, b, py, u, v);
+          if (d < best || (d == best && (px < bestX || (px == bestX && py < bestY)))) best = d, pa = u, pb = v, bestX = px, bestY = py;
         }
       continue;
     }

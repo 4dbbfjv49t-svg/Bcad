@@ -4009,6 +4009,93 @@ int main() {
     check("a flat cone with a hair-thin tip hollowed at once", hollow && (!timed || took < 2000), fmt("in %.0f ms", took));
     bk_free(hollow), bk_free(cone);
   }
+  // Absurd numbers refused, saying why, never undefined: a shape past 100 m, a placement a kilometre off or grown a
+  // millionfold, a torus of 10^300 sides, a fastener's angle of 10^300 (its range still worked out), a merge with a shape
+  // missing, a chain of more than 2000 merges, sizes below zero, a remesh at no detail.
+  {
+    std::string why;
+    auto refused = [&](BKShape *s, const char *says) {
+      why = s ? "made" : bk_last_error();
+      bk_free(s);
+      return !s && why.find(says) != std::string::npos;
+    };
+    const double huge[3] = {2e5, 10, 10}, torus[3] = {1e300, 40, 12}, box[3] = {10, 10, 10};
+    bool big = refused(bk_primitive(BK_BOX, huge), "100 m");
+    bool sides = refused(bk_primitive(BK_TORUS, torus), "tube");
+    BKShape *b = bk_primitive(BK_BOX, box);
+    const double far[12] = {1, 0, 0, 2e6, 0, 1, 0, 0, 0, 0, 1, 0}, grown[12] = {1e7, 0, 0, 0, 0, 1e7, 0, 0, 0, 0, 1e7, 0};
+    bool placed = refused(bk_transform(b, far), "kilometre") && refused(bk_transform(b, grown), "millionfold");
+    bool missing = refused(bk_boolean(BK_INTERSECT, b, nullptr), "missing") && refused(bk_transform(nullptr, far), "no shape");
+    BKFastener f{};
+    f.kind = BK_CONE_NUT, f.size = 4;
+    bk_fastener_defaults(&f, 1);
+    f.angle = 1e300;
+    double r[2] = {-1, -1};
+    bk_fastener_range(&f, BK_SEAT, 0, r);
+    bk_fastener_fit(nullptr), bk_fastener_defaults(nullptr, 1), bk_fastener_drive(nullptr, 2), bk_fastener_extent(nullptr, 0, r);
+    BKShape *chain = bk_copy(b);
+    std::string deep;
+    for (int k = 0; k < 2100 && chain; k++) {
+      BKShape *next = bk_boolean(BK_UNION, chain, b);
+      if (!next) deep = bk_last_error();
+      bk_free(chain);
+      chain = next;
+    }
+    bool chained = !chain && deep.find("2000") != std::string::npos;
+    bk_free(chain);
+    int kinds[1] = {BK_PICK_BODY};
+    double pick[6] = {0, 0, 0, 0, 0, 1};
+    bool negative = refused(bk_fillet(b, kinds, pick, 1, -1, nullptr, nullptr), "below zero") &&
+                    refused(bk_hollow(b, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, -1, nullptr), "thinner than nothing");
+    const double I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKSculptMesh *none = bk_remesh(b, I, 0);
+    bool detail = !none && std::string(bk_last_error()).find("detail") != std::string::npos;
+    bk_sculpt_mesh_free(none);
+    bk_free(b);
+    check("absurd numbers refused saying why: 100 m, a kilometre off, 10^300 sides, a shape missing, 2000 merges deep, below zero, no detail",
+          big && sides && placed && missing && std::isfinite(r[0]) && chained && negative && detail, why);
+  }
+  // A mesh with a piece inside out beside the rest (a larger one hiding it in the total volume) refused; one inside out
+  // within another (a hollow) kept.
+  {
+    auto cube = [](float x0, float s, bool flip, std::vector<float> &p, std::vector<uint32_t> &t) {
+      uint32_t o = (uint32_t)(p.size() / 3);
+      for (int i = 0; i < 8; i++) p.insert(p.end(), {x0 + (i & 1 ? s : 0), (i & 2 ? s : 0) - s / 2, (i & 4 ? s : 0) - s / 2});
+      const uint32_t f[12][3] = {{0, 2, 1}, {1, 2, 3}, {4, 5, 6}, {5, 7, 6}, {0, 1, 4}, {1, 5, 4}, {2, 6, 3}, {3, 6, 7}, {0, 4, 2}, {2, 4, 6}, {1, 3, 5}, {3, 7, 5}};
+      for (auto &q : f) t.insert(t.end(), {o + q[0], o + (flip ? q[2] : q[1]), o + (flip ? q[1] : q[2])});
+    };
+    std::vector<float> p1, p2;
+    std::vector<uint32_t> t1, t2;
+    cube(0, 20, false, p1, t1), cube(30, 5, true, p1, t1);    // beside it
+    cube(-10, 20, false, p2, t2), cube(-2.5f, 5, true, p2, t2);  // within it (y and z centred alike)
+    BKShape *beside = bk_mesh_shape(p1.data(), (int)p1.size() / 3, t1.data(), (int)t1.size() / 3);
+    std::string why = beside ? "" : bk_last_error();
+    BKShape *within = bk_mesh_shape(p2.data(), (int)p2.size() / 3, t2.data(), (int)t2.size() / 3);
+    check("a mesh with a piece inside out beside the rest refused; one as a hollow within kept", !beside && why.find("inside out") != std::string::npos && within,
+          why);
+    bk_free(beside), bk_free(within);
+  }
+  // Mirrored, a dab on the mirror's plane raises it as much as one without the mirror (the two copies there added up:
+  // twice as high, and a smoothing overshot).
+  {
+    const double b20[3] = {20, 20, 20}, I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKShape *box = bk_primitive(BK_BOX, b20);
+    BKSculptMesh *r = bk_remesh(box, I, 0.5);
+    double rise[2] = {0, 0};
+    for (int mirrored = 0; mirrored < 2 && r; mirrored++) {
+      BKSculpt *s = bk_sculpt_new(r->positions, r->vertexCount, r->indices, r->triangleCount);
+      double at[3] = {0, 0, 10}, o[3] = {0, 0.1, 100}, down[3] = {0, 0, -1}, hit[3], n[3];
+      bk_sculpt_begin(s, BK_BRUSH_DRAW, at, 3, 0.5, mirrored, 0);
+      bk_sculpt_dab(s, at, 1, 1);
+      bk_sculpt_end(s);
+      bk_sculpt_ray(s, o, down, hit, n);
+      rise[mirrored] = hit[2] - 10;
+      bk_sculpt_free(s);
+    }
+    check("a mirrored dab on the mirror's plane raises it as much as one without", rise[0] > 0.1 && std::fabs(rise[1] - rise[0]) < 1e-6 * rise[0] + 1e-9,
+          fmt("%.4f and %.4f", rise[0], rise[1]));
+    bk_sculpt_mesh_free(r), bk_free(box);
+  }
   // Speed of what the app waits on with big sculpts. A flat box remeshed (its points on a grid) and sculpted: its pieces
   // counted (its points' hash once sent them all to one slot: 7 s), its mesh made (17 s after a cut). A fine sphere's
   // 500k triangles: checked when made, then hollowed (on the grid: walls from every triangle took 11 s).

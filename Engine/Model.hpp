@@ -205,6 +205,9 @@ struct Node {
   Shape a, b;
   V3 p, n;
   int side = 0;
+  // How many steps it stands on, down to its deepest primitive (a chain of them is refused past a few thousand, as
+  // working it out goes as deep on the stack).
+  int depth = 1;
   mutable std::vector<std::pair<double, std::shared_ptr<const Solid>>> made;
   mutable std::vector<std::pair<double, int>> counted;  // its pieces at a detail, once counted
   // A treatment's or hollow's result as made when asked for (what was shown): what it stands for at any other detail

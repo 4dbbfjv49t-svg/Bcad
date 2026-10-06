@@ -37,8 +37,8 @@ inline double kernelCos(double x, double y) {
   return w + (((1.0 - w) - hz) + (z * r - x * y));
 }
 
-// x less a whole number n of quarter turns, as y0 + y1 (|y0 + y1| ≤ π/4 or a hair more); returns n. Exact to well past a
-// double for |x| up to about a million; past that still the same on every machine, if less exact.
+// x less a whole number n of quarter turns, as y0 + y1 (|y0 + y1| ≤ π/4 or a hair more); returns n's remainder by 4.
+// Exact to well past a double for |x| up to about a million; past that still the same on every machine, if less exact.
 inline int reduce(double x, double &y0, double &y1) {
   const double invpio2 = 6.36619772367581382433e-01, pio2_1 = 1.57079632673412561417e+00, pio2_1t = 6.07710050650619224932e-11,
                pio2_2 = 6.07710050630396597660e-11, pio2_2t = 2.02226624879595063154e-21, pio2_3 = 2.02226624871116645580e-21,
@@ -58,7 +58,9 @@ inline int reduce(double x, double &y0, double &y1) {
     }
   }
   y1 = (r - y0) - w;
-  return (int)(int64_t)fn;
+  // (Only the quarter turn matters to the callers: fn's remainder by 4, exact for any fn, so no cast past what an int
+  // holds; the same low two bits as fn itself.)
+  return (int)std::fmod(fn, 4.0);
 }
 
 }  // namespace detail

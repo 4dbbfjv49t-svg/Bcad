@@ -333,7 +333,15 @@ bool body(const Solid &s, const std::string &name, Out &o, std::vector<int> &sol
 
 bool stepText(const std::vector<Shape> &shapes, const std::vector<std::string> &names, const std::string &file, std::string &out,
               std::string &why, size_t *which) {
+  // (The header first, the entities after it in the same text, which is then handed over: one copy of a file that can
+  // be hundreds of megabytes, not two.)
+  char stamp[32] = "";
+  std::time_t now = std::time(nullptr);
+  std::tm utc{};
+  if (gmtime_r(&now, &utc)) std::strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &utc);
   Out o;
+  o.text = "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('Bcad model'),'2;1');\nFILE_NAME(" + str(file) + ",'" + stamp +
+           "',(''),(''),'Bcad','Bcad','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n";
   int app = o.add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
   o.add("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000," + ref(app) + ")");
   int mm = o.add("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
@@ -364,14 +372,8 @@ bool stepText(const std::vector<Shape> &shapes, const std::vector<std::string> &
     int rep = o.add("ADVANCED_BREP_SHAPE_REPRESENTATION(" + str(name) + "," + list(items) + "," + ref(context) + ")");
     o.add("SHAPE_DEFINITION_REPRESENTATION(" + ref(shape) + "," + ref(rep) + ")");
   }
-  char stamp[32] = "";
-  std::time_t now = std::time(nullptr);
-  std::tm utc{};
-  if (gmtime_r(&now, &utc)) std::strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &utc);
-  out = "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('Bcad model'),'2;1');\nFILE_NAME(" + str(file) + ",'" + stamp +
-        "',(''),(''),'Bcad','Bcad','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n";
-  out += o.text;
-  out += "ENDSEC;\nEND-ISO-10303-21;\n";
+  o.text += "ENDSEC;\nEND-ISO-10303-21;\n";
+  out = std::move(o.text);
   return true;
 }
 

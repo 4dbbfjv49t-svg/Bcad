@@ -78,6 +78,10 @@ Lines cast(const std::vector<V3> &P, const std::vector<uint32_t> &T, const Grid 
         double qb = g.at(b, j), qc = g.at(c, k);
         if (turn(A[b], A[c], B[b], B[c], qb, qc) <= 0 || turn(B[b], B[c], C[b], C[c], qb, qc) <= 0 || turn(C[b], C[c], A[b], A[c], qb, qc) <= 0) continue;
         double at = A[a] - (nrm[b] * (qb - A[b]) + nrm[c] * (qc - A[c])) / nrm[a];
+        // (Nearly edge-on, its normal's part along the axis can round to nothing or to the wrong sign: the crossing is
+        // then kept within the triangle's own span, never infinite or not a number.)
+        double la = std::min({A[a], B[a], C[a]}), ha = std::max({A[a], B[a], C[a]});
+        if (!std::isfinite(at) || at < la - (ha - la) || at > ha + (ha - la)) at = std::isfinite(at) ? std::min(ha, std::max(la, at)) : (la + ha) / 2;
         hits.push_back({(uint32_t)L.line(j, k, g), {at, sign}});
       }
   }
@@ -1321,7 +1325,8 @@ void Sculptor::begin(int b, V3 at, double r, double s, int mir, bool inv, const 
   if (stroking) end();
   stroking = true, dabbed = false;
   brush = b >= Grab && b <= Twist ? b : Draw;
-  radius = r > 1e-9 ? r : 1e-9, strength = std::min(1.0, std::max(0.0, s));
+  // (At most 100 m across, as a shape is: a dab far larger moved its points past what a double holds.)
+  radius = r > 1e-9 ? std::min(r, 1e5) : 1e-9, strength = std::min(1.0, std::max(0.0, s));
   mirror = mir & 7, invert = inv;
   middle = std::isfinite(mid.x) && std::isfinite(mid.y) && std::isfinite(mid.z) ? mid : V3{0, 0, 0};
   auto kept = [](double v, double lo, double hi, double otherwise) { return std::isfinite(v) ? std::min(hi, std::max(lo, v)) : otherwise; };
@@ -1438,8 +1443,10 @@ void Sculptor::offsets(V3 c, double pressure, double radius, int k, std::vector<
 }
 
 // One dab: the triangles under it made the detail size first (with the detail on), then what it does at c and at each of
-// its mirrors, all from the points as they are, together (where two reach the same point their moves add up; for layer
-// the higher height is taken).
+// its mirrors, all from the points as they are, together. Where two reach the same point (a stroke along the mirror's
+// plane), their moves are added and weighed down to the strongest one's share, so it moves as far as one dab moves it:
+// added as they were, a smoothing or a flattening there overshot, and a dab stood twice as high. For layer, the higher
+// height is taken.
 void Sculptor::dabAt(V3 c, double pressure, double r) {
   int ks[8], m = copies(ks);
   if (strokeDetail > 0) {
@@ -1466,22 +1473,35 @@ void Sculptor::dabAt(V3 c, double pressure, double r) {
   if (brush == Detail) return;
   for (int j = 0; j < m; j++) offsets(mirrored(c, ks[j]), pressure, r, ks[j], idx[j], wt[j], off[j]);
   sum = idx[0], offSum = off[0];
-  bool higher = brush == Layer && !invert;
+  if (m > 1) wSum = wt[0], wMax = wt[0];
+  bool higher = brush == Layer && !invert, shared = false;
   for (int j = 1; j < m; j++) {
-    merged.clear(), offMerged.clear();
+    merged.clear(), offMerged.clear(), wSumMerged.clear(), wMaxMerged.clear();
     size_t a = 0, b = 0;
     while (a < sum.size() || b < idx[j].size()) {
-      if (b == idx[j].size() || (a < sum.size() && sum[a] < idx[j][b])) merged.push_back(sum[a]), offMerged.push_back(offSum[a++]);
-      else if (a == sum.size() || idx[j][b] < sum[a]) merged.push_back(idx[j][b]), offMerged.push_back(off[j][b++]);
-      else if (brush == Layer) {
-        double x = offSum[a++].x, y = off[j][b++].x;
-        merged.push_back(idx[j][b - 1]), offMerged.push_back(V3{higher ? std::max(x, y) : std::min(x, y), 0, 0});
+      if (b == idx[j].size() || (a < sum.size() && sum[a] < idx[j][b])) {
+        merged.push_back(sum[a]), offMerged.push_back(offSum[a]), wSumMerged.push_back(wSum[a]), wMaxMerged.push_back(wMax[a]);
+        a++;
+      } else if (a == sum.size() || idx[j][b] < sum[a]) {
+        merged.push_back(idx[j][b]), offMerged.push_back(off[j][b]), wSumMerged.push_back(wt[j][b]), wMaxMerged.push_back(wt[j][b]);
+        b++;
+      } else if (brush == Layer) {
+        double x = offSum[a].x, y = off[j][b].x;
+        merged.push_back(idx[j][b]), offMerged.push_back(V3{higher ? std::max(x, y) : std::min(x, y), 0, 0});
+        wSumMerged.push_back(wSum[a]), wMaxMerged.push_back(wMax[a]);
+        a++, b++;
       } else {
-        merged.push_back(sum[a]), offMerged.push_back(offSum[a++] + off[j][b++]);
+        merged.push_back(sum[a]), offMerged.push_back(offSum[a] + off[j][b]);
+        wSumMerged.push_back(wSum[a] + wt[j][b]), wMaxMerged.push_back(std::max(wMax[a], wt[j][b]));
+        shared = true;
+        a++, b++;
       }
     }
-    sum.swap(merged), offSum.swap(offMerged);
+    sum.swap(merged), offSum.swap(offMerged), wSum.swap(wSumMerged), wMax.swap(wMaxMerged);
   }
+  if (shared)
+    for (size_t k = 0; k < sum.size(); k++)
+      if (wSum[k] > wMax[k]) offSum[k] = offSum[k] * (wMax[k] / wSum[k]);
   if (brush == Layer) {
     // Each point raised to the height reached so far in this stroke along its way out where it started, never lower.
     growLayer();
@@ -1542,7 +1562,10 @@ void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
     for (size_t k = 0; k < grabbed.size(); k++) {
       recordPoint(grabbed[k]);
       V3 q = grabFrom[k] + d * grabWeight[0][k];
-      for (int j = 1; j < m; j++) q = q + flip(d, ks[j]) * grabWeight[j][k];
+      double total = grabWeight[0][k], most = total;
+      for (int j = 1; j < m; j++) q = q + flip(d, ks[j]) * grabWeight[j][k], total += grabWeight[j][k], most = std::max(most, grabWeight[j][k]);
+      // (Taken by two copies, near the mirror's plane: it follows as far as by one, as in a dab.)
+      if (total > most) q = grabFrom[k] + (q - grabFrom[k]) * (most / total);
       p[grabbed[k]] = q;
     }
     moved(grabbed);
@@ -1875,6 +1898,8 @@ uint32_t Sculptor::newPoint(V3 at) {
   }
   recordPoint(v);
   p[v] = at, ptAlive[v] = 1;
+  // (A slot used again: the layer height the point gone from it had this stroke isn't this one's.)
+  if (v < layerOf.size()) layerOf[v] = 0;
   if (!changedFlag[v]) changedFlag[v] = 1, changed.push_back(v);
   return v;
 }

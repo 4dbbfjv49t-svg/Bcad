@@ -28,7 +28,11 @@ double chordAngle(double r, double d) {
   return std::min(a, maxTurn);
 }
 
-int countFor(double span, double r, double d) { return std::max(1, (int)std::ceil(std::fabs(span) / chordAngle(r, d) - 1e-9)); }
+// (At most a million: a radius so large its chords barely turn counted as such, never past what an int holds.)
+int countFor(double span, double r, double d) {
+  double n = std::ceil(std::fabs(span) / chordAngle(r, d) - 1e-9);
+  return n >= 1e6 ? 1000000 : std::max(1, (int)(n > 0 ? n : 1));
+}
 
 }  // namespace
 
@@ -742,6 +746,26 @@ std::shared_ptr<Model> meshModel(const std::vector<V3> &pts, const std::vector<u
   s.centroids();
   double v = s.meshVolume();
   if (!(v > 0)) return why = "inside out", nullptr;
+  // Each piece the right way out, or a hollow inside one that is (a piece inside out beside the rest, a larger one
+  // hiding it in the sum, was let through, and the next merge saw a solid less than nothing there).
+  if (s.faces.size() > 1) {
+    std::vector<double> vol(s.faces.size(), 0);
+    for (size_t t = 0; t < nt; t++) {
+      V3 a = s.p[s.tri[3 * t]], b = s.p[s.tri[3 * t + 1]], c = s.p[s.tri[3 * t + 2]];
+      vol[s.triFace[t]] += dot(a, cross(b, c)) / 6;
+    }
+    Solid outer;
+    outer.p = s.p;
+    for (size_t t = 0; t < nt; t++)
+      if (vol[s.triFace[t]] > 0) outer.tri.insert(outer.tri.end(), {s.tri[3 * t], s.tri[3 * t + 1], s.tri[3 * t + 2]});
+    for (size_t t = 0; t < nt; t++) {
+      uint32_t f = s.triFace[t];
+      if (!(vol[f] < 0)) continue;
+      V3 q = (s.p[s.tri[3 * t]] + s.p[s.tri[3 * t + 1]] + s.p[s.tri[3 * t + 2]]) / 3;
+      if (!inside(outer, q)) return why = "inside out", nullptr;
+      vol[f] = 0;  // (one point of each is enough)
+    }
+  }
   // Passing through itself (a sculpt pulled through itself, pieces overlapping): the solid it encloses, its outer skin.
   if (!uncrossed && selfCrossing(s.p, s.tri)) {
     Solid r = resolved(s);
@@ -780,6 +804,10 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
     if (!std::isfinite(p[i])) return fail("sizes must be numbers");
   for (int i = 0; i < counts[kind]; i++)
     if (p[i] < 0) return fail("sizes can't be below zero");
+  // (Past 100 m: no printer's, and finer than its size allows, its mesh would take more memory than any machine has.)
+  for (int i = 0; i < counts[kind]; i++)
+    if (p[i] > 1e5 && !((kind == BK_PRISM || kind == BK_PYRAMID || kind == BK_TORUS || kind == BK_OVAL_TORUS) && i == 0))
+      return fail("a shape is at most 100 m across");
   for (int i : above[kind])
     if (p[i] < 0.001) return fail("sizes must be above zero");
   if (kind == BK_CONE && std::max(p[0], p[1]) < 0.001) return fail("a cone needs one end wider than zero");
@@ -820,6 +848,8 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
     break;
   }
   case BK_TORUS: {
+    // (A number of sides past what an int holds is no tube shape: not rounded into one.)
+    if (!(std::fabs(p[0]) < 1000)) return fail("unknown tube shape");
     int sides = (int)std::lround(p[0]);
     if (sides != 0 && sides != 3 && sides != 6) return fail("unknown tube shape");
     double tube = p[2] / 2, ring = p[1] / 2 - tube;
@@ -891,6 +921,8 @@ bool primitive(int kind, const double *p, Shape &out, std::string &why) {
   }
   case BK_OVAL_TORUS: {
     // A tube along the oval through its middle, upright all the way round.
+    // (A number of sides past what an int holds is no tube shape: not rounded into one.)
+    if (!(std::fabs(p[0]) < 1000)) return fail("unknown tube shape");
     int sides = (int)std::lround(p[0]);
     if (sides != 0 && sides != 3 && sides != 6) return fail("unknown tube shape");
     double w = p[4] / 2, a = p[1] / 2 - w, b = p[2] / 2 - w, t = std::min(std::max(p[3], 5.0), 175.0) * pi / 180;

@@ -4703,6 +4703,13 @@ final class Workbench: DesignHost {
     }
 
     // Written on the kernel's thread; `done` learns whether it was.
+    // A file written aside put in the place of the one at `url` (or where it would be): whether it is.
+    nonisolated static func put(_ aside: URL, at url: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) { return (try? fm.replaceItemAt(url, withItemAt: aside)) != nil }
+        return (try? fm.moveItem(at: aside, to: url)) != nil
+    }
+
     func export(_ bodies: [Solid], step: Bool, to url: URL, done: @escaping (Bool) -> Void = { _ in }) {
         guard mayWrite() else { done(false); return }
         let fit = settings.fit, note = L("Exporting…"), printed = doc.printed(bodies)
@@ -4714,8 +4721,12 @@ final class Workbench: DesignHost {
             var ok = false
             var problem: (String, FileProblem)?
             if step {
-                let out = Kernel.shared.exportStep(printed, to: url.path)
-                ok = out.ok
+                // Written aside first, then put in the file's place: a failed export (a full disk) leaves the file there
+                // as it was, not cut short.
+                let aside = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".step")
+                let out = Kernel.shared.exportStep(printed, to: aside.path)
+                ok = out.ok && Self.put(aside, at: url)
+                try? FileManager.default.removeItem(at: aside)
                 problem = out.problem.map { (printed[$0.0].name, $0.1) }
             } else {
                 // Nothing written when a body isn't fit to print.

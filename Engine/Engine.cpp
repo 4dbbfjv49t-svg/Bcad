@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,13 +32,38 @@ const char *bk_last_error(void) { return lastError.c_str(); }
 
 const Shape &bce::heldShape(const BKShape *s) { return s->shape; }
 
+// Whatever the engine threw (out of memory above all: a mesh of hundreds of millions of triangles asked for) caught at
+// the C API, said in bk_last_error and answered as a failure: never a crash of the app.
+static void caught() {
+  try {
+    throw;
+  } catch (const std::bad_alloc &) {
+    lastError = "not enough memory for this";
+  } catch (const std::exception &e) {
+    lastError = std::string("failed: ") + e.what();
+  } catch (...) {
+    lastError = "failed";
+  }
+}
+
+// A step on `on` (and `also`): how deep it then stands, or 0 with the reason said when that's past what's worked out
+// (each step a level deeper on the stack).
+static int deeper(const char *what, const Shape &on, const Shape *also = nullptr) {
+  int d = 1 + std::max(on.node->depth, also ? also->node->depth : 0);
+  if (d > 2000) {
+    lastError = std::string(what) + ": more than 2000 steps one on another";
+    return 0;
+  }
+  return d;
+}
+
 static bool finite(const double *v, int n) {
   for (int i = 0; i < n; i++)
     if (!std::isfinite(v[i])) return false;
   return true;
 }
 
-BKShape *bk_primitive(int kind, const double *p) {
+BKShape *bk_primitive(int kind, const double *p) try {
   Shape s;
   std::string why;
   if (!p || !primitive(kind, p, s, why)) {
@@ -44,9 +71,11 @@ BKShape *bk_primitive(int kind, const double *p) {
     return nullptr;
   }
   return new BKShape{s};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) {
+BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) try {
   if (!positions || !indices || vertexCount < 0 || triangleCount < 0) return lastError = "mesh: no points or triangles", nullptr;
   std::vector<V3> pts((size_t)vertexCount);
   for (size_t i = 0; i < pts.size(); i++) pts[i] = {positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]};
@@ -55,35 +84,47 @@ BKShape *bk_mesh_shape(const float *positions, int vertexCount, const uint32_t *
   auto m = meshModel(pts, tris, why);
   if (!m) return lastError = "mesh: " + why, nullptr;
   return new BKShape{shapeOf(m)};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-void bk_figure_defaults(double sex, double *out) {
+void bk_figure_defaults(double sex, double *out) try {
   if (out) figureDefaults(sex, out);
+} catch (...) {
+  caught();
 }
 
-void bk_figure_range(int field, double *out) {
+void bk_figure_range(int field, double *out) try {
   if (out) figureRange(field, out[0], out[1]);
+} catch (...) {
+  caught();
 }
 
-void bk_figure_pose(int pose, double *params) {
+void bk_figure_pose(int pose, double *params) try {
   if (params) figurePose(pose, params);
+} catch (...) {
+  caught();
 }
 
-int bk_figure_pose_of(const double *params, int count) {
+int bk_figure_pose_of(const double *params, int count) try {
   FigureSpec s;
   std::string why;
   return figureSpec(params, count, s, why) ? figurePoseOf(s.v) : -1;
+} catch (...) {
+  return caught(), -1;
 }
 
-BKShape *bk_figure(const double *params, int count, int draft) {
+BKShape *bk_figure(const double *params, int count, int draft) try {
   FigureSpec spec;
   Shape s;
   std::string why;
   if (!figureSpec(params, count, spec, why) || !figure(spec, draft != 0, s, why)) return lastError = why, nullptr;
   return new BKShape{s};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-int bk_figure_extent(const double *params, int count, double *out) {
+int bk_figure_extent(const double *params, int count, double *out) try {
   FigureSpec spec;
   std::string why;
   if (!out || !figureSpec(params, count, spec, why)) return 0;
@@ -91,10 +132,12 @@ int bk_figure_extent(const double *params, int count, double *out) {
   figureBox(spec, size, anchor);
   for (int a = 0; a < 3; a++) out[a] = size[a], out[3 + a] = anchor[a];
   return 1;
+} catch (...) {
+  return caught(), 0;
 }
 
-BKShape *bk_transform(const BKShape *s, const double *m) {
-  if (!s) return nullptr;
+BKShape *bk_transform(const BKShape *s, const double *m) try {
+  if (!s) return lastError = "no shape", nullptr;
   if (!m || !finite(m, 12)) {
     lastError = "transform: placement must be numbers";
     return nullptr;
@@ -126,13 +169,26 @@ BKShape *bk_transform(const BKShape *s, const double *m) {
       if (r.similarity()) a = r;
     }
   }
-  return new BKShape{{s->shape.node, s->shape.place.then(a)}};
+  // (Grown a millionfold, or moved more than a kilometre: far past any printer, and its mesh would take more memory
+  // than any machine has.)
+  Affine placed = s->shape.place.then(a);
+  if (!(placed.stretch() <= 1e6) || !(std::fabs(placed.m[3]) <= 1e6 && std::fabs(placed.m[7]) <= 1e6 && std::fabs(placed.m[11]) <= 1e6)) {
+    lastError = "transform: a shape is placed at most a kilometre away and grown at most a millionfold";
+    return nullptr;
+  }
+  return new BKShape{{s->shape.node, placed}};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-int bk_piece_count(const BKShape *s) { return s ? pieceCount(s->shape) : 0; }
+int bk_piece_count(const BKShape *s) try {
+  return s ? pieceCount(s->shape) : 0;
+} catch (...) {
+  return caught(), 0;
+}
 
-int bk_bounds(const BKShape *s, const double *m, double *out) {
-  if (!s || !out) return -1;
+int bk_bounds(const BKShape *s, const double *m, double *out) try {
+  if (!s || !out) return lastError = "bounds: no shape", -1;
   if (!m || !finite(m, 12)) {
     lastError = "bounds: placement must be numbers";
     return -1;
@@ -142,23 +198,40 @@ int bk_bounds(const BKShape *s, const double *m, double *out) {
   double v[6] = {lo.x, lo.y, lo.z, hi.x, hi.y, hi.z};
   memcpy(out, v, sizeof v);
   return exact ? 1 : 0;
+} catch (...) {
+  return caught(), -1;
 }
-BKShape *bk_copy(const BKShape *s) { return s ? new BKShape{s->shape} : nullptr; }
+BKShape *bk_copy(const BKShape *s) try {
+  return s ? new BKShape{s->shape} : nullptr;
+} catch (...) {
+  return caught(), nullptr;
+}
 void bk_free(BKShape *s) { delete s; }
 
 // MARK: - meshes
 
-template <typename T> static T *mallocCopy(const std::vector<T> &v) {
+template <typename T> static T *mallocCopy(const std::vector<T> &v) try {
   T *out = (T *)malloc(sizeof(T) * std::max<size_t>(1, v.size()));
   if (!v.empty()) memcpy(out, v.data(), sizeof(T) * v.size());
   return out;
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail) {
-  if (!s) return nullptr;
+BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail) try {
+  if (!s) return lastError = "no shape", nullptr;
   if (!m || !finite(m, 12) || !std::isfinite(detail)) return lastError = "remesh: sizes must be numbers", nullptr;
+  if (!(detail > 0)) return lastError = "remesh: the detail must be a size", nullptr;
   Affine a = Affine::from(m);
   if (std::fabs(a.det()) <= 1e-12) return lastError = "remesh: placement flattens the shape", nullptr;
+  // (Too fine for its size told at once, from its box: not after meshing it finely first.)
+  {
+    V3 lo, hi;
+    placedBounds({s->shape.node, s->shape.place.then(a)}, lo, hi);
+    double cells = 1;
+    for (int k = 0; k < 3; k++) cells *= std::ceil((hi[k] - lo[k]) / detail) + 4;
+    if (!(cells <= 4e8)) return lastError = "remesh: too fine for its size", nullptr;
+  }
   // The shape's mesh well within the detail (a curve's chords lie inside it, and would come out a little small).
   Solid in;
   mesh({s->shape.node, s->shape.place.then(a)}, std::min(0.05, std::max(0.002, detail / 50)), in);
@@ -173,10 +246,12 @@ BKSculptMesh *bk_remesh(const BKShape *s, const double *m, double detail) {
   out->positions = mallocCopy(pos);
   out->indices = mallocCopy(tris);
   return out;
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKSculptMesh *bk_mesh_body(const BKShape *s, const double *m) {
-  if (!s) return nullptr;
+BKSculptMesh *bk_mesh_body(const BKShape *s, const double *m) try {
+  if (!s) return lastError = "no shape", nullptr;
   if (!m || !finite(m, 12)) return lastError = "mesh body: sizes must be numbers", nullptr;
   const Node *n = s->shape.node.get();
   if (!n || n->kind != Node::Prim || !n->model || n->model->kind != Model::Mesh || !n->model->mesh) return lastError = "mesh body: not one as it is", nullptr;
@@ -198,6 +273,8 @@ BKSculptMesh *bk_mesh_body(const BKShape *s, const double *m) {
   out->positions = mallocCopy(pos);
   out->indices = mallocCopy(tris);
   return out;
+} catch (...) {
+  return caught(), nullptr;
 }
 
 void bk_sculpt_mesh_free(BKSculptMesh *m) {
@@ -229,7 +306,7 @@ struct BKSculpt {
   }
 };
 
-BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) {
+BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount) try {
   if (!positions || !indices || vertexCount <= 0 || triangleCount <= 0) return lastError = "sculpt: no points or triangles", nullptr;
   std::vector<V3> p((size_t)vertexCount);
   for (size_t i = 0; i < p.size(); i++) {
@@ -245,6 +322,8 @@ BKSculpt *bk_sculpt_new(const float *positions, int vertexCount, const uint32_t 
     return lastError = "sculpt: the mesh isn't closed", nullptr;
   }
   return s;
+} catch (...) {
+  return caught(), nullptr;
 }
 
 void bk_sculpt_free(BKSculpt *s) { delete s; }
@@ -258,46 +337,71 @@ int bk_sculpt_ray(const BKSculpt *s, const double *origin, const double *directi
   return 1;
 }
 
-void bk_sculpt_set_detail(BKSculpt *s, double size) {
+void bk_sculpt_set_detail(BKSculpt *s, double size) try {
   if (s) s->sculptor.setDetail(std::isfinite(size) ? size : 0);
+} catch (...) {
+  caught();
 }
 
-void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert) {
-  if (!s || !at || !finite(at, 3) || !std::isfinite(radius) || !std::isfinite(strength)) return;
+void bk_sculpt_begin(BKSculpt *s, int brush, const double *at, double radius, double strength, int mirror, int invert) try {
+  if (!s) return;
+  // (A brush that isn't numbers begins no stroke, and ends the one before: its dabs don't carry on with that one.)
+  if (!at || !finite(at, 3) || !std::isfinite(radius) || !std::isfinite(strength)) return s->sculptor.end();
   s->sculptor.begin(brush, {at[0], at[1], at[2]}, radius, strength, mirror != 0 ? BK_MIRROR_X : 0, invert != 0);
+} catch (...) {
+  caught();
 }
 
-void bk_sculpt_begin_brush(BKSculpt *s, const BKBrush *b, const double *at) {
-  if (!s || !b || !at || !finite(at, 3) || !std::isfinite(b->radius) || !std::isfinite(b->strength)) return;
+void bk_sculpt_begin_brush(BKSculpt *s, const BKBrush *b, const double *at) try {
+  if (!s) return;
+  if (!b || !at || !finite(at, 3) || !std::isfinite(b->radius) || !std::isfinite(b->strength)) return s->sculptor.end();
   BrushTip tip;
   tip.hardness = b->hardness, tip.rigidity = b->rigidity, tip.oval = b->oval, tip.angle = b->angle, tip.tilt = b->tilt;
   s->sculptor.begin(b->brush, {at[0], at[1], at[2]}, b->radius, b->strength, b->mirror, b->invert != 0, tip, {b->across[0], b->across[1], b->across[2]},
                     {b->middle[0], b->middle[1], b->middle[2]});
+} catch (...) {
+  caught();
 }
 
-void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size) {
+void bk_sculpt_dab(BKSculpt *s, const double *at, double pressure, double size) try {
   if (!s || !at || !finite(at, 3) || !std::isfinite(pressure) || !std::isfinite(size)) return;
   s->sculptor.dab({at[0], at[1], at[2]}, pressure, size);
+} catch (...) {
+  caught();
 }
 
-void bk_sculpt_dab_tilted(BKSculpt *s, const double *at, double pressure, double size, double tilt) {
+void bk_sculpt_dab_tilted(BKSculpt *s, const double *at, double pressure, double size, double tilt) try {
   if (!s || !at || !finite(at, 3) || !std::isfinite(pressure) || !std::isfinite(size)) return;
   s->sculptor.dab({at[0], at[1], at[2]}, pressure, size, tilt);
+} catch (...) {
+  caught();
 }
 
-void bk_sculpt_end(BKSculpt *s) {
+void bk_sculpt_end(BKSculpt *s) try {
   if (s) s->sculptor.end();
+} catch (...) {
+  caught();
 }
-int bk_sculpt_undo(BKSculpt *s) { return s && s->sculptor.undo() ? 1 : 0; }
-int bk_sculpt_redo(BKSculpt *s) { return s && s->sculptor.redo() ? 1 : 0; }
+int bk_sculpt_undo(BKSculpt *s) try {
+  return s && s->sculptor.undo() ? 1 : 0;
+} catch (...) {
+  return caught(), 0;
+}
+int bk_sculpt_redo(BKSculpt *s) try {
+  return s && s->sculptor.redo() ? 1 : 0;
+} catch (...) {
+  return caught(), 0;
+}
 
-int bk_sculpt_sync(BKSculpt *s) {
+int bk_sculpt_sync(BKSculpt *s) try {
   if (!s) return 0;
   s->changed = s->sculptor.takeChanged();
   for (uint32_t i : s->changed) s->put(i);
   s->changedTris = s->sculptor.takeChangedTriangles();
   for (uint32_t t : s->changedTris) s->putTriangle(t);
   return (int)s->changed.size();
+} catch (...) {
+  return caught(), 0;
 }
 
 const uint32_t *bk_sculpt_changed(const BKSculpt *s) { return s ? s->changed.data() : nullptr; }
@@ -310,14 +414,16 @@ const float *bk_sculpt_positions(const BKSculpt *s) { return s ? s->positions.da
 const float *bk_sculpt_normals(const BKSculpt *s) { return s ? s->normals.data() : nullptr; }
 const uint32_t *bk_sculpt_indices(const BKSculpt *s) { return s ? s->indices.data() : nullptr; }
 
-const char *bk_sculpt_check(const BKSculpt *s) {
+const char *bk_sculpt_check(const BKSculpt *s) try {
   static thread_local std::string why;
   why = s ? s->sculptor.check() : "no sculpt";
   return why.c_str();
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s) {
-  if (!s) return nullptr;
+BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s) try {
+  if (!s) return lastError = "no shape", nullptr;
   std::vector<V3> pts;
   std::vector<uint32_t> tris;
   s->sculptor.compact(pts, tris);
@@ -328,10 +434,12 @@ BKSculptMesh *bk_sculpt_mesh(const BKSculpt *s) {
   out->positions = mallocCopy(pos);
   out->indices = mallocCopy(tris);
   return out;
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKMesh *bk_mesh(const BKShape *s, double deflection) {
-  if (!s) return nullptr;
+BKMesh *bk_mesh(const BKShape *s, double deflection) try {
+  if (!s) return lastError = "no shape", nullptr;
   BKMesh *m = new BKMesh();
   Solid solid;
   mesh(s->shape, std::isfinite(deflection) ? std::max(deflection, 0.001) : 0.05, solid);
@@ -379,6 +487,8 @@ BKMesh *bk_mesh(const BKShape *s, double deflection) {
   // Closed: every side of a triangle met by one running the other way (otherwise the app says it isn't a solid).
   m->valid = solid.tri.empty() || shut(solid) ? 1 : 0;
   return m;
+} catch (...) {
+  return caught(), nullptr;
 }
 
 void bk_mesh_free(BKMesh *m) {
@@ -417,7 +527,7 @@ static bool endOf(const BKShape *s, const double *m, int kind, int index, const 
 }
 
 double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, const double *pointA, const BKShape *b,
-                   const double *mb, int kindB, int indexB, const double *pointB, double *out) {
+                   const double *mb, int kindB, int indexB, const double *pointB, double *out) try {
   End ea, eb;
   if (!endOf(a, ma, kindA, indexA, pointA, ea) || !endOf(b, mb, kindB, indexB, pointB, eb)) return -1;
   double d;
@@ -432,11 +542,13 @@ double bk_distance(const BKShape *a, const double *ma, int kindA, int indexA, co
     memcpy(out, v, sizeof v);
   }
   return d;
+} catch (...) {
+  return caught(), -1;
 }
 
 // MARK: - bolts and nuts
 
-BKShape *bk_fastener(const BKFastener *f, double clearance) {
+BKShape *bk_fastener(const BKFastener *f, double clearance) try {
   std::string what = f && isNut(f->kind) ? "nut: " : "bolt: ";
   if (!f || !std::isfinite(clearance)) return lastError = what + "sizes must be numbers", nullptr;
   if (const char *why = fastenerMisfit(*f)) return lastError = what + why, nullptr;
@@ -444,24 +556,33 @@ BKShape *bk_fastener(const BKFastener *f, double clearance) {
   std::string why;
   if (!fastener(*f, clearance, out, why)) return lastError = what + why, nullptr;
   return new BKShape{out};
+} catch (...) {
+  return caught(), nullptr;
 }
 
 // MARK: - merging and splitting
 
-BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b) {
-  if (!a || !b) return a ? bk_copy(a) : (b && op == BK_UNION ? bk_copy(b) : nullptr);
+BKShape *bk_boolean(int op, const BKShape *a, const BKShape *b) try {
+  if (!a || !b) {
+    lastError = "combine: a shape is missing";
+    return nullptr;
+  }
   if (op != BK_UNION && op != BK_SUBTRACT && op != BK_INTERSECT) {
     lastError = "combine: unknown operation";
     return nullptr;
   }
+  int depth = deeper("combine", a->shape, &b->shape);
+  if (!depth) return nullptr;
   // The parts keep their own placements; the result sits where they are.
   auto node = std::make_shared<Node>();
-  node->kind = Node::Bool, node->op = op, node->a = a->shape, node->b = b->shape;
+  node->kind = Node::Bool, node->op = op, node->a = a->shape, node->b = b->shape, node->depth = depth;
   return new BKShape{{node, Affine()}};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) {
-  if (!s) return nullptr;
+BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) try {
+  if (!s) return lastError = "no shape", nullptr;
   if (!p || !n || !finite(p, 3) || !finite(n, 3)) {
     lastError = "split: plane must be numbers";
     return nullptr;
@@ -471,9 +592,14 @@ BKShape *bk_split(const BKShape *s, const double *p, const double *n, int side) 
     lastError = "split: plane must be numbers";
     return nullptr;
   }
+  int depth = deeper("split", s->shape);
+  if (!depth) return nullptr;
   auto node = std::make_shared<Node>();
   node->kind = Node::Split, node->a = s->shape, node->p = {p[0], p[1], p[2]}, node->n = unit(nv), node->side = side == 0 ? 0 : 1;
+  node->depth = depth;
   return new BKShape{{node, Affine()}};
+} catch (...) {
+  return caught(), nullptr;
 }
 
 // A treatment of the picked edges, made now at the detail shown (so whether it fits is known at once, and that mesh kept).
@@ -481,12 +607,18 @@ static BKShape *treat(const BKShape *s, const int *kinds, const double *picks, i
                       const char *what) {
   if (maxRadius) *maxRadius = t.radius;
   if (missing) *missing = 0;
-  if (!s) return nullptr;
+  if (!s) return lastError = "no shape", nullptr;
   if (count < 0 || (count > 0 && (!kinds || !picks)) || !finite(picks, count * 6) || !std::isfinite(t.radius) || !std::isfinite(t.legA) ||
       !std::isfinite(t.legB) || !std::isfinite(t.corner)) {
     lastError = std::string(what) + ": must be numbers";
     return nullptr;
   }
+  if (t.kind == Treatment::Bevel ? std::min(t.legA, t.legB) < 0 || t.corner < 0 : t.radius < 0) {
+    lastError = std::string(what) + ": sizes can't be below zero";
+    return nullptr;
+  }
+  int depth = deeper(what, s->shape);
+  if (!depth) return nullptr;
   t.kinds.assign(kinds, kinds + count);
   t.picks.assign(picks, picks + count * 6);
   const double d = 0.05;
@@ -501,37 +633,51 @@ static BKShape *treat(const BKShape *s, const int *kinds, const double *picks, i
     return nullptr;
   }
   auto node = std::make_shared<Node>();
-  node->kind = Node::Treat, node->a = s->shape, node->treat = std::make_shared<Treatment>(t);
+  node->kind = Node::Treat, node->a = s->shape, node->treat = std::make_shared<Treatment>(t), node->depth = depth;
   node->shown = std::make_shared<Solid>(std::move(made));
   node->made.push_back({d, node->shown});
   return new BKShape{{node, Affine()}};
 }
 
-BKShape *bk_fillet(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) {
+BKShape *bk_fillet(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) try {
   Treatment t;
   t.kind = Treatment::Round, t.radius = radius;
   return treat(s, kinds, picks, count, t, maxRadius, missing, "rounding");
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKShape *bk_chamfer(const BKShape *s, const int *kinds, const double *picks, int count, double legA, double legB, double cornerRadius, int *missing) {
+BKShape *bk_chamfer(const BKShape *s, const int *kinds, const double *picks, int count, double legA, double legB, double cornerRadius, int *missing) try {
   Treatment t;
   t.kind = Treatment::Bevel, t.legA = legA, t.legB = legB, t.corner = cornerRadius;
   return treat(s, kinds, picks, count, t, nullptr, missing, "bevel");
+} catch (...) {
+  return caught(), nullptr;
 }
 
-BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) {
+BKShape *bk_cove(const BKShape *s, const int *kinds, const double *picks, int count, double radius, double *maxRadius, int *missing) try {
   Treatment t;
   t.kind = Treatment::Cove, t.radius = radius;
   return treat(s, kinds, picks, count, t, maxRadius, missing, "cove");
+} catch (...) {
+  return caught(), nullptr;
 }
 
 BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount, const double *open, int openCount, const double *walls,
-                   const double *wallThickness, int wallCount, double thickness, int *missing) {
+                   const double *wallThickness, int wallCount, double thickness, int *missing) try {
   if (missing) *missing = 0;
-  if (!s) return nullptr;
+  if (!s) return lastError = "no shape", nullptr;
+  int depth = deeper("hollow", s->shape);
+  if (!depth) return nullptr;
   if (openCount < 0 || wallCount < 0 || sharpCount < 0 || (openCount > 0 && !open) || (wallCount > 0 && (!walls || !wallThickness)) ||
       !finite(open, openCount * 6) || !finite(walls, wallCount * 6) || !finite(wallThickness, wallCount) || !std::isfinite(thickness)) {
     lastError = "hollow: walls must be numbers";
+    return nullptr;
+  }
+  bool below = thickness < 0;
+  for (int k = 0; k < wallCount; k++) below = below || wallThickness[k] < 0;
+  if (below) {
+    lastError = "hollow: walls can't be thinner than nothing";
     return nullptr;
   }
   // Without openings, walls at least half as thick as the body is at its narrowest leave nothing inside: refused at once
@@ -581,13 +727,15 @@ BKShape *bk_hollow(const BKShape *s, const BKShape *const *sharp, int sharpCount
     return nullptr;
   }
   auto node = std::make_shared<Node>();
-  node->kind = Node::Hollow, node->a = s->shape, node->hollow = std::make_shared<Hollowing>(h);
+  node->kind = Node::Hollow, node->a = s->shape, node->hollow = std::make_shared<Hollowing>(h), node->depth = depth;
   node->shown = std::make_shared<Solid>(std::move(made));
   node->made.push_back({d, node->shown});
   return new BKShape{{node, Affine()}};
+} catch (...) {
+  return caught(), nullptr;
 }
 
-int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int count, double *out, int max) {
+int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int count, double *out, int max) try {
   if (!s || count < 0 || (count > 0 && (!kinds || !picks)) || !finite(picks, count * 6)) return 0;
   Solid m;
   mesh(s->shape, 0.05, m);
@@ -606,10 +754,12 @@ int bk_pick_edges(const BKShape *s, const int *kinds, const double *picks, int c
     n++;
   }
   return n;
+} catch (...) {
+  return caught(), 0;
 }
 
-BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) {
-  if (!s) return nullptr;
+BKSection *bk_section(const BKShape *s, int kind, const double *pick, double radius) try {
+  if (!s) return lastError = "no shape", nullptr;
   const double none[6] = {0, 0, 0, 0, 0, 0};
   const double *q = pick ? pick : none;
   if (!finite(q, 6) || !std::isfinite(radius)) {
@@ -660,6 +810,8 @@ BKSection *bk_section(const BKShape *s, int kind, const double *pick, double rad
   memcpy(out->point, pt, sizeof pt);
   memcpy(out->direction, dir, sizeof dir);
   return out;
+} catch (...) {
+  return caught(), nullptr;
 }
 
 void bk_section_free(BKSection *section) {
@@ -669,7 +821,7 @@ void bk_section_free(BKSection *section) {
   delete section;
 }
 
-int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path) {
+int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path) try {
   if (!shapes || count < 0 || !path) return lastError = "file: nothing to write", 0;
   std::vector<Shape> list;
   std::vector<std::string> named;
@@ -687,10 +839,12 @@ int bk_export_step(const BKShape *const *shapes, const char *const *names, int c
   if (f) ok = fclose(f) == 0 && ok;
   if (!ok) return lastError = "file: couldn't write it", 0;
   return 1;
+} catch (...) {
+  return caught(), 0;
 }
 
-BKPrintMesh *bk_print_mesh(const BKShape *s) {
-  if (!s) return nullptr;
+BKPrintMesh *bk_print_mesh(const BKShape *s) try {
+  if (!s) return lastError = "no shape", nullptr;
   PrintMesh pm;
   std::string why;
   bool sound = printMesh(s->shape, pm, why);
@@ -705,6 +859,8 @@ BKPrintMesh *bk_print_mesh(const BKShape *s) {
   m->slivers = pm.slivers;
   m->valid = sound ? 1 : 0;
   return m;
+} catch (...) {
+  return caught(), nullptr;
 }
 
 void bk_print_mesh_free(BKPrintMesh *m) {

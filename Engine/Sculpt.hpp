@@ -194,6 +194,7 @@ class Sculptor {
   std::vector<uint32_t> idx[8], sum, merged, around, ring, work, front, fresh;
   std::vector<double> wt[8];
   std::vector<V3> off[8], offSum, offMerged;
+  std::vector<double> wSum, wMax, wSumMerged, wMaxMerged;  // a point's weights under the dab's copies: their sum and the most
   mutable std::vector<uint32_t> fan;
   mutable std::vector<V3> faceN;
   mutable std::vector<uint32_t> faceAt;
