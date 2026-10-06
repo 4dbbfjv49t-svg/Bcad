@@ -22,6 +22,32 @@
 
 namespace bce {
 
+// How many pairs of triangles of different solids have boxes that meet (counted up to `cap`): about how much work
+// merging them is.
+static size_t meetingPairs(const std::vector<const Solid *> &all, size_t cap) {
+  struct B {
+    double lo[3], hi[3];
+    uint32_t who;
+  };
+  std::vector<B> bs;
+  for (uint32_t k = 0; k < all.size(); k++) {
+    const Solid &m = *all[k];
+    for (size_t t = 0; t + 2 < m.tri.size(); t += 3) {
+      V3 a = m.p[m.tri[t]], b = m.p[m.tri[t + 1]], c = m.p[m.tri[t + 2]];
+      V3 lo = vmin(a, vmin(b, c)), hi = vmax(a, vmax(b, c));
+      bs.push_back({{lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, k});
+    }
+  }
+  std::sort(bs.begin(), bs.end(), [](const B &a, const B &b) { return a.lo[0] < b.lo[0]; });
+  size_t n = 0;
+  for (size_t i = 0; i < bs.size() && n < cap; i++)
+    for (size_t j = i + 1; j < bs.size() && bs[j].lo[0] <= bs[i].hi[0] && n < cap; j++)
+      n += bs[j].who != bs[i].who && bs[j].lo[1] <= bs[i].hi[1] && bs[i].lo[1] <= bs[j].hi[1] && bs[j].lo[2] <= bs[i].hi[2] &&
+           bs[i].lo[2] <= bs[j].hi[2];
+  return n;
+}
+
+
 namespace {
 
 constexpr double pi = M_PI;
@@ -2834,6 +2860,15 @@ static Solid treatedAs(const Solid &s, const Treatment &t, double d, TreatFit &f
     return true;
   };
   if (!tools()) return s;
+  // (A checked cove's tools meeting one another all over, as where many edges meet at a corner and each tool is wider
+  // than its faces, took tens of seconds to merge, only to be refused or leave a speck: refused at once. The widest the
+  // cases saved meet in some 40,000 pairs.)
+  if (coveChecked) {
+    std::vector<const Solid *> all{&s};
+    for (const auto &x : take) all.push_back(&x);
+    for (const auto &x : add) all.push_back(&x);
+    if (meetingPairs(all, 100000) >= 100000) return tooWide();
+  }
   markAux(take, false), markAux(add, true);
   shuffle();
   // A rounding's faces (its tools' curved ones that are left) meet the faces beside them smoothly: so marked for what's

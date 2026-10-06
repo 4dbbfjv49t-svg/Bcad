@@ -182,6 +182,15 @@ struct Cutter {
   std::vector<uint32_t> crossChecked;
   std::vector<size_t> spreadSeen;
   std::vector<uint32_t> scratch;
+  // Each edge's points in order as last put in line for flat pairs, with what that depended on (how many the edge had,
+  // and how many times two points had been found one): asked again with neither changed, the same answer.
+  struct Lined {
+    size_t size = SIZE_MAX;
+    uint64_t unions = 0;
+    std::vector<uint32_t> pts;
+  };
+  std::vector<Lined> lined;
+  uint64_t unions = 0;
   // Each point's number in the triangulation being made (an array kept between triangles, cleared as it's used).
   struct Local {
     std::vector<int> at;
@@ -207,6 +216,7 @@ struct Cutter {
   void unite(uint32_t a, uint32_t b) {
     a = rep(a), b = rep(b);
     if (a == b) return;
+    unions++;
     uint32_t lo = std::min(a, b), hi = std::max(a, b);
     parent[hi] = lo;
     // In the triangulation being made, the point keeps its number.
@@ -436,10 +446,16 @@ struct Cutter {
         }
       };
       for (int k = 0; k < 3; k++) {
-        uint32_t u = gx[k], v = gx[(k + 1) % 3];
-        std::vector<uint32_t> pts{u, v};
-        for (uint32_t q : S.onEdge[S.edgeOf(u, v)]) pts.push_back(q);
-        inLine(pts);
+        uint32_t u = gx[k], v = gx[(k + 1) % 3], e = S.edgeOf(u, v);
+        // (A side in many flat pairs is put in line once, not once a pair: exact comparisons along it are slow.)
+        Lined &L = lined[e];
+        if (L.size != S.onEdge[e].size() || L.unions != unions) {
+          L.pts.assign({u, v});
+          L.pts.insert(L.pts.end(), S.onEdge[e].begin(), S.onEdge[e].end());
+          inLine(L.pts);
+          L.size = S.onEdge[e].size(), L.unions = unions;
+        }
+        const std::vector<uint32_t> &pts = L.pts;
         for (size_t i = 0; i + 1 < pts.size(); i++) {
           // The piece between lies inside where both its ends do (the triangle is convex).
           int w0 = where(f, gy, pts[i]), w1 = where(f, gy, pts[i + 1]);
@@ -1142,6 +1158,7 @@ static Solid combineOnce(const std::vector<const Solid *> &in, const Rule &rule,
   std::sort(S.edges.begin(), S.edges.end());
   S.edges.erase(std::unique(S.edges.begin(), S.edges.end()), S.edges.end());
   S.onEdge.resize(S.edges.size());
+  c.lined.resize(S.edges.size());
   S.cut.resize(nt);
   // Pairs of triangles whose boxes meet, in order (the tree's own order is the standard library's to choose), so points
   // are numbered alike everywhere.

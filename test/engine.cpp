@@ -4055,6 +4055,54 @@ int main() {
     check("absurd numbers refused saying why: 100 m, a kilometre off, 10^300 sides, a shape missing, 2000 merges deep, below zero, no detail",
           big && sides && placed && missing && std::isfinite(r[0]) && chained && negative && detail, why);
   }
+  // Coves wider than the faces beside them, their tools meeting one another all over (24 edges at a pyramid's tip, 12 on
+  // a box each wider than the box): answered at once (each took about 20 s to merge), refused as too wide or made.
+  {
+    int kb = BK_PICK_BODY, miss = 0;
+    double body[6] = {0, 0, 0, 0, 0, 0}, most = 0;
+    double pyr[3] = {24, 0.52198560281826945, 5.2190428760400946}, prism[3] = {4, 701.30693186062581, 500};
+    BKShape *p = bk_primitive(BK_PYRAMID, pyr), *q = bk_primitive(BK_PRISM, prism);
+    auto t0 = std::chrono::steady_clock::now();
+    BKShape *pc = bk_cove(p, &kb, body, 1, 0.1, &most, &miss);
+    std::string pw = pc ? "" : bk_last_error();
+    double pt = ms(t0);
+    t0 = std::chrono::steady_clock::now();
+    BKShape *qc = bk_cove(q, &kb, body, 1, 1000, &most, &miss);
+    std::string qw = qc ? "" : bk_last_error();
+    double qt = ms(t0);
+    BKMesh *pm = pc ? bk_mesh(pc, 0.05) : nullptr;
+    check("coves wider than their faces, their tools meeting all over: answered at once, refused as too wide or made sound",
+          (pc ? pm && pm->valid == 1 : !pw.empty()) && !qc && qw.find("too large") != std::string::npos && (!timed || (pt < 5000 && qt < 1000)),
+          fmt("%.0f ms (", pt) + (pc ? "made" : pw) + fmt("), %.0f ms (", qt) + qw + ")");
+    bk_mesh_free(pm), bk_free(pc), bk_free(qc), bk_free(p), bk_free(q);
+  }
+  // A long way between two dabs at a narrow tip, mirrored twice, over a dense mesh with the detail on: one call takes its
+  // steps until it has looked at so many points, the rest of the way left to the next (its thousand steps took 3 s here,
+  // half a minute on a coarser mesh being made finer).
+  {
+    double slab[3] = {100, 100, 20};
+    const double I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    BKShape *b = bk_primitive(BK_BOX, slab);
+    BKSculptMesh *m = b ? bk_remesh(b, I, 0.5) : nullptr;
+    BKSculpt *s = m ? bk_sculpt_new(m->positions, m->vertexCount, m->indices, m->triangleCount) : nullptr;
+    double took = -1, top = -1e9;
+    for (int i = 0; m && i < m->vertexCount; i++) top = std::max(top, (double)m->positions[3 * i + 2]);
+    if (s) {
+      bk_sculpt_set_detail(s, 0.5);
+      BKBrush br{};
+      br.brush = BK_BRUSH_CREASE, br.radius = 10, br.strength = 1, br.mirror = BK_MIRROR_Y | BK_MIRROR_Z, br.oval = 0.05, br.angle = 90;
+      double a[3] = {-45, -45, top}, z[3] = {45, 45, top};
+      bk_sculpt_begin_brush(s, &br, a);
+      bk_sculpt_dab(s, a, 1, 1);
+      auto t0 = std::chrono::steady_clock::now();
+      bk_sculpt_dab(s, z, 1, 1);
+      took = ms(t0);
+      bk_sculpt_end(s);
+    }
+    check("sculpting: a long way at a narrow tip on a dense mesh, mirrored, taken a part at a time", s && (!timed || took < 1000),
+          fmt("%.0f ms for %.0f triangles", took, m ? m->triangleCount : 0));
+    bk_sculpt_free(s), bk_sculpt_mesh_free(m), bk_free(b);
+  }
   // A mesh with a piece inside out beside the rest (a larger one hiding it in the total volume) refused; one inside out
   // within another (a hollow) kept.
   {

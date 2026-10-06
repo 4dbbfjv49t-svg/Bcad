@@ -150,6 +150,10 @@ class Sculptor {
   // into) changing at most dabBudget sides, so it stays quick (the next carries on).
   static constexpr size_t mostTriangles = 1500000;
   int dabBudget = 0;
+  // Points looked at under dabs so far: each call to dab() takes its steps until it has looked at mostVisited more (the
+  // rest of its way left for the next to carry on).
+  mutable size_t visited = 0;
+  static constexpr size_t mostVisited = 400000;
 
   std::vector<TreeNode> nodes;  // a box tree over the triangles (a node's children always come after it)
   std::vector<int> leafOf, parentOf;

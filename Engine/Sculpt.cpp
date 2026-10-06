@@ -1241,6 +1241,7 @@ void Sculptor::within(V3 c, double r, std::vector<uint32_t> &out, std::vector<do
         if (norm2(p[v] - c) < r2) out.push_back(v);
       }
   }
+  visited += out.size();
   std::sort(out.begin(), out.end());
   weight.resize(out.size());
   for (size_t k = 0; k < out.size(); k++) {
@@ -1277,6 +1278,7 @@ void Sculptor::touching(V3 c, double r, std::vector<uint32_t> &out) const {
       }
     }
   }
+  visited += out.size();
   std::sort(out.begin(), out.end());
 }
 
@@ -1590,13 +1592,18 @@ void Sculptor::dab(V3 at, double pressure, double size, double tilt) {
     spacing *= tip.oval / std::sqrt(tip.oval * tip.oval * ca * ca + sa * sa);
   }
   if (!(gap >= spacing)) return;
-  int steps = (int)std::min(1000.0, std::floor(gap / spacing));
+  int steps = (int)std::min(1000.0, std::floor(gap / spacing)), done = 0;
   way = dir, moving = spacing;
+  // (A long way at a narrow tip on a dense mesh, mirrored, took its thousand steps in half a minute: they stop once
+  // they've looked at mostVisited points, the rest of the way left to the next dab.)
+  size_t from = visited;
   for (int s = 1; s <= steps; s++) {
     if (brush == SnakeHook) hook = dir * spacing, dabAt(last + dir * ((s - 1) * spacing), pressure, r);
     else dabAt(last + dir * (s * spacing), pressure, r);
+    done = s;
+    if (visited - from > mostVisited) break;
   }
-  last = last + dir * (steps * spacing);
+  last = last + dir * (done * spacing);
 }
 
 // The triangles under a dab (or a grabbed area) made the detail size, in rounds. Each round: the sides for which

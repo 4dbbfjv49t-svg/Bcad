@@ -291,7 +291,7 @@ static void apiRun(int k) {
   if (kind == BK_TORUS) p[0] = 0, p[1] = 30 + uni() * 20, p[2] = 4 + uni() * 8;
   if (kind == BK_OVAL) p[2] = 5 + uni() * 170;
   std::string shape = fmt("api %.0f: kind %.0f", k, kind) + fmt(" %.17g %.17g %.17g", p[0], p[1], p[2]);
-  if (verbose) printf("  %s\n", shape.c_str());
+  if (verbose) printf("  %s\n", shape.c_str()), fflush(stdout);
   BKShape *s = bk_primitive(kind, p);
   if (!s) return;
   BKMesh *m = bk_mesh(s, 0.05);
@@ -307,6 +307,7 @@ static void apiRun(int k) {
   auto edgePick = [&](double *out) {
     if (m->edgeCount == 0) return facePick(out);
     int e = (int)(rnd() % m->edgeCount), a = (int)m->edgeStart[e], b = (int)m->edgeStart[e + 1];
+    if (b <= a) return facePick(out);  // (a pole, where a turned face closes, has no points)
     int i = a + std::max(0, (b - a) / 2 - 1), j = std::min(b - 1, i + 1);
     for (int c = 0; c < 3; c++) out[c] = (m->edgePoints[3 * i + c] + m->edgePoints[3 * j + c]) / 2, out[3 + c] = m->edgePoints[3 * j + c] - m->edgePoints[3 * i + c];
   };
@@ -556,7 +557,7 @@ int main() {
       doing(fmt("extremes %.0f: primitive %.0f", k, kind), 60);
       BKShape *s = primitive(kind);
       std::string shape = last;
-      if (verbose) printf("  %s\n", shape.c_str());
+      if (verbose) printf("  %s\n", shape.c_str()), fflush(stdout);
       bool tame = !wild;
       judge(s, fmt("primitive %.0f (case %.0f)", kind, k), tame);
       if (!s || !tame) {
