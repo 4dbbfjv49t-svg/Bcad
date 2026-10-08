@@ -3231,8 +3231,9 @@ final class Workbench: DesignHost {
             withAnimation(Neon.spring) { self.busy = note }
         }
         importQueue.async {
-            var results: [(URL, Result<ImportResult, Error>)] = []
-            for url in urls where !job.cancelled { results.append((url, Result { try MeshImport.read(url, job: job) })) }
+            var read: [(URL, Result<ImportResult, Error>)] = []
+            for url in urls where !job.cancelled { read.append((url, Result { try MeshImport.read(url, job: job) })) }
+            let results = read
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.importing -= 1
@@ -3290,9 +3291,10 @@ final class Workbench: DesignHost {
             doc = Document(bodies: shapes)
             saved = Document()
             fileURL = nil
-            docName = first
+            let name = first ?? ""
+            docName = name
             dropUnsaved()
-            Self.fileLog.notice("Imported \(first ?? "", privacy: .public)")
+            Self.fileLog.notice("Imported \(name, privacy: .public)")
             meshes = looks
             built = [:]
             requestFit = true
