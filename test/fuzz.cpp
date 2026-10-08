@@ -607,6 +607,115 @@ static std::string damaged(std::string s) {
   }
   return s;
 }
+// Meshes broken every way a scan or another app breaks them, repaired: refused saying why, or taken by bk_mesh_shape and
+// sound, the same each time.
+static Soup3 meshOf(const BKSculptMesh *m) {
+  Soup3 s;
+  s.p.assign(m->positions, m->positions + 3 * m->vertexCount);
+  s.t.assign(m->indices, m->indices + 3 * m->triangleCount);
+  return s;
+}
+static int repaired = 0, repairRefused = 0;
+static void repairCase(const Soup3 &m, const std::string &what) {
+  doing(what, 120);
+  BKScanReport ra, rb;
+  BKSculptMesh *a = bk_scan_repair(m.p.data(), (int)(m.p.size() / 3), m.t.data(), (int)(m.t.size() / 3), nullptr, &ra);
+  std::string why = a ? "" : bk_last_error();
+  BKSculptMesh *b = bk_scan_repair(m.p.data(), (int)(m.p.size() / 3), m.t.data(), (int)(m.t.size() / 3), nullptr, &rb);
+  bool same = !a == !b && (!a || (a->vertexCount == b->vertexCount && a->triangleCount == b->triangleCount &&
+                                  !memcmp(a->positions, b->positions, 12 * (size_t)a->vertexCount) && !memcmp(a->indices, b->indices, 12 * (size_t)a->triangleCount)));
+  if (!same) fail(what + ": repaired twice, not the same");
+  if (a) {
+    repaired++;
+    BKShape *s = bk_mesh_shape(a->positions, a->vertexCount, a->indices, a->triangleCount);
+    std::string w;
+    if (!s) fail(what + ": not taken: " + bk_last_error());
+    else if (!sound(s, w, 0.05)) fail(what + ": not sound: " + w);
+    bk_free(s);
+  } else {
+    repairRefused++;
+    if (why.compare(0, 6, "scan: ") && why != "not enough memory for this") fail(what + ": refused without a reason the app knows: " + why);
+  }
+  bk_sculpt_mesh_free(a), bk_sculpt_mesh_free(b);
+}
+static void scanRepairs(int iters) {
+  double d30[1] = {30}, box[3] = {20, 14, 9}, tor[3] = {0, 40, 12};
+  BKShape *shapes[3] = {bk_primitive(BK_SPHERE, d30), bk_primitive(BK_BOX, box), bk_primitive(BK_TORUS, tor)};
+  std::vector<Soup3> bases;
+  for (BKShape *s : shapes) {
+    BKSculptMesh *m = bk_remesh(s, I, 2.0);
+    if (m) bases.push_back(meshOf(m));
+    bk_sculpt_mesh_free(m), bk_free(s);
+  }
+  for (int run = 0; run < 25 * iters && !bases.empty(); run++) {
+    Soup3 m = bases[rnd() % bases.size()];
+    size_t nt = m.t.size() / 3;
+    std::string how;
+    for (int d = 1 + (int)(rnd() % 4); d > 0; d--) switch (rnd() % 8) {
+        case 0: {  // holes: triangles taken out, here and there or in a patch
+          how += " holes";
+          size_t at = rnd() % nt, n = 1 + rnd() % (nt / 10 + 1);
+          std::vector<uint32_t> t;
+          for (size_t k = 0; k < m.t.size() / 3; k++)
+            if (rnd() % 2 ? (k < at || k >= at + n) : rnd() % 20 != 0) t.insert(t.end(), {m.t[3 * k], m.t[3 * k + 1], m.t[3 * k + 2]});
+          if (t.size() >= 12) m.t = t;
+          break;
+        }
+        case 1:  // turned round
+          how += " turned";
+          for (size_t k = 0; k < m.t.size(); k += 3)
+            if (rnd() % 7 == 0) std::swap(m.t[k + 1], m.t[k + 2]);
+          break;
+        case 2:  // there twice
+          how += " twice";
+          for (int k = 0; k < 20; k++) {
+            size_t t = rnd() % (m.t.size() / 3);
+            m.t.insert(m.t.end(), {m.t[3 * t], m.t[3 * t + 1 + rnd() % 2], m.t[3 * t + 2]});
+          }
+          break;
+        case 3:  // points pushed about: folds
+          how += " folds";
+          for (int k = 0; k < 1 + (int)(rnd() % 5); k++) {
+            size_t i = rnd() % (m.p.size() / 3);
+            for (int c = 0; c < 3; c++) m.p[3 * i + c] += (float)(uni() * 30 - 15);
+          }
+          break;
+        case 4: {  // loose bits
+          how += " loose";
+          uint32_t n = (uint32_t)(m.p.size() / 3);
+          for (int k = 0; k < 6; k++) m.p.push_back((float)(uni() * 60 - 30));
+          m.t.insert(m.t.end(), {n, n + 1, n + 2, n + 1, n + 3, n + 2});
+          break;
+        }
+        case 5: {  // a triangle soup, its points a hair apart
+          how += " soup";
+          Soup3 s;
+          for (uint32_t v : m.t) {
+            if (v >= m.p.size() / 3) v = 0;  // (junk corners kept somewhere)
+            s.t.push_back((uint32_t)(s.p.size() / 3));
+            for (int c = 0; c < 3; c++) s.p.push_back(rnd() % 4 ? m.p[3 * v + c] : std::nextafter(m.p[3 * v + c], 1e9f));
+          }
+          m = s;
+          break;
+        }
+        case 6: {  // another part overlapping
+          how += " overlapping";
+          Soup3 other = bases[rnd() % bases.size()];
+          uint32_t n = (uint32_t)(m.p.size() / 3);
+          float dx = (float)(uni() * 30);
+          for (size_t i = 0; i < other.p.size(); i++) m.p.push_back(other.p[i] + (i % 3 == 0 ? dx : 0));
+          for (uint32_t v : other.t) m.t.push_back(v + n);
+          break;
+        }
+        default:  // corners nowhere, or anywhere
+          how += " junk";
+          for (int k = 0; k < 5; k++) m.t.push_back(rnd() % 3 ? (uint32_t)(rnd() % (m.p.size() / 3)) : (uint32_t)rnd());
+          while (m.t.size() % 3) m.t.push_back(0);
+      }
+    repairCase(m, fmt("repair %.0f:", run) + how);
+  }
+}
+
 static void scanFiles(int iters) {
   static const char *exts[] = {"stl", "stl", "obj", "ply", "ply", "ply", "3mf"};
   auto write = [](const Soup3 &m, int f) {
@@ -947,6 +1056,11 @@ int main() {
     scanFiles(iters);
     check("scan files as written, cut short, damaged and junk: read back as written, or refused saying why; the same every time",
           failures == before, fmt("%.0f read, %.0f refused", scanRead, scanRefused));
+    before = failures;
+    scanRepairs(iters);
+    check("meshes with holes, turned round, twice over, folded, with loose bits, as soups, overlapping and with junk: repaired "
+          "into sound bodies, or refused saying why; the same every time",
+          failures == before, fmt("%.0f repaired, %.0f refused", repaired, repairRefused));
   }
   alarm(0);
   printf(failures ? "%d FAILED\n" : "ALL OK\n", failures);

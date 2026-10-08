@@ -939,3 +939,55 @@ void bk_scan_soup_free(BKScanSoup *s) {
   free(s->positions), free(s->indices), free(s->partStart), free(s->partNames);
   delete s;
 }
+
+void bk_scan_options(BKScanOptions *o) {
+  if (!o) return;
+  ScanOptions d;
+  *o = BKScanOptions();
+  o->maxTriangles = (int)d.maxTriangles, o->fillHoles = d.fillHoles, o->removeIslands = d.removeIslands, o->remake = d.remake;
+  o->islandShare = d.islandShare;
+}
+
+BKSculptMesh *bk_scan_repair(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount, const BKScanOptions *options,
+                             BKScanReport *report) try {
+  if (report) *report = BKScanReport();
+  if (!positions || !indices || vertexCount < 0 || triangleCount < 0) return lastError = "scan: no triangles", nullptr;
+  ScanOptions o;
+  if (options) {
+    o.maxTriangles = options->maxTriangles > 0 ? (uint64_t)options->maxTriangles : 0;
+    o.fillHoles = options->fillHoles, o.removeIslands = options->removeIslands, o.remake = options->remake;
+    o.islandShare = std::isfinite(options->islandShare) ? std::max(0.0, std::min(options->islandShare, 1.0)) : 0;
+    if (options->progress) {
+      auto call = options->progress;
+      void *context = options->context;
+      o.progress = [call, context](double done) { return call(context, done) != 0; };
+    }
+  }
+  std::vector<float> pos;
+  std::vector<uint32_t> tri;
+  ScanReport r;
+  std::string why;
+  bool ok = repairScan(positions, (size_t)vertexCount, indices, (size_t)triangleCount, o, pos, tri, r, why);
+  if (report) {
+    auto clip = [](uint64_t v) { return (int)std::min<uint64_t>(v, INT32_MAX); };
+    BKScanReport &b = *report;
+    b.trianglesIn = clip(r.trianglesIn), b.pointsIn = clip(r.pointsIn), b.trianglesOut = clip(r.trianglesOut), b.pointsOut = clip(r.pointsOut);
+    b.welded = clip(r.welded), b.dropped = clip(r.dropped), b.duplicates = clip(r.duplicates), b.flipped = clip(r.flipped);
+    b.crowded = clip(r.crowded), b.holes = clip(r.holes), b.largestHole = clip(r.largestHole), b.islands = clip(r.islands);
+    b.remade = r.remade, b.remadeDetail = r.remadeDetail, b.simplifiedFrom = clip(r.simplifiedFrom), b.deviation = r.deviation;
+    for (int k = 0; k < 3; k++) b.offset[k] = r.offset[k], b.size[k] = r.size[k];
+    b.volume = r.volume, b.detail = r.detail;
+  }
+  if (!ok) return lastError = why, nullptr;
+  BKSculptMesh *out = new BKSculptMesh();
+  out->vertexCount = (int)(pos.size() / 3), out->triangleCount = (int)(tri.size() / 3);
+  out->positions = mallocCopy(pos);
+  out->indices = mallocCopy(tri);
+  if (!out->positions || !out->indices) {
+    bk_sculpt_mesh_free(out);
+    throw std::bad_alloc();
+  }
+  return out;
+} catch (...) {
+  return caught(), nullptr;
+}

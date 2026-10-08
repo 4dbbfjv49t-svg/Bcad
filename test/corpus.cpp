@@ -8,7 +8,10 @@
 //               sculpting at that detail; D detail brush o(3) w(3) radius strength mirror invert g(3) [local] ; it remeshed
 //               and given a stroke: from where the ray o + t·w meets it, along g, the triangles under it made the local
 //               detail when given, and the brush's tip after it); G draft numbers… ; a human figure (BK_FIG_… order, fewer: the
-//               rest standard)
+//               rest standard); Q detail damage seed most ; the shape so far as its mesh at that detail (points joined), damaged
+//               (bits: 1 holes, 2 triangles turned round, 4 a triangle soup, 8 triangles twice, 16 cracks a hair wide, 32 loose
+//               bits, 64 itself again overlapping, moved 10 along x) by a sequence from seed, and repaired as a scan
+//               (simplified to at most `most` triangles, 0: kept as it is)
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -181,6 +184,66 @@ BKShape *build(const std::string &prog, std::string &why) {
       bk_free(st.back());
       st.back() = s;
       if (!s) return fail(bk_last_error());
+    } else if (t == "Q") {
+      if (!need(4)) return fail("scan without its numbers");
+      if (st.empty()) return fail("scan of nothing");
+      BKMesh *m = bk_mesh(st.back(), v[0]);
+      std::map<std::tuple<float, float, float>, uint32_t> id;
+      std::vector<float> pos;
+      std::vector<uint32_t> idx;
+      for (int i = 0; m && i < 3 * m->triangleCount; i++) {
+        const float *q = m->positions + 3 * m->indices[i];
+        auto at = id.emplace(std::make_tuple(q[0] + 0.0f, q[1] + 0.0f, q[2] + 0.0f), (uint32_t)id.size());
+        if (at.second) pos.insert(pos.end(), {q[0], q[1], q[2]});
+        idx.push_back(at.first->second);
+      }
+      bk_mesh_free(m);
+      int damage = (int)v[1];
+      uint64_t seed = 0x9e3779b97f4a7c15ull * (uint64_t)(v[2] + 1);
+      auto rnd = [&]() {
+        seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+        return seed;
+      };
+      if (damage & 64) {
+        uint32_t n = (uint32_t)(pos.size() / 3);
+        for (size_t i = 0, e = pos.size(); i < e; i++) pos.push_back(pos[i] + (i % 3 == 0 ? 10.0f : 0.0f));
+        for (size_t i = 0, e = idx.size(); i < e; i++) idx.push_back(idx[i] + n);
+      }
+      std::vector<uint32_t> kept;
+      for (size_t k = 0; k < idx.size(); k += 3) {
+        if ((damage & 1) && rnd() % 40 == 0) continue;
+        bool turned = (damage & 2) && rnd() % 9 == 0;
+        kept.insert(kept.end(), {idx[k], idx[k + (turned ? 2 : 1)], idx[k + (turned ? 1 : 2)]});
+        if ((damage & 8) && rnd() % 25 == 0) kept.insert(kept.end(), {idx[k], idx[k + 1], idx[k + 2]});
+      }
+      idx = kept;
+      if (damage & 4) {
+        std::vector<float> soup;
+        for (uint32_t &i : idx) {
+          for (int c = 0; c < 3; c++) {
+            float x = pos[3 * i + c];
+            soup.push_back((damage & 16) && rnd() % 5 == 0 ? std::nextafter(x, 1e9f) : x);
+          }
+          i = (uint32_t)(soup.size() / 3 - 1);
+        }
+        pos = soup;
+      }
+      if (damage & 32)
+        for (int k = 0; k < 4; k++) {
+          uint32_t n = (uint32_t)(pos.size() / 3);
+          for (int c = 0; c < 9; c++) pos.push_back((float)(rnd() % 1000) / 50 - 10);
+          idx.insert(idx.end(), {n, n + 1, n + 2});
+        }
+      BKScanOptions o;
+      bk_scan_options(&o);
+      o.maxTriangles = (int)v[3];
+      BKSculptMesh *r = bk_scan_repair(pos.data(), (int)pos.size() / 3, idx.data(), (int)idx.size() / 3, &o, nullptr);
+      BKShape *s = r ? bk_mesh_shape(r->positions, r->vertexCount, r->indices, r->triangleCount) : nullptr;
+      std::string why = s ? "" : bk_last_error();
+      bk_sculpt_mesh_free(r);
+      bk_free(st.back());
+      st.back() = s;
+      if (!s) return fail(why);
     } else if (t == "R") {
       // The shape so far made ready for sculpting at detail d: remeshed, as a mesh body.
       if (!need(1)) return fail("remesh without its detail");

@@ -1,6 +1,7 @@
 // Bcad's engine from several threads at once, as the app calls it (its worker and the main thread): figures made
-// together (their cache shared), one shape meshed, boxed and counted from every thread, each thread's last error its own;
-// everything as when made alone. And a very deep tree of merges worked out on a thread with the main thread's stack.
+// together (their cache shared), one shape meshed, boxed and counted from every thread, each thread's last error its own,
+// scans repaired together; everything as when made alone. And a very deep tree of merges worked out on a thread with the
+// main thread's stack.
 // Run under ThreadSanitizer: c++ -std=c++17 -O1 -g -fsanitize=thread -I. test/threads.cpp Engine/*.cpp -o threads && ./threads
 #include "BcadKernel.h"
 
@@ -133,6 +134,47 @@ int main() {
       });
     for (auto &th : pool) th.join();
     check("threads: each thread's last error is its own", wrong == 0, std::to_string(wrong.load()) + " wrong");
+  }
+
+  // Scans repaired on four threads at once (a ball's mesh with holes, triangles turned round, as a soup; and two of it
+  // overlapping): each to the bit as repaired alone.
+  {
+    const double d[1] = {30};
+    BKShape *ball = bk_primitive(BK_SPHERE, d);
+    BKSculptMesh *m = bk_remesh(ball, I, 1.5);
+    std::vector<std::vector<float>> pos(2);
+    std::vector<std::vector<uint32_t>> idx(2);
+    for (int k = 0; k < 2 && m; k++) {
+      for (int i = 0; i < 3 * m->triangleCount; i++) {
+        if (i % 3 == 0 && (i / 3) % 37 == 5) {
+          i += 2;
+          continue;
+        }
+        uint32_t v = m->indices[i / 3 * 3 + ((i / 3) % 11 == 0 ? (3 - i % 3) % 3 : i % 3)];
+        idx[k].push_back((uint32_t)(pos[k].size() / 3));
+        for (int c = 0; c < 3; c++) pos[k].push_back(m->positions[3 * v + c] + (k && c == 0 && i >= 3 * m->triangleCount / 2 ? 9.0f : 0.0f));
+      }
+    }
+    auto repairHash = [&](int k) {
+      BKSculptMesh *r = bk_scan_repair(pos[k].data(), (int)pos[k].size() / 3, idx[k].data(), (int)idx[k].size() / 3, nullptr, nullptr);
+      uint64_t h = 1469598103934665603ull;
+      auto mix = [&](const void *data, size_t n) {
+        for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)data)[i]) * 1099511628211ull;
+      };
+      if (r) mix(r->positions, 12 * (size_t)r->vertexCount), mix(r->indices, 12 * (size_t)r->triangleCount);
+      bk_sculpt_mesh_free(r);
+      return r ? h : 0;
+    };
+    uint64_t alone[2] = {repairHash(0), repairHash(1)};
+    std::atomic<int> wrong{0};
+    std::vector<std::thread> pool;
+    for (int t = 0; t < 4; t++)
+      pool.emplace_back([&, t] {
+        if (repairHash(t % 2) != alone[t % 2]) wrong++;
+      });
+    for (auto &th : pool) th.join();
+    check("threads: scans repaired on four threads at once, each as repaired alone", wrong == 0 && alone[0] && alone[1], std::to_string(wrong.load()) + " wrong");
+    bk_sculpt_mesh_free(m), bk_free(ball);
   }
 
   // A tree of merges 400 deep, worked out on a thread with the main thread's stack (8 MB): meshed, boxed, counted.

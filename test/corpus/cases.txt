@@ -486,3 +486,15 @@ g_hollow_peg|G 0 1 60 1.2 1.3 1 1.1 1 1.1 1 1 1 10 -20 5 15 -10 0 30 40 70 20 -1
 g_bob_fists|G 0 1 94 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 8 0 10 8 0 10 0 0 0 0 0 0 0 25 100 0 25 100 2 1 ;||made 9809.329 1.961866
 g_afro_wave_draft|G 1 0 100 1 1 1 1 1 1 1 1 1 0 0 5 0 0 0 8 0 10 35 95 100 0 0 0 0 0 0 0 25 15 -10 0 60 6 1 ;||made 13373.71 2.674742
 g_ponytail_sit|G 0 1 94 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 8 20 62 8 20 62 90 6 90 90 6 90 0 25 15 0 25 15 4 1.2 ;||made 9752.359 1.950472
+# Scans: a shape's mesh damaged (holes, triangles turned round, a soup, twice over, cracks, loose bits, overlapping
+# itself) and repaired as a scan from another app; simplified where `most` says.
+q_sphere_holes|P 3 30 ; Q 0.05 1 1 0 ;||made 13989.44 2.797888
+q_box_turned|P 0 20 20 20 ; Q 0.05 2 2 0 ;||made 8000 1.6
+q_torus_soup_cracks|P 5 0 40 12 ; Q 0.05 20 3 0 ;||made 9812.202 1.96244
+q_cylinder_twice|P 1 20 30 ; Q 0.05 8 4 0 ;||made 9364.335 1.872867
+q_merged_everything|P 0 20 20 20 ; P 1 12 30 ; B 0 ; Q 0.05 63 5 0 ;||made 9119.104 1.823821
+q_spheres_overlapping|P 3 30 ; Q 0.1 64 6 0 ;||made 20559.19 4.111839
+q_sphere_simplified|P 3 30 ; Q 0.01 0 7 20000 ;||made 14106.89 2.821377
+q_torus_holes_simplified|P 5 0 40 12 ; Q 0.02 3 8 30000 ;||made 9892.656 1.978531
+q_bolt_holes_soup|N 1 3 40 0 ; Q 0.02 7 9 0 ;||made 1252.642 0.2505284
+q_figure_holes|G 1 0 ; Q 0.2 3 10 0 ;||made 12139.69 2.427938

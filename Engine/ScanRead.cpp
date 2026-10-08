@@ -57,50 +57,6 @@ float toFloat(double v) { return v > FLT_MAX ? INFINITY : v < -FLT_MAX ? -INFINI
 
 std::string count(uint64_t n) { return std::to_string(n); }
 
-// Points made one where they're one to the last bit (−0 as 0), numbered as they first come: a flat table, grown as it
-// fills, its slots chosen from all the bits (as weld() does).
-class Welder {
- public:
-  explicit Welder(std::vector<float> &p) : p(p) {}
-  uint32_t add(float x, float y, float z) {
-    float q[3] = {x + 0.0f, y + 0.0f, z + 0.0f};
-    if ((size_t)(n + 1) * 2 > table.size()) grow();
-    size_t mask = table.size() - 1;
-    for (size_t k = slot(q) & mask;; k = (k + 1) & mask) {
-      uint32_t at = table[k];
-      if (at == UINT32_MAX) {
-        table[k] = n;
-        p.insert(p.end(), q, q + 3);
-        return n++;
-      }
-      if (std::memcmp(&p[3 * (size_t)at], q, sizeof q) == 0) return at;
-    }
-  }
-  uint32_t size() const { return n; }
-
- private:
-  std::vector<float> &p;
-  std::vector<uint32_t> table;
-  uint32_t n = 0;
-  static uint64_t slot(const float *q) {
-    uint32_t b[3];
-    std::memcpy(b, q, sizeof b);
-    uint64_t h = (b[0] * 0x9E3779B97F4A7C15ull) ^ (b[1] * 0xC2B2AE3D27D4EB4Full) ^ (b[2] * 0x165667B19E3779F9ull);
-    h ^= h >> 33, h *= 0xFF51AFD7ED558CCDull, h ^= h >> 33, h *= 0xC4CEB9FE1A85EC53ull, h ^= h >> 33;
-    return h;
-  }
-  void grow() {
-    table.assign(std::max<size_t>(64, table.size() * 2), UINT32_MAX);
-    size_t mask = table.size() - 1;
-    for (uint32_t i = 0; i < n; i++)
-      for (size_t k = slot(&p[3 * (size_t)i]) & mask;; k = (k + 1) & mask)
-        if (table[k] == UINT32_MAX) {
-          table[k] = i;
-          break;
-        }
-  }
-};
-
 // A face of more than three corners (point numbers into P, 3 floats each) cut into triangles in the plane it most nearly
 // lies in: a quad along the diagonal that keeps both halves the right way round (the shorter where both do), a face
 // turning one way all round as a fan, any other by cutting off ears (one cut anyway where none is left, and every one
@@ -164,7 +120,7 @@ struct Build {
   Soup &s;
   const ScanLimits &limits;
   std::string &why;
-  Welder weld;
+  PointWeld weld;
   uint64_t budget = 200000000;  // looks for ears, for the whole file
   std::vector<uint32_t> cut;
   Build(Soup &s, const ScanLimits &limits, std::string &why) : s(s), limits(limits), why(why), weld(s.p) {

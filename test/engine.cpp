@@ -267,6 +267,329 @@ static std::string meshXml(const Mesh3 &m) {
   return s + "</triangles></mesh>";
 }
 
+// Repair: a mesh as a scan or another app leaves it, made a closed body bk_mesh_shape takes.
+struct Repaired {
+  BKSculptMesh *mesh = nullptr;
+  BKScanReport report{};
+  BKShape *shape = nullptr;  // as bk_mesh_shape takes it
+  double volume = 0;
+  int pieces = 0;
+  std::string why;
+  ~Repaired() { bk_free(shape), bk_sculpt_mesh_free(mesh); }
+};
+static Mesh3 meshOf(const BKSculptMesh *m) {
+  Mesh3 out;
+  out.p.assign(m->positions, m->positions + 3 * m->vertexCount);
+  out.t.assign(m->indices, m->indices + 3 * m->triangleCount);
+  return out;
+}
+static void repair(const Mesh3 &in, Repaired &r, const BKScanOptions *o = nullptr) {
+  r.mesh = bk_scan_repair(in.p.data(), (int)(in.p.size() / 3), in.t.data(), (int)(in.t.size() / 3), o, &r.report);
+  if (!r.mesh) {
+    r.why = bk_last_error();
+    return;
+  }
+  r.shape = bk_mesh_shape(r.mesh->positions, r.mesh->vertexCount, r.mesh->indices, r.mesh->triangleCount);
+  if (!r.shape) {
+    r.why = std::string("not taken: ") + bk_last_error();
+    return;
+  }
+  BKMesh *m = bk_mesh(r.shape, 0.05);
+  r.volume = m ? m->volume : 0;
+  r.pieces = bk_piece_count(r.shape);
+  bk_mesh_free(m);
+}
+// Every triangle with its own three points (as an STL holds them, unwelded).
+static Mesh3 soup(const Mesh3 &m) {
+  Mesh3 s;
+  for (uint32_t v : m.t) s.t.push_back((uint32_t)(s.p.size() / 3)), s.p.insert(s.p.end(), {m.p[3 * v], m.p[3 * v + 1], m.p[3 * v + 2]});
+  return s;
+}
+static Mesh3 joined(Mesh3 a, const Mesh3 &b, float dx = 0) {
+  uint32_t n = (uint32_t)(a.p.size() / 3);
+  for (size_t i = 0; i < b.p.size(); i++) a.p.push_back(b.p[i] + (i % 3 == 0 ? dx : 0));
+  for (uint32_t v : b.t) a.t.push_back(v + n);
+  return a;
+}
+static Mesh3 sphereMesh(double d, double detail) {
+  const double I[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, p[1] = {d};
+  BKShape *s = bk_primitive(BK_SPHERE, p);
+  BKSculptMesh *m = bk_remesh(s, I, detail);
+  Mesh3 out = m ? meshOf(m) : Mesh3();
+  bk_sculpt_mesh_free(m), bk_free(s);
+  return out;
+}
+static double meshVolume(const Mesh3 &m) {
+  double v = 0;
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    const float *a = &m.p[3 * m.t[k]], *b = &m.p[3 * m.t[k + 1]], *c = &m.p[3 * m.t[k + 2]];
+    v += (double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) - (double)a[1] * ((double)b[0] * c[2] - (double)b[2] * c[0]) +
+         (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0]);
+  }
+  return v / 6;
+}
+
+static void scanRepairs() {
+  Mesh3 cube = cubeMesh(10);
+  // A cube as a triangle soup, placed far off: welded to 8 points, exactly its volume, made about its middle.
+  {
+    Mesh3 far = soup(cube);
+    for (size_t i = 0; i < far.p.size(); i++) far.p[i] += i % 3 == 0 ? 1000 : i % 3 == 1 ? 2000 : 3000;
+    Repaired r;
+    repair(far, r);
+    check("a cube as a triangle soup far off: welded to 8 points, its volume exactly, made about its middle",
+          r.shape && r.mesh->vertexCount == 8 && r.mesh->triangleCount == 12 && r.volume == 1000 && r.report.offset[0] == 1004 &&
+              r.report.offset[1] == 2004 && r.report.offset[2] == 3004 && r.report.holes == 0 && r.report.flipped == 0 && r.report.remade == 0,
+          r.shape ? fmt("offset %g %g %g", r.report.offset[0], r.report.offset[1], r.report.offset[2]) : r.why);
+  }
+  // A face missing: its hole closed by two triangles, the cube's volume exactly.
+  {
+    Mesh3 open = cube;
+    open.t.resize(open.t.size() - 6);
+    Repaired r;
+    repair(open, r);
+    check("a cube with a face missing: the hole closed flat", r.shape && r.report.holes == 1 && r.report.largestHole == 4 && r.mesh->triangleCount == 12 && r.volume == 1000,
+          r.shape ? fmt("volume %g", r.volume) : r.why);
+  }
+  // Triangles turned the wrong way, the whole inside out, and a void inside kept as one.
+  {
+    Mesh3 ball = sphereMesh(30, 1.5), messy = ball, inverted = ball;
+    double want = meshVolume(ball);
+    int turned = 0;
+    for (size_t k = 0; k < messy.t.size(); k += 3)
+      if (k % 21 == 0) std::swap(messy.t[k + 1], messy.t[k + 2]), turned++;
+    for (size_t k = 0; k < inverted.t.size(); k += 3) std::swap(inverted.t[k + 1], inverted.t[k + 2]);
+    Repaired a, b;
+    repair(messy, a), repair(inverted, b);
+    check("triangles turned the wrong way turned back; a mesh inside out turned outward",
+          a.shape && b.shape && (int)a.report.flipped == turned && near(a.volume, want, 1e-9 * want) && (int)b.report.flipped == (int)ball.t.size() / 3 &&
+              near(b.volume, want, 1e-9 * want),
+          a.shape && b.shape ? fmt("%.0f and %.0f turned", a.report.flipped, b.report.flipped) : a.why + " / " + b.why);
+    Mesh3 hollowed = cubeMesh(30), inner = cubeMesh(10);
+    for (size_t i = 0; i < inner.p.size(); i++) inner.p[i] += 10;
+    for (size_t k = 0; k < inner.t.size(); k += 3) std::swap(inner.t[k + 1], inner.t[k + 2]);
+    Repaired c;
+    repair(joined(hollowed, inner), c);
+    // (The same void beside the box, not in it: turned outward, a second body.)
+    Repaired d;
+    repair(joined(hollowed, inner, 50), d);
+    check("a void inside a box kept as one; the same beside it turned outward", c.shape && c.volume == 27000 - 1000 && c.report.flipped == 0 && d.shape &&
+          d.volume == 27000 + 1000 && d.report.flipped == 12, c.shape && d.shape ? fmt("%g and %g", c.volume, d.volume) : c.why + " / " + d.why);
+  }
+  // Triangles there twice; a wall of no thickness (a triangle both ways round) gone.
+  {
+    Mesh3 m = cube;
+    m.t.insert(m.t.end(), {0, 2, 1, 2, 3, 1, 4, 5, 6});
+    // (The wall: across the cube's middle, both ways round, on points of its own.)
+    uint32_t n = (uint32_t)(m.p.size() / 3);
+    m.p.insert(m.p.end(), {1, 1, 5, 9, 1, 5, 1, 9, 5});
+    m.t.insert(m.t.end(), {n, n + 1, n + 2, n, n + 2, n + 1});
+    Repaired r;
+    repair(m, r);
+    check("triangles there twice kept once; a wall both ways round gone", r.shape && r.report.duplicates == 5 && r.mesh->triangleCount == 12 && r.volume == 1000,
+          r.shape ? fmt("%.0f duplicates", r.report.duplicates) : r.why);
+  }
+  // Loose bits: noise floating by a ball taken off; a small closed part kept.
+  {
+    Mesh3 m = sphereMesh(30, 1.5);
+    uint32_t n = (uint32_t)(m.p.size() / 3);
+    m.p.insert(m.p.end(), {20, 0, 0, 21, 0, 0, 20, 1, 0, 21, 1, 0});
+    m.t.insert(m.t.end(), {n, n + 1, n + 2, n + 1, n + 3, n + 2});
+    Mesh3 tiny = cubeMesh(1);
+    Repaired r;
+    repair(joined(m, tiny, 40), r);
+    check("loose bits floating by a body taken off; a small closed part kept", r.shape && r.report.islands == 2 && r.pieces == 2,
+          r.shape ? fmt("%.0f taken off, %.0f pieces", r.report.islands, r.pieces) : r.why);
+  }
+  // Two cubes meeting along an edge (four triangles at it): kept as two, touching.
+  {
+    Mesh3 two = cube, other = cubeMesh(10);
+    for (size_t i = 0; i < other.p.size(); i++) other.p[i] += i % 3 == 2 ? 0 : 10;
+    Repaired r;
+    repair(soup(joined(two, other)), r);
+    check("two cubes meeting along an edge: kept as two", r.shape && r.report.crowded == 1 && r.volume == 2000 && r.report.holes == 0,
+          r.shape ? fmt("%.0f crowded, volume %g", r.report.crowded, r.volume) : r.why);
+  }
+  // Holes: two meeting at a corner (one hole through it, its rim passing the corner twice, closed as the two were); a
+  // big one round a ball's cap (many sides, curved); a big flat one under a cylinder (more than 300 sides).
+  {
+    Mesh3 m = cube;
+    // (Two triangles of different faces, sharing only corner 5.)
+    std::vector<uint32_t> keep;
+    for (size_t k = 0; k < m.t.size(); k += 3)
+      if (k / 3 != 3 && k / 3 != 10) keep.insert(keep.end(), {m.t[k], m.t[k + 1], m.t[k + 2]});
+    m.t = keep;
+    Repaired a;
+    repair(m, a);
+    Mesh3 ball = sphereMesh(40, 1), capless;
+    capless.p = ball.p;
+    for (size_t k = 0; k < ball.t.size(); k += 3)
+      if (ball.p[3 * ball.t[k] + 2] < 16 || ball.p[3 * ball.t[k + 1] + 2] < 16 || ball.p[3 * ball.t[k + 2] + 2] < 16)
+        capless.t.insert(capless.t.end(), {ball.t[k], ball.t[k + 1], ball.t[k + 2]});
+    Repaired b;
+    repair(capless, b);
+    // A cylinder of 400 sides with no bottom.
+    Mesh3 can;
+    int sides = 400;
+    for (int i = 0; i < sides; i++) {
+      double a = 2 * PI * i / sides;
+      can.p.insert(can.p.end(), {(float)(20 * std::cos(a)), (float)(20 * std::sin(a)), 0, (float)(20 * std::cos(a)), (float)(20 * std::sin(a)), 30});
+    }
+    uint32_t top = (uint32_t)sides * 2;
+    can.p.insert(can.p.end(), {0, 0, 30});
+    for (int i = 0; i < sides; i++) {
+      uint32_t a = 2 * i, b = 2 * ((i + 1) % sides);
+      can.t.insert(can.t.end(), {a, b, b + 1, a, b + 1, a + 1, a + 1, b + 1, top});
+    }
+    Repaired c;
+    repair(can, c);
+    double canVolume = meshVolume(can) + 0;  // (open: what the caps add is the bottom's, at z = 0: nothing)
+    check("holes meeting at a corner, round a ball's cap, and under a cylinder (400 sides, flat): each closed",
+          a.shape && a.report.holes == 1 && a.report.largestHole == 6 && a.mesh->vertexCount == 8 && a.volume == 1000 && b.shape && b.report.holes == 1 && b.report.largestHole > 20 && c.shape &&
+              c.report.holes == 1 && c.report.largestHole == 400 && near(c.volume, canVolume, 1e-6 * canVolume) && c.mesh->vertexCount == 801,
+          fmt("%.0f holes; a cap of %.0f sides; the cylinder %g", a.report.holes, b.report.largestHole, c.volume) + " " + a.why + b.why + c.why);
+  }
+  // Where it passes through itself: a fold mended where it is; two balls overlapping made one; a Möbius strip (no
+  // inside or outside) closed somehow. Not remade when asked not to be: refused. Made solid on a grid (what's left
+  // when nothing else will do): a ball with its top cut off, closed across where the top was.
+  {
+    Mesh3 ball = sphereMesh(30, 1.0), other = ball;
+    Repaired a;
+    repair(joined(ball, other, 20), a);
+    // (Two balls of radius 15, 20 apart: both less the lens they share, π(4r + d)(2r − d)²/12.)
+    double one = meshVolume(ball), lens = PI * (60 + 20) * 100 / 12, want = 2 * one - lens;
+    Mesh3 folded = ball;
+    // (The point at the top pulled down through the bottom.)
+    size_t top = 0;
+    for (size_t i = 0; i < folded.p.size() / 3; i++)
+      if (folded.p[3 * i + 2] > folded.p[3 * top + 2]) top = i;
+    folded.p[3 * top] += 0.3f, folded.p[3 * top + 2] = -17;
+    Repaired b;
+    repair(folded, b);
+    // A Möbius strip: a band of 60 quads, turned half round along its way.
+    Mesh3 strip;
+    int n = 60;
+    for (int i = 0; i < n; i++) {
+      double u = 2 * PI * i / n;
+      for (int s = -1; s <= 1; s += 2) {
+        double w = 4 * s;
+        strip.p.insert(strip.p.end(), {(float)((20 + w * std::cos(u / 2)) * std::cos(u)), (float)((20 + w * std::cos(u / 2)) * std::sin(u)), (float)(w * std::sin(u / 2))});
+      }
+    }
+    for (int i = 0; i < n; i++) {
+      uint32_t a0 = 2 * i, a1 = 2 * i + 1, b0 = 2 * ((i + 1) % n), b1 = 2 * ((i + 1) % n) + 1;
+      // (Where it comes round, its sides have swapped.)
+      if (i == n - 1) std::swap(b0, b1);
+      strip.t.insert(strip.t.end(), {a0, b0, b1, a0, b1, a1});
+    }
+    Repaired c;
+    repair(strip, c);
+    BKScanOptions keep;
+    bk_scan_options(&keep);
+    keep.remake = 0;
+    Repaired d;
+    repair(joined(ball, other, 20), d, &keep);
+    Mesh3 capless;
+    capless.p = ball.p;
+    for (size_t k = 0; k < ball.t.size(); k += 3)
+      if (ball.p[3 * ball.t[k] + 2] < 10 || ball.p[3 * ball.t[k + 1] + 2] < 10 || ball.p[3 * ball.t[k + 2] + 2] < 10)
+        capless.t.insert(capless.t.end(), {ball.t[k], ball.t[k + 1], ball.t[k + 2]});
+    std::vector<bce::V3> sp, sq;
+    for (size_t i = 0; i < capless.p.size(); i += 3) sp.push_back({capless.p[i], capless.p[i + 1], capless.p[i + 2]});
+    std::vector<uint32_t> st;
+    std::string swhy;
+    bool solid = bce::solidify(sp, capless.t, 0.5, sq, st, swhy);
+    Mesh3 made;
+    for (bce::V3 q : sq) made.p.insert(made.p.end(), {(float)q.x, (float)q.y, (float)q.z});
+    made.t = st;
+    BKShape *closedUp = solid ? bk_mesh_shape(made.p.data(), (int)sq.size(), st.data(), (int)st.size() / 3) : nullptr;
+    // (The ball less the cap above z = 10 (of radius 15): π h² (3r − h) / 3, h = 5.)
+    double cut = one - PI * 25 * (45 - 5) / 3, got = solid ? meshVolume(made) : 0;
+    check("a ball with its top cut off made solid on a grid: closed, across where the top was", closedUp && near(got, cut, 0.03 * cut), fmt("%g of %g ", got, cut) + swhy);
+    bk_free(closedUp);
+    check("two balls overlapping made one; a fold mended where it is (the rest as it was); a Möbius strip closed; not remade when asked not to be",
+          a.shape && a.report.remade == 2 && near(a.volume, want, 0.01 * want) && b.shape && b.report.remade == 1 && b.volume > 0.9 * one &&
+              b.mesh->triangleCount > 0.98 * ball.t.size() / 3 && c.shape &&
+              c.report.remade >= 1 && c.volume > 0 && !d.mesh && d.why == "scan: can't be closed: it passes through itself",
+          fmt("%g of %g, remade %.0f; ", a.volume, want, a.report.remade) + fmt("%g of %g, remade %.0f; ", b.volume, one, b.report.remade) +
+              fmt("the strip remade %.0f ", c.report.remade) + a.why + b.why + c.why + " / " + d.why);
+  }
+  // Cracks: a face whose points are a hair off the others'; welded shut.
+  {
+    Mesh3 m = soup(cube);
+    for (size_t i = 0; i < 9; i++) m.p[i] = std::nextafter(m.p[i], 100.f);
+    Repaired r;
+    repair(m, r);
+    check("a crack a hair wide welded shut", r.shape && r.report.welded > 0 && r.report.holes == 0 && r.mesh->vertexCount == 8, r.shape ? fmt("%.0f welded", r.report.welded) : r.why);
+  }
+  // Refused: too large, nothing there.
+  {
+    Mesh3 big = cubeMesh(20000), flat;
+    flat.p = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    flat.t = {0, 0, 1};
+    Repaired a, b;
+    repair(big, a), repair(flat, b);
+    check("a mesh larger than 10 m, and one of no triangles, refused", !a.mesh && a.why == "scan: larger than 10 m" && !b.mesh && b.why == "scan: no triangles",
+          a.why + " / " + b.why);
+  }
+  // Speed: a 2-million-triangle scan (a fine torus) with 400 holes and triangles turned the wrong way, repaired at full
+  // resolution.
+  {
+    Mesh3 torus = torusMesh(1000, 40, 15), damaged;
+    damaged.p = torus.p;
+    for (size_t k = 0; k < torus.t.size(); k += 3) {
+      if (k / 3 % 5000 == 7) continue;
+      bool turn = k / 3 % 777 == 0;
+      damaged.t.insert(damaged.t.end(), {torus.t[k], torus.t[k + (turn ? 2 : 1)], torus.t[k + (turn ? 1 : 2)]});
+    }
+    BKScanOptions full;
+    bk_scan_options(&full);
+    full.maxTriangles = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    Repaired r;
+    r.mesh = bk_scan_repair(damaged.p.data(), (int)(damaged.p.size() / 3), damaged.t.data(), (int)(damaged.t.size() / 3), &full, &r.report);
+    double took = ms(t0);
+    check("a 2-million-triangle scan with 400 holes and triangles turned round repaired at full resolution, quickly",
+          r.mesh && r.report.holes == 400 && r.report.flipped > 2500 && r.mesh->triangleCount == 2000000 && r.report.remade == 0 && (!timed || took < 10000),
+          fmt("%.0f ms", took) + (r.mesh ? "" : std::string(" ") + bk_last_error()));
+  }
+  // Simplified: a ball of 650 000 triangles to 100 000, still closed (V − E + F = 2), its volume within 0.1%, the
+  // most it strays measured and small; a 4-million-triangle scan to the usual 2 million, quickly.
+  {
+    Mesh3 ball = sphereMesh(30, 0.15);
+    BKScanOptions fewer;
+    bk_scan_options(&fewer);
+    fewer.maxTriangles = 100000;
+    Repaired r;
+    repair(ball, r, &fewer);
+    double want = meshVolume(ball);
+    check("a ball of 650 000 triangles simplified to 100 000: closed, its volume within 0.1%, straying under 0.01 mm",
+          r.shape && r.mesh->triangleCount <= 100000 && r.mesh->triangleCount > 99000 && r.mesh->vertexCount == r.mesh->triangleCount / 2 + 2 &&
+              near(r.volume, want, 0.001 * want) && (size_t)r.report.simplifiedFrom == ball.t.size() / 3 && r.report.deviation > 0 && r.report.deviation < 0.01,
+          r.shape ? fmt("%.0f triangles, volume %g of %g", r.mesh->triangleCount, r.volume, want) + fmt(", straying %.4f mm", r.report.deviation) : r.why);
+    Mesh3 torus = torusMesh(1414, 40, 15);
+    auto t0 = std::chrono::steady_clock::now();
+    Repaired big;
+    big.mesh = bk_scan_repair(torus.p.data(), (int)(torus.p.size() / 3), torus.t.data(), (int)(torus.t.size() / 3), nullptr, &big.report);
+    double took = ms(t0);
+    check("a 4-million-triangle scan simplified to 2 million quickly, straying under a micrometre",
+          big.mesh && big.mesh->triangleCount == 2000000 && big.report.deviation < 0.001 && (!timed || took < 40000),
+          fmt("%.0f ms, straying %.5f mm", took, big.report.deviation) + (big.mesh ? "" : std::string(" ") + bk_last_error()));
+  }
+  // The same every time, to the bit.
+  {
+    Mesh3 ball = sphereMesh(30, 0.7);
+    for (size_t k = 0; k < ball.t.size(); k += 3)
+      if (k % 33 == 0) std::swap(ball.t[k + 1], ball.t[k + 2]);
+    ball.t.resize(ball.t.size() - 30);
+    Repaired a, b;
+    repair(soup(ball), a), repair(soup(ball), b);
+    check("repairs the same each time, to the bit", a.mesh && b.mesh && a.mesh->vertexCount == b.mesh->vertexCount && a.mesh->triangleCount == b.mesh->triangleCount &&
+          !memcmp(a.mesh->positions, b.mesh->positions, 12 * (size_t)a.mesh->vertexCount) && !memcmp(a.mesh->indices, b.mesh->indices, 12 * (size_t)a.mesh->triangleCount),
+          a.why);
+  }
+}
+
 // The tree over a mesh's triangles: nearest points as looking at every triangle finds them, to the bit; winding numbers
 // as summing every triangle's solid angle finds them, near enough to tell inside from out; quickly for millions of
 // triangles.
@@ -599,6 +922,7 @@ int main() {
   if (getenv("BCAD_ONLY") && std::string(getenv("BCAD_ONLY")) == "scans") {
     scanReaders();
     meshTreeChecks();
+    scanRepairs();
     printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
     return failures ? 1 : 0;
   }
@@ -4738,6 +5062,7 @@ int main() {
   // MARK: scans
   scanReaders();
   meshTreeChecks();
+  scanRepairs();
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
   return failures ? 1 : 0;

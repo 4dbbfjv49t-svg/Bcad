@@ -290,6 +290,40 @@ BKScanSoup *bk_scan_read(const uint8_t *bytes, int64_t length, const char *exten
 BKScanSoup *bk_scan_read_3mf(const char *const *names, const uint8_t *const *bytes, const int64_t *lengths, int count,
                              const BKScanLimits *limits);
 void bk_scan_soup_free(BKScanSoup *s);
+// How a mesh from a file is made a closed body (bk_scan_options sets the usual: 2 million triangles at most, holes
+// filled, loose bits taken off, made again on a grid where nothing else will do). progress, where given, is told how far
+// along it is (0 … 1) and stops it by answering 0.
+typedef struct {
+  int maxTriangles;       // simplified to at most this many (0: kept at any size)
+  int fillHoles, removeIslands, remake;
+  double islandShare;     // loose open bits of fewer of the triangles than this (and small beside the whole) taken off
+  int (*progress)(void *context, double done);
+  void *context;
+} BKScanOptions;
+void bk_scan_options(BKScanOptions *o);
+// What was done to it.
+typedef struct {
+  int trianglesIn, pointsIn, trianglesOut, pointsOut;
+  int welded;             // points made one with another a hair away
+  int dropped;            // triangles left out: corners not numbers or not there, a corner twice
+  int duplicates;         // triangles there twice
+  int flipped;            // triangles turned round to face out
+  int crowded;            // edges more than two triangles met at
+  int holes, largestHole; // holes closed, the most sides one had
+  int islands;            // triangles of loose bits taken off
+  int remade;             // 0 kept as it was; 1 a fold mended; 2 overlapping parts made one; 3 made again on a grid; 4 made
+                          // solid on a grid (it couldn't be closed as it was)
+  double remadeDetail;    // the grid's spacing then (mm)
+  int simplifiedFrom;     // triangles before it was simplified (0: it wasn't)
+  double deviation;       // the furthest the simplified surface strays from the full one (mm)
+  double offset[3];       // where its middle was: the mesh is made about the origin, to be placed back by this
+  double size[3], volume;
+  double detail;          // the detail to sculpt it at (mm)
+} BKScanReport;
+// A mesh from a file (bk_scan_read's, or a part of it) made a closed body bk_mesh_shape takes. NULL when it can't be
+// (bk_last_error says why: "scan: larger than 10 m", "scan: can't be closed: …", "scan: stopped" …).
+BKSculptMesh *bk_scan_repair(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount, const BKScanOptions *options,
+                             BKScanReport *report);
 
 const char *bk_last_error(void);
 
