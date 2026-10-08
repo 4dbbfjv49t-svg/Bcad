@@ -1,5 +1,6 @@
 #if SELFTEST
 import AppKit
+import ModelIO
 import simd
 
 // Kernel, file and editing checks: bash test/selftest.sh
@@ -1080,8 +1081,90 @@ enum SelfTest {
         check("a dropped Bcad file adds its shapes to the open one", addedFile && lib.doc.bodies.count == 1 + kept.bodies.count
               && stays && addedNodes == keptNodes && allShown, "\(lib.doc.bodies.count) shapes")
         let notAdded = lib.addFiles([dir.appendingPathComponent("notes.txt")])
-        let saysSo: Bool = lib.note == L("Only 3MF files made by Bcad can be added")
-        check("a file that isn't a Bcad 3MF adds nothing and says so", !notAdded && lib.doc.bodies.count == 1 + kept.bodies.count && saysSo, lib.note ?? "")
+        let saysSo: Bool = lib.note == L("Only 3MF, STL, OBJ, PLY and USDZ files can be added")
+        check("a file that isn't a model adds nothing and says so", !notAdded && lib.doc.bodies.count == 1 + kept.bodies.count && saysSo, lib.note ?? "")
+        // Meshes from other apps and scanners: an STL, as binary and as text; an OBJ a hundredth of a unit across (metres); a
+        // PLY; another app's 3MF in centimetres; a USD scene in metres, y up: each a 10 mm cube, imported beside what's there,
+        // built, on the bed. A broken file and a point cloud are refused, saying why, and change nothing; an STL opened is a
+        // new untitled document named after it.
+        let cubePoints: [SIMD3<Float>] = (0..<8).map { i in SIMD3<Float>(i & 1 != 0 ? 10 : 0, i & 2 != 0 ? 10 : 0, i & 4 != 0 ? 10 : 0) }
+        let cubeTris: [SIMD3<UInt32>] = [SIMD3(0, 2, 1), SIMD3(1, 2, 3), SIMD3(4, 5, 6), SIMD3(5, 7, 6), SIMD3(0, 1, 4), SIMD3(1, 5, 4),
+                                         SIMD3(2, 6, 3), SIMD3(3, 6, 7), SIMD3(0, 4, 2), SIMD3(2, 4, 6), SIMD3(1, 3, 5), SIMD3(3, 7, 5)]
+        func cubeText(_ unit: Float, _ line: (SIMD3<Float>) -> String) -> String { cubePoints.map { line($0 * unit) }.joined() }
+        let stlURL = dir.appendingPathComponent("cube.stl"), textURL = dir.appendingPathComponent("text cube.stl")
+        try? STL.write(stlURL, meshes: [SavedMesh(points: cubePoints, triangles: cubeTris)])
+        var stlText = "solid cube\r\n"
+        for t in cubeTris {
+            stlText += "facet normal 0 0 0\r\nouter loop\r\n"
+            for v in [t.x, t.y, t.z] {
+                let p = cubePoints[Int(v)]
+                stlText += "vertex \(p.x) \(p.y) \(p.z)\r\n"
+            }
+            stlText += "endloop\r\nendfacet\r\n"
+        }
+        try? (stlText + "endsolid cube\r\n").write(to: textURL, atomically: true, encoding: .utf8)
+        let objURL = dir.appendingPathComponent("tiny.obj")
+        let objText = cubeText(0.001) { "v \($0.x) \($0.y) \($0.z)\n" } + cubeTris.map { "f \($0.x + 1) \($0.y + 1) \($0.z + 1)\n" }.joined()
+        try? objText.write(to: objURL, atomically: true, encoding: .utf8)
+        let plyURL = dir.appendingPathComponent("cube.ply")
+        let plyHead = "ply\nformat ascii 1.0\nelement vertex 8\nproperty float x\nproperty float y\nproperty float z\nelement face 12\n"
+            + "property list uchar int vertex_indices\nend_header\n"
+        try? (plyHead + cubeText(1) { "\($0.x) \($0.y) \($0.z)\n" } + cubeTris.map { "3 \($0.x) \($0.y) \($0.z)\n" }.joined())
+            .write(to: plyURL, atomically: true, encoding: .utf8)
+        let cmURL = dir.appendingPathComponent("other app.3mf")
+        let cmModel = "<?xml version=\"1.0\"?><model unit=\"centimeter\"><resources><object id=\"1\" type=\"model\"><mesh><vertices>"
+            + cubeText(0.1) { "<vertex x=\"\($0.x)\" y=\"\($0.y)\" z=\"\($0.z)\"/>" } + "</vertices><triangles>"
+            + cubeTris.map { "<triangle v1=\"\($0.x)\" v2=\"\($0.y)\" v3=\"\($0.z)\"/>" }.joined()
+            + "</triangles></mesh></object></resources><build><item objectid=\"1\"/></build></model>"
+        try? Zip.write([("3D/3dmodel.model", Data(cmModel.utf8))]).write(to: cmURL)
+        let usdURL = dir.appendingPathComponent(MDLAsset.canExportFileExtension("usdz") ? "scene.usdz" : "scene.usda")
+        let scene = MDLAsset()
+        scene.add(MDLMesh(boxWithExtent: SIMD3<Float>(0.01, 0.01, 0.01), segments: SIMD3<UInt32>(1, 1, 1), inwardNormals: false,
+                          geometryType: .triangles, allocator: nil))
+        let exported = (try? scene.export(to: usdURL)) != nil
+        // (Imported in the background: waited for.)
+        func importing(_ go: () -> Void) {
+            go()
+            let t = Date()
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) } while lib.importing > 0 && Date().timeIntervalSince(t) < 120
+            settle()
+        }
+        let count0 = lib.doc.bodies.count
+        lib.note = nil
+        importing { _ = lib.addFiles([stlURL]) }
+        let cubeBody = lib.doc.bodies.count == count0 + 1 ? lib.doc.bodies.last : nil
+        var cubeSculpted = false
+        if let b = cubeBody, case .sculpt = b.node { cubeSculpted = true }
+        let cubeBuilt: Bool = cubeBody.map { abs((lib.meshes[$0.id]?.volume ?? 0) - 1000) < 0.01 } ?? false
+        let cubeOnBed: Bool = cubeBody.map { abs(bounds($0.id).0.z) < 1e-6 } ?? false
+        check("an STL dropped on the window is imported beside the shapes there: a sculpted body, built, on the bed, said so",
+              cubeSculpted && cubeBuilt && cubeOnBed && cubeBody?.name == "cube" && lib.note == L("Imported {name}", ["name": "cube"])
+              && lib.selection == [cubeBody?.id ?? UUID()], lib.note ?? "")
+        let count1 = lib.doc.bodies.count
+        var many = [textURL, objURL, plyURL, cmURL]
+        if exported { many.append(usdURL) }
+        importing { _ = lib.addFiles(many) }
+        let cubes = lib.doc.bodies.dropFirst(count1)
+        let allCubes: Bool = cubes.allSatisfy { abs((lib.meshes[$0.id]?.volume ?? 0) - 1000) < 1 }
+        check("a text STL, an OBJ in metres, a PLY, another app's 3MF in centimetres and a USD scene in metres imported together, each the cube",
+              exported && cubes.count == many.count && allCubes && (lib.note ?? "").contains(L("read as metres")),
+              "\(cubes.count) of \(many.count): " + (lib.note ?? ""))
+        let count2 = lib.doc.bodies.count
+        let brokenURL = dir.appendingPathComponent("broken.stl"), cloudURL = dir.appendingPathComponent("cloud.ply")
+        try? "solid x\nfacet normal 0 0 1\nouter loop\nvertex 1 2 oops\n".write(to: brokenURL, atomically: true, encoding: .utf8)
+        try? "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n1 0 0\n0 1 0\n"
+            .write(to: cloudURL, atomically: true, encoding: .utf8)
+        lib.note = nil
+        importing { _ = lib.addFiles([brokenURL]) }
+        let brokenSaid = lib.note == L("This file can't be read")
+        importing { _ = lib.addFiles([cloudURL]) }
+        check("a broken STL and a point cloud are refused, saying why, adding nothing",
+              brokenSaid && lib.note == L("This file has only points, no surface") && lib.doc.bodies.count == count2, lib.note ?? "")
+        importing { lib.open(stlURL) }
+        check("an STL opened is a new untitled document named after it, not yet saved",
+              lib.doc.bodies.count == 1 && lib.fileURL == nil && lib.title == "cube" && lib.dirty, lib.title)
+        lib.fileURL = fileBefore
+        lib.docName = nil
         // Sizes in mm and in percent on shapes that were edited after they were made: a box split across and a merge.
         let editedNode: Node = .split(of: box, plane: Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1)), side: 1)
         let edited = Solid(name: "Edited", color: Palette.colors[3], node: editedNode, place: Placement(move: SIMD3(0, 0, 10)))

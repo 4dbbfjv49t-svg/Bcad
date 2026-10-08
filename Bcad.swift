@@ -3165,12 +3165,17 @@ final class Workbench: DesignHost {
     }
 
     // Shapes from Bcad files dropped on the window join this document (which stays the one open), each file's beside
-    // what is there when they would overlap it. False when nothing could be added.
+    // what is there when they would overlap it; meshes from other apps and scanners are imported into it. False when
+    // nothing could be added.
     @discardableResult func addFiles(_ urls: [URL]) -> Bool {
         var problem: String?
         var added = false
+        var foreign: [URL] = []
         for url in urls {
-            guard url.pathExtension.lowercased() == "3mf" else { problem = L("Only 3MF files made by Bcad can be added"); continue }
+            guard url.pathExtension.lowercased() == "3mf" else {
+                if MeshImport.canRead(url) { foreign.append(url) } else { problem = L("Only 3MF, STL, OBJ, PLY and USDZ files can be added") }
+                continue
+            }
             do {
                 let (d, shapes) = try ThreeMF.read(url)
                 var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
@@ -3187,16 +3192,167 @@ final class Workbench: DesignHost {
                 insert(incoming, low: lo.x.isFinite ? lo : nil, high: lo.x.isFinite ? hi : nil, looks: looks)
                 added = true
             } catch FileError.notBcad {
-                problem = L("This 3MF wasn't made by Bcad and can't be edited")
+                foreign.append(url)
             } catch FileError.newer {
                 problem = L("This file was made by a newer version of Bcad")
             } catch {
                 problem = L("This file is damaged and can't be opened")
             }
         }
+        if !foreign.isEmpty {
+            importFiles(foreign, asNew: false)
+            added = true
+        }
         if let problem { flash(problem) }
         return added
     }
+
+    // MARK: importing
+
+    // Imports under way (the self-test waits for them).
+    private(set) var importing = 0
+    @ObservationIgnored private var importJob: ImportJob?
+    @ObservationIgnored private let importQueue = DispatchQueue(label: "bcad.import", qos: .userInitiated)
+
+    // Meshes from other apps and scanners read and made into closed bodies off the main thread (editing goes on meanwhile),
+    // then added to this document beside what's there, or (asNew) the first file opened as a new untitled document named
+    // after it, so saving never writes over the file it came from. A newer import, or another document, stops it.
+    func importFiles(_ urls: [URL], asNew: Bool) {
+        guard !urls.isEmpty else { return }
+        importJob?.cancel()
+        let job = ImportJob()
+        importJob = job
+        importing += 1
+        let generation = self.generation, note = L("Importing…")
+        // (Said only when it takes a moment.)
+        let slow = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.importing > 0 else { return }
+            withAnimation(Neon.spring) { self.busy = note }
+        }
+        importQueue.async {
+            var results: [(URL, Result<ImportResult, Error>)] = []
+            for url in urls where !job.cancelled { results.append((url, Result { try MeshImport.read(url, job: job) })) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.importing -= 1
+                    if self.importing == 0 {
+                        slow.cancel()
+                        self.ended(note)
+                    }
+                    guard !job.cancelled, generation == self.generation else { return }
+                    self.imported(results, asNew: asNew)
+                }
+            }
+        }
+    }
+
+    // Each file's bodies together as they lay in it, their middle where new shapes go (their lowest point on the bed when
+    // shapes are dropped onto it), each a sculpted body; what was done to them said.
+    private func imported(_ results: [(URL, Result<ImportResult, Error>)], asNew: Bool) {
+        var shapes: [Solid] = [], looks: [UUID: Mesh] = [:], said: [String] = []
+        var problem: String?, first: String?
+        var low = SIMD3<Double>(repeating: .infinity), high = -low
+        for (url, read) in results {
+            let file = url.deletingPathExtension().lastPathComponent
+            let result: ImportResult
+            do { result = try read.get() } catch {
+                if let p = Self.importProblem(error) { problem = p }
+                continue
+            }
+            if asNew && first != nil { break }
+            first = first ?? file
+            var lo = SIMD3<Double>(repeating: .infinity), hi = -lo
+            for b in result.bodies {
+                lo = simd_min(lo, b.offset + b.low)
+                hi = simd_max(hi, b.offset + b.high)
+            }
+            var shift = spawnPoint() - (lo + hi) / 2
+            shift.z = settings.dropToBed ? -lo.z : -(lo.z + hi.z) / 2
+            for (k, b) in result.bodies.enumerated() {
+                let name = result.bodies.count == 1 ? file : (b.name.isEmpty ? "\(file) \(k + 1)" : b.name)
+                let color = Palette.colors[((asNew ? 0 : doc.bodies.count) + shapes.count) % Palette.colors.count]
+                let body = Solid(name: name, color: color, node: .sculpt(Sculpt(data: b.data, detail: b.detail)), place: Placement(move: b.offset + shift))
+                looks[body.id] = Mesh(sculpt: b.data)
+                low = simd_min(low, body.place.move + b.low)
+                high = simd_max(high, body.place.move + b.high)
+                shapes.append(body)
+            }
+            said.append(Self.importNote(file, result))
+        }
+        if let problem { said.append(problem) }
+        guard !shapes.isEmpty else {
+            if !said.isEmpty { flash(said.joined(separator: "\n")) }
+            return
+        }
+        if asNew {
+            resetEditing()
+            doc = Document(bodies: shapes)
+            saved = Document()
+            fileURL = nil
+            docName = first
+            dropUnsaved()
+            Self.fileLog.notice("Imported \(first ?? "", privacy: .public)")
+            meshes = looks
+            built = [:]
+            requestFit = true
+            rebuildScene()
+            selection = shapes.map(\.id)
+        } else {
+            insert(shapes, low: low, high: high, looks: looks)
+        }
+        flash(said.joined(separator: "\n"))
+    }
+
+    // "Imported scan — 3 holes closed, simplified to 2,000,000 triangles, within 0.010 mm".
+    private static func importNote(_ file: String, _ r: ImportResult) -> String {
+        var parts: [String] = []
+        let holes = r.bodies.reduce(0) { $0 + Int($1.report.holes) }
+        if holes > 0 { parts.append(L("{n} holes closed", ["n": holes])) }
+        if let b = r.bodies.first(where: { $0.report.remade != 0 }) {
+            let d = String(format: "%.2f", b.report.remadeDetail)
+            switch b.report.remade {
+            case 1: parts.append(L("a fold mended"))
+            case 2: parts.append(L("overlapping parts joined"))
+            case 3: parts.append(L("remade at {d} mm detail", ["d": d]))
+            default: parts.append(L("made solid at {d} mm detail", ["d": d]))
+            }
+        }
+        if r.bodies.contains(where: { $0.report.simplifiedFrom > 0 }) {
+            let count = r.bodies.reduce(0) { $0 + Int($1.report.trianglesOut) }
+            let off = r.bodies.reduce(0.0) { max($0, $1.report.deviation) }
+            parts.append(L("simplified to {count} triangles, within {d} mm", ["count": count.formatted(), "d": String(format: "%.3f", max(off, 0.001))]))
+        }
+        if r.metres { parts.append(L("read as metres")) }
+        let head = L("Imported {name}", ["name": file])
+        return parts.isEmpty ? head : head + " — " + parts.joined(separator: ", ")
+    }
+
+    // Why a file couldn't be imported, as the engine said it (nothing, where it was stopped).
+    private static func importProblem(_ e: Error) -> String? {
+        guard case ImportError.refused(let why) = e else {
+            if case ImportError.stopped = e { return nil }
+            return (e as? FileError) == .corrupt ? L("This file is damaged and can't be opened") : L("This file can't be read")
+        }
+        if why.hasSuffix("cut short") { return L("This file is cut short") }
+        if why.hasSuffix("has points but no surface") { return L("This file has only points, no surface") }
+        if why.hasPrefix("scan: too large") { return L("This file is too large to import") }
+        if why == "scan: larger than 10 m" { return L("This model is larger than 10 m") }
+        if why.hasPrefix("scan: can't") || why.hasSuffix("no triangles") { return L("This mesh couldn't be made into a solid") }
+        if why == "not enough memory for this" { return L("Not enough memory to import this file") }
+        return L("This file can't be read")
+    }
+
+    // Meshes from other apps and scanners (and Bcad's own files) added to this document.
+    func importDocument() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = Self.importTypes
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        addFiles(panel.urls)
+    }
+
+    static var importTypes: [UTType] { ["3mf", "stl", "obj", "ply", "usdz"].compactMap { UTType(filenameExtension: $0) } }
 
     // New shapes joining the document where they were, or moved along x beside everything already there when their box
     // would overlap a shape's. They show at once as `looks` (their saved meshes) until they are built, and are selected.
@@ -4614,8 +4770,10 @@ final class Workbench: DesignHost {
         sculptRing = nil
         sculptBusy = false
         sculptEdited = false
-        // (A shape still being tried belongs to the document before.)
+        // (A shape still being tried, or a file being imported, belongs to the document before.)
         trying = false
+        importJob?.cancel()
+        importJob = nil
         hover = Hover()
         selection = []
         dropQueue = []
@@ -4628,7 +4786,7 @@ final class Workbench: DesignHost {
         confirmDiscard { go in
             guard go else { return }
             let panel = NSOpenPanel()
-            panel.allowedContentTypes = [UTType(filenameExtension: "3mf") ?? .data]
+            panel.allowedContentTypes = Self.importTypes
             guard panel.runModal() == .OK, let url = panel.url else { return }
             self.open(url)
         }
@@ -4642,6 +4800,11 @@ final class Workbench: DesignHost {
     // Read off the main thread (a big sculpt takes seconds to unpack and parse; the window froze), then put in place,
     // unless another file was asked for or another document begun meanwhile.
     func open(_ url: URL) {
+        // (A mesh from another app or a scanner: imported as a new document.)
+        guard url.pathExtension.lowercased() == "3mf" else {
+            if MeshImport.canRead(url) { importFiles([url], asNew: true) } else { flash(L("This file can't be read")) }
+            return
+        }
         openToken += 1
         opening += 1
         let token = openToken, generation = self.generation, note = L("Opening…")
@@ -4693,7 +4856,8 @@ final class Workbench: DesignHost {
             // CI's check that saving works where Bcad runs (inside the App Store's sandbox too): the file is saved back.
             if ProcessInfo.processInfo.environment["BCAD_CHECK_SAVE"] == "1" { saveDocument() }
         } catch FileError.notBcad {
-            flash(L("This 3MF wasn't made by Bcad and can't be edited"))
+            // (Another app's 3MF: its meshes imported as a new document.)
+            importFiles([url], asNew: true)
         } catch FileError.newer {
             flash(L("This file was made by a newer version of Bcad"))
         } catch {
@@ -4904,6 +5068,7 @@ struct BcadApp: App {
                     if !lib.recent.isEmpty { Divider() }
                     Button(L("Clear Menu")) { lib.clearRecent() }.disabled(lib.recent.isEmpty)
                 }
+                Button(L("Import…")) { lib.importDocument() }.keyboardShortcut("i", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .saveItem) {
                 // (Bcad's one window closed is Bcad quit: asked about unsaved changes first, as quitting is, so Cancel

@@ -301,39 +301,5 @@ final class SculptSession {
 
     // Shown as its body's mesh (one smooth face) until the kernel's own takes its place: from its data, when that's been
     // read already.
-    func mesh(from given: SculptData? = nil) -> Mesh {
-        var m = Mesh()
-        let d = given ?? data(), p = d.positions
-        let count = p.count / 3
-        m.vertices = (0..<count).map { SIMD4(p[3 * $0], p[3 * $0 + 1], p[3 * $0 + 2], 0) }
-        m.indices = d.indices
-        // Each point's normal (its triangles' own, by their areas), and the volume.
-        var sums = [SIMD3<Float>](repeating: .zero, count: count)
-        var signed = 0.0
-        var t = 0
-        while t + 2 < m.indices.count {
-            let i = Int(m.indices[t]), j = Int(m.indices[t + 1]), k = Int(m.indices[t + 2])
-            let a = m.vertices[i].xyz, b = m.vertices[j].xyz, c = m.vertices[k].xyz
-            let f = cross(b - a, c - a)
-            sums[i] += f
-            sums[j] += f
-            sums[k] += f
-            signed += Double(dot(a, cross(b, c))) / 6
-            t += 3
-        }
-        m.normals = sums.map { f -> SIMD4<Float> in length(f) > 0 ? SIMD4(normalize(f), 0) : .zero }
-        var lo = SIMD3<Float>(repeating: .infinity)
-        var hi = -lo
-        for v in m.vertices {
-            lo = simd_min(lo, v.xyz)
-            hi = simd_max(hi, v.xyz)
-        }
-        if count > 0 {
-            m.low = SIMD3<Double>(lo)
-            m.high = SIMD3<Double>(hi)
-        }
-        m.volume = abs(signed)
-        m.faceInfo = [(SIMD3(0, 0, 1), (m.low + m.high) / 2)]
-        return m
-    }
+    func mesh(from given: SculptData? = nil) -> Mesh { Mesh(sculpt: given ?? data()) }
 }

@@ -9,6 +9,17 @@ nuts, then merge, cut, split, round, bevel and hollow them. Its geometry engine 
 - **STL**: all chosen bodies in one file (binary, millimetres).
 - **STEP**: each body as a closed solid (AP214). Flat faces are exact; curved ones are 0.01 mm facets.
 
+### Importing scans and other apps' models
+File → Import… (⌘⇧I), Open, or drop a file on the window: **STL** (binary or text), **OBJ**, **PLY**, another app's
+**3MF**, and **USDZ** (what Apple's Object Capture makes). Each becomes a closed body, ready to sculpt, merge, cut and
+print:
+- Points that should be one are welded, triangles are turned to face out, loose bits of scan noise are taken off, and
+  holes are filled. The mesh is kept at full resolution where it can be.
+- Where the surface passes through itself, a small fold is mended in place and overlapping parts are joined. Otherwise
+  it is made again on a fine grid.
+- Over 2 million triangles, it is simplified. The note says how far the result strays (usually a few micrometres).
+- A file with no unit that is under 2 units across is read as metres.
+
 ## Plans
 - **Free:** one document a day (saved and exported as often as you like that day), no ads, no human figures.
 - **Pro** ($9 a month or $90 a year): unlimited saving and exporting.

@@ -80,9 +80,9 @@ enum Zip {
         return out
     }
 
-    // The entries named (every one when none are), each unpacked and checked against its CRC. One larger unpacked than its
-    // `limit` is left out; one damaged, larger than 1 GiB, or overlapping another is refused.
-    static func read(_ d: Data, only names: Set<String>? = nil, limit: [String: Int] = [:]) throws -> [String: Data] {
+    // The entries named (every one when none are; or those `matching` says), each unpacked and checked against its CRC. One
+    // larger unpacked than its `limit` is left out; one damaged, larger than 1 GiB, or overlapping another is refused.
+    static func read(_ d: Data, only names: Set<String>? = nil, matching: ((String) -> Bool)? = nil, limit: [String: Int] = [:]) throws -> [String: Data] {
         let b = [UInt8](d)
         func u16(_ i: Int) -> Int { i + 1 < b.count ? Int(b[i]) | Int(b[i + 1]) << 8 : 0 }
         func u32(_ i: Int) -> Int { u16(i) | u16(i + 2) << 16 }
@@ -103,7 +103,7 @@ enum Zip {
             let start = local + 30 + u16(local + 26) + u16(local + 28)
             guard start + csize <= b.count else { throw FileError.corrupt }
             spans.append(local..<(start + csize))
-            guard names?.contains(name) ?? true, usize <= limit[name] ?? Int.max else { continue }
+            guard names?.contains(name) ?? true, matching?(name) ?? true, usize <= limit[name] ?? Int.max else { continue }
             let raw = Data(b[start..<(start + csize)])
             let data: Data
             if method == 0, csize == usize { data = raw } else if method == 8, let unpacked = inflate(raw, size: usize) { data = unpacked } else { throw FileError.corrupt }

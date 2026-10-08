@@ -20,6 +20,7 @@ targets:
       - path: ../Views.swift
       - path: ../Files.swift
       - path: ../Sculpt.swift
+      - path: ../Import.swift
       - path: ../Plans.swift
       - path: ../Engine
       - path: ../BcadKernel.h

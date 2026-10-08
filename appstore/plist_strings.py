@@ -12,5 +12,8 @@ out = sys.argv[1]
 for lang in sys.argv[2:]:
     folder = os.path.join(out, f"{lang}.lproj")
     os.makedirs(folder, exist_ok=True)
-    text = "3MF model" if lang == "en" else table.get("3MF model", {}).get(lang, "3MF model")
-    open(os.path.join(folder, "InfoPlist.strings"), "w", encoding="utf-16").write(f'"3MF model" = "{esc(text)}";\n')
+    lines = ""
+    for name in ["3MF model", "STL model", "OBJ model", "PLY model", "USDZ model"]:
+        text = name if lang == "en" else table.get(name, {}).get(lang, name)
+        lines += f'"{name}" = "{esc(text)}";\n'
+    open(os.path.join(folder, "InfoPlist.strings"), "w", encoding="utf-16").write(lines)

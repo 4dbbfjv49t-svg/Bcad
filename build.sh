@@ -54,7 +54,7 @@ for f in Engine/*.cpp; do
   "${CXX[@]}" -O3 -ffp-contract=off -c "$f" -o "$WORK/${f:t:r}.o"
   KERNEL+=("$WORK/${f:t:r}.o")
 done
-SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift Sculpt.swift Plans.swift)
+SOURCES=(Bcad.swift Design.swift Viewport.swift Views.swift Files.swift Sculpt.swift Plans.swift Import.swift)
 if (( SELFTEST )); then
   SOURCES+=(test/SelfTest.swift)
   FLAGS+=(-D SELFTEST)

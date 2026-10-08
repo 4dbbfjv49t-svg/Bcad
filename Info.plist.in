@@ -27,6 +27,30 @@
       <key>LSHandlerRank</key><string>Alternate</string>
       <key>CFBundleTypeExtensions</key><array><string>3mf</string></array>
     </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>STL model</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>stl</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>OBJ model</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>obj</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>PLY model</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>ply</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>USDZ model</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>usdz</string></array>
+    </dict>
   </array>
   <key>UTImportedTypeDeclarations</key>
   <array>
