@@ -8,6 +8,7 @@
 #include "Engine/Figure.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Print.hpp"
+#include "Engine/Scan.hpp"
 #include "Engine/Sculpt.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
@@ -868,4 +869,73 @@ void bk_print_mesh_free(BKPrintMesh *m) {
   free(m->positions);
   free(m->indices);
   delete m;
+}
+
+// MARK: - scans
+
+static ScanLimits scanLimits(const BKScanLimits *l) {
+  ScanLimits out;
+  auto take = [](double v, uint64_t &to) {
+    if (v >= 1) to = (uint64_t)std::min(v, 2e9);
+  };
+  if (l) take(l->triangles, out.triangles), take(l->points, out.points);
+  return out;
+}
+
+static BKScanSoup *soupOut(const Soup &s) {
+  BKScanSoup *out = new BKScanSoup();
+  out->vertexCount = (int)(s.p.size() / 3), out->triangleCount = (int)(s.tri.size() / 3), out->partCount = (int)s.parts();
+  out->positions = mallocCopy(s.p);
+  out->indices = mallocCopy(s.tri);
+  std::vector<int> start(s.partStart.begin(), s.partStart.end());
+  out->partStart = mallocCopy(start);
+  // The names in one block after their pointers (one free).
+  size_t chars = 0;
+  for (const std::string &n : s.partName) chars += n.size() + 1;
+  out->partNames = (char **)malloc(sizeof(char *) * std::max<size_t>(1, s.parts()) + chars);
+  if (!out->positions || !out->indices || !out->partStart || !out->partNames) {
+    free(out->positions), free(out->indices), free(out->partStart), free(out->partNames);
+    delete out;
+    throw std::bad_alloc();
+  }
+  char *at = (char *)(out->partNames + std::max<size_t>(1, s.parts()));
+  for (size_t k = 0; k < s.parts(); k++) {
+    out->partNames[k] = at;
+    memcpy(at, s.partName[k].c_str(), s.partName[k].size() + 1);
+    at += s.partName[k].size() + 1;
+  }
+  out->scale = s.scale;
+  out->unitGuessed = s.guessed ? 1 : 0;
+  out->skipped = (int)std::min<uint64_t>(s.skipped, INT32_MAX);
+  return out;
+}
+
+BKScanSoup *bk_scan_read(const uint8_t *bytes, int64_t length, const char *extension, const BKScanLimits *limits) try {
+  if (!bytes || length < 0 || !extension) return lastError = "scan: no file", nullptr;
+  Soup s;
+  std::string why;
+  if (!readScan(bytes, (size_t)length, extension, scanLimits(limits), s, why)) return lastError = why, nullptr;
+  return soupOut(s);
+} catch (...) {
+  return caught(), nullptr;
+}
+
+BKScanSoup *bk_scan_read_3mf(const char *const *names, const uint8_t *const *bytes, const int64_t *lengths, int count,
+                             const BKScanLimits *limits) try {
+  if (count < 0 || (count && (!names || !bytes || !lengths))) return lastError = "3mf: no model in the package", nullptr;
+  std::vector<PackagePart> parts;
+  for (int i = 0; i < count; i++)
+    if (names[i] && (bytes[i] || !lengths[i]) && lengths[i] >= 0) parts.push_back({names[i], bytes[i], (size_t)lengths[i]});
+  Soup s;
+  std::string why;
+  if (!readScan3mf(parts, scanLimits(limits), s, why)) return lastError = why, nullptr;
+  return soupOut(s);
+} catch (...) {
+  return caught(), nullptr;
+}
+
+void bk_scan_soup_free(BKScanSoup *s) {
+  if (!s) return;
+  free(s->positions), free(s->indices), free(s->partStart), free(s->partNames);
+  delete s;
 }

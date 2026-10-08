@@ -437,12 +437,234 @@ static void apiRun(int k) {
   bk_mesh_free(m), bk_free(s);
 }
 
+// MARK: scan files
+// Files as other apps write them, then broken every way: every read refused saying why (in a way the app knows), or a
+// mesh whose every corner is one of its points and whose parts cover its triangles in turn, the same each time.
+struct Soup3 {
+  std::vector<float> p;
+  std::vector<uint32_t> t;
+};
+static Soup3 randomSoup(int points, int triangles) {
+  Soup3 s;
+  for (int i = 0; i < 3 * points; i++) {
+    double r = uni();
+    s.p.push_back(rnd() % 8 == 0 ? (float)(std::pow(10.0, 12 * r - 6) * (rnd() % 2 ? 1 : -1)) : (float)(200 * r - 100));
+  }
+  for (int i = 0; i < 3 * triangles; i++) s.t.push_back((uint32_t)(rnd() % points));
+  return s;
+}
+static void put32(std::string &s, uint32_t v) {
+  for (int k = 0; k < 4; k++) s += (char)(v >> 8 * k & 255);
+}
+static std::string asStl(const Soup3 &m, bool text) {
+  std::string s;
+  char b[200];
+  if (text) s = "solid fuzz\n";
+  else s = std::string(80, ' '), put32(s, (uint32_t)(m.t.size() / 3));
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    if (text) s += "facet normal 0 0 1\nouter loop\n";
+    else s += std::string(12, '\0');
+    for (int c = 0; c < 3; c++) {
+      const float *q = &m.p[3 * m.t[k + c]];
+      if (text) snprintf(b, sizeof b, "vertex %.9g %.9g %.9g\n", q[0], q[1], q[2]), s += b;
+      else
+        for (int i = 0; i < 3; i++) {
+          uint32_t bits;
+          memcpy(&bits, q + i, 4);
+          put32(s, bits);
+        }
+    }
+    s += text ? "endloop\nendfacet\n" : std::string(2, '\0');
+  }
+  return text ? s + "endsolid fuzz\n" : s;
+}
+static std::string asObj(const Soup3 &m) {
+  std::string s = "o fuzz\n";
+  char b[200];
+  for (size_t i = 0; i < m.p.size(); i += 3) snprintf(b, sizeof b, "v %.9g %.9g %.9g\n", m.p[i], m.p[i + 1], m.p[i + 2]), s += b;
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    // Every way of naming a corner, counting back too.
+    int n = (int)(m.p.size() / 3);
+    s += "f";
+    for (int c = 0; c < 3; c++) {
+      int v = (int)m.t[k + c] + 1;
+      snprintf(b, sizeof b, rnd() % 4 == 0 ? " %d/1" : rnd() % 3 == 0 ? " %d//2" : " %d", rnd() % 3 == 0 ? v - n - 1 : v);
+      s += b;
+    }
+    s += "\n";
+  }
+  return s;
+}
+static std::string asPly(const Soup3 &m, int format) {
+  std::string s = std::string("ply\nformat ") + (format == 0 ? "ascii" : format == 1 ? "binary_little_endian" : "binary_big_endian") +
+                  " 1.0\nelement vertex " + std::to_string(m.p.size() / 3) + "\nproperty float x\nproperty float y\nproperty float z\n" +
+                  "element face " + std::to_string(m.t.size() / 3) + "\nproperty list uchar int vertex_indices\nend_header\n";
+  char b[200];
+  auto raw = [&](uint32_t v, int size) {
+    for (int k = 0; k < size; k++) s += (char)(v >> 8 * (format == 2 ? size - 1 - k : k) & 255);
+  };
+  for (size_t i = 0; i < m.p.size(); i += 3)
+    if (format == 0) snprintf(b, sizeof b, "%.9g %.9g %.9g\n", m.p[i], m.p[i + 1], m.p[i + 2]), s += b;
+    else
+      for (int k = 0; k < 3; k++) {
+        uint32_t bits;
+        memcpy(&bits, &m.p[i + k], 4);
+        raw(bits, 4);
+      }
+  for (size_t k = 0; k < m.t.size(); k += 3)
+    if (format == 0) snprintf(b, sizeof b, "3 %u %u %u\n", m.t[k], m.t[k + 1], m.t[k + 2]), s += b;
+    else raw(3, 1), raw(m.t[k], 4), raw(m.t[k + 1], 4), raw(m.t[k + 2], 4);
+  return s;
+}
+static std::string as3mf(const Soup3 &m) {
+  std::string s = "<?xml version=\"1.0\"?>\n<model unit=\"millimeter\"><resources><object id=\"1\" name=\"fuzz\"><mesh><vertices>";
+  char b[200];
+  for (size_t i = 0; i < m.p.size(); i += 3) snprintf(b, sizeof b, "<vertex x=\"%.9g\" y=\"%.9g\" z=\"%.9g\"/>", m.p[i], m.p[i + 1], m.p[i + 2]), s += b;
+  s += "</vertices><triangles>";
+  for (size_t k = 0; k < m.t.size(); k += 3) snprintf(b, sizeof b, "<triangle v1=\"%u\" v2=\"%u\" v3=\"%u\"/>", m.t[k], m.t[k + 1], m.t[k + 2]), s += b;
+  return s + "</triangles></mesh></object><object id=\"2\"><components><component objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 0 0 0\"/>"
+             "</components></object></resources><build><item objectid=\"2\"/></build></model>";
+}
+static BKScanSoup *readFile(const std::string &bytes, const char *ext) {
+  if (std::string(ext) == "3mf") {
+    const char *name = "3D/3dmodel.model";
+    const uint8_t *data = (const uint8_t *)bytes.data();
+    int64_t n = (int64_t)bytes.size();
+    return bk_scan_read_3mf(&name, &data, &n, 1, nullptr);
+  }
+  return bk_scan_read((const uint8_t *)bytes.data(), (int64_t)bytes.size(), ext, nullptr);
+}
+// What's wrong with a soup as read ("" when nothing), and whether two reads are the same to the bit.
+static std::string soupWrong(const BKScanSoup *s) {
+  if (s->triangleCount < 1 || s->vertexCount < 1 || s->partCount < 1) return "empty";
+  if (s->partStart[0] != 0 || s->partStart[s->partCount] != s->triangleCount) return "parts not covering the triangles";
+  for (int k = 0; k < s->partCount; k++)
+    if (s->partStart[k + 1] <= s->partStart[k] || !s->partNames[k]) return "an empty part";
+  for (int i = 0; i < 3 * s->triangleCount; i++)
+    if (s->indices[i] >= (uint32_t)s->vertexCount) return "a corner that isn't a point";
+  if (!(s->scale > 0) || s->skipped < 0) return "a unit or count wrong";
+  return "";
+}
+static bool sameSoup(const BKScanSoup *a, const BKScanSoup *b) {
+  if (!a || !b) return !a && !b;
+  if (a->vertexCount != b->vertexCount || a->triangleCount != b->triangleCount || a->partCount != b->partCount || a->scale != b->scale) return false;
+  if (memcmp(a->positions, b->positions, 12 * (size_t)a->vertexCount) || memcmp(a->indices, b->indices, 12 * (size_t)a->triangleCount)) return false;
+  for (int k = 0; k < a->partCount; k++)
+    if (a->partStart[k] != b->partStart[k] || strcmp(a->partNames[k], b->partNames[k])) return false;
+  return true;
+}
+static int scanRead = 0, scanRefused = 0;
+static void readCase(const std::string &bytes, const char *ext, const std::string &what) {
+  doing(what, 60);
+  BKScanSoup *a = readFile(bytes, ext);
+  std::string why = a ? "" : bk_last_error();
+  BKScanSoup *b = readFile(bytes, ext);
+  if (!sameSoup(a, b)) fail(what + ": read twice, not the same");
+  if (a) {
+    scanRead++;
+    std::string wrong = soupWrong(a);
+    if (!wrong.empty()) fail(what + ": " + wrong);
+  } else {
+    scanRefused++;
+    static const char *known[] = {"stl: ", "obj: ", "ply: ", "3mf: ", "scan: ", "not enough memory"};
+    bool ok = false;
+    for (const char *k : known) ok = ok || why.compare(0, strlen(k), k) == 0;
+    if (!ok) fail(what + ": refused without a reason the app knows: " + why);
+  }
+  bk_scan_soup_free(a), bk_scan_soup_free(b);
+}
+static std::string damaged(std::string s) {
+  if (s.empty()) return s;
+  switch (rnd() % 6) {
+    case 0:  // bits flipped
+      for (int k = 1 + (int)(rnd() % 8); k > 0; k--) s[rnd() % s.size()] ^= (char)(1 << rnd() % 8);
+      break;
+    case 1:  // cut short
+      s.resize(rnd() % s.size());
+      break;
+    case 2: {  // a number made absurd
+      static const char *absurd[] = {"4294967295", "99999999999999999999", "-1", "1e999", "nan", "-0", "1e-999", "0x10", "", "1.#INF"};
+      size_t at = rnd() % s.size();
+      size_t from = s.find_first_of("0123456789", at);
+      if (from == std::string::npos) break;
+      size_t to = s.find_first_not_of("0123456789.e-+", from);
+      s.replace(from, (to == std::string::npos ? s.size() : to) - from, pick(absurd));
+      break;
+    }
+    case 3: {  // a run of bytes repeated or taken out
+      size_t at = rnd() % s.size(), n = std::min<size_t>(s.size() - at, 1 + rnd() % 64);
+      if (rnd() % 2) s.insert(at, s.substr(at, n));
+      else s.erase(at, n);
+      break;
+    }
+    case 4:  // a binary count made huge
+      if (s.size() >= 84) put32(s, 0), s.replace(80, 4, std::string("\xff\xff\xff\x7f", 4)), s.resize(s.size() - 4);
+      break;
+    default: {  // random bytes over a stretch
+      size_t at = rnd() % s.size();
+      for (size_t i = at; i < std::min(s.size(), at + 1 + rnd() % 32); i++) s[i] = (char)rnd();
+    }
+  }
+  return s;
+}
+static void scanFiles(int iters) {
+  static const char *exts[] = {"stl", "stl", "obj", "ply", "ply", "ply", "3mf"};
+  auto write = [](const Soup3 &m, int f) {
+    return f == 0 ? asStl(m, false) : f == 1 ? asStl(m, true) : f == 2 ? asObj(m) : f <= 5 ? asPly(m, f - 3) : as3mf(m);
+  };
+  // Read back as written: every format the same triangles (binary and 9-digit text both keep a float to the bit).
+  for (int run = 0; run < 10 * iters; run++) {
+    Soup3 m = randomSoup(3 + (int)(rnd() % 40), 1 + (int)(rnd() % 60));
+    for (int f = 0; f < 7; f++) {
+      std::string what = fmt("random soup %.0f as format %.0f", run, f);
+      doing(what, 60);
+      BKScanSoup *s = readFile(write(m, f), exts[f]);
+      if (!s) {
+        fail(what + ": refused: " + bk_last_error());
+        continue;
+      }
+      std::vector<float> corners;
+      double scale = s->unitGuessed ? s->scale : 1;
+      for (int i = 0; i < 3 * s->triangleCount; i++)
+        for (int k = 0; k < 3; k++) corners.push_back(s->positions[3 * s->indices[i] + k]);
+      if (s->triangleCount != (int)m.t.size() / 3) fail(what + fmt(": %.0f triangles, not %.0f", s->triangleCount, m.t.size() / 3));
+      else if (scale == 1)
+        for (size_t i = 0; i < m.t.size(); i++)
+          for (int k = 0; k < 3; k++)
+            if (corners[3 * i + k] != m.p[3 * m.t[i] + k] + 0.0f) {
+              fail(what + fmt(": corner %.0f not as written (%.9g)", i, corners[3 * i + k]));
+              i = m.t.size();
+              break;
+            }
+      bk_scan_soup_free(s);
+    }
+  }
+  // Broken every way.
+  Soup3 cube;
+  for (int i = 0; i < 8; i++) cube.p.insert(cube.p.end(), {i & 1 ? 10.f : 0.f, i & 2 ? 10.f : 0.f, i & 4 ? 10.f : 0.f});
+  cube.t = {0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5};
+  for (int f = 0; f < 7; f++) {
+    std::string file = write(cube, f);
+    for (size_t cut = 0; cut < file.size(); cut += 1 + file.size() / 200) readCase(file.substr(0, cut), exts[f], fmt("cube as format %.0f cut at %.0f", f, cut));
+    for (int k = 0; k < 150 * iters; k++) {
+      std::string bad = file;
+      for (int d = 1 + (int)(rnd() % 3); d > 0; d--) bad = damaged(bad);
+      readCase(bad, exts[f], fmt("cube as format %.0f damaged (%.0f)", f, k));
+    }
+  }
+  for (int k = 0; k < 40 * iters; k++) {
+    std::string junk(rnd() % 2000, '\0');
+    for (char &c : junk) c = rnd() % 3 ? (char)rnd() : " \n0123456789.-evfsolidplyx"[rnd() % 26];
+    for (const char *ext : {"stl", "obj", "ply", "3mf"}) readCase(junk, ext, fmt("junk %.0f", k) + " as " + ext);
+  }
+}
+
 int main() {
   signal(SIGALRM, watchdog);
   int iters = getenv("BCAD_FUZZ_ITERS") ? std::max(1, atoi(getenv("BCAD_FUZZ_ITERS"))) : 1;
   if (getenv("BCAD_FUZZ_SEED")) seed ^= strtoull(getenv("BCAD_FUZZ_SEED"), nullptr, 10) * 0x2545f4914f6cdd1dull;
   printf("fuzz: %d× (seed %llu)\n", iters, (unsigned long long)seed);
-  // BCAD_FUZZ_ONLY: sculpting, figures, extremes or api alone.
+  // BCAD_FUZZ_ONLY: sculpting, figures, extremes, api or scans alone.
   std::string only = getenv("BCAD_FUZZ_ONLY") ? getenv("BCAD_FUZZ_ONLY") : "";
 
   // Sculpting.
@@ -717,6 +939,14 @@ int main() {
           "listed; distances; broken meshes; mesh bodies; STEP; figures of fewer numbers; a sculpt's changed lists: refused saying why, or "
           "made sound",
           failures == before, fmt("%.0f made, %.0f refused", apiMade, apiRefused));
+  }
+  // Files from other apps and scanners.
+  if (only.empty() || only == "scans") {
+    printf("— scans\n");
+    int before = failures;
+    scanFiles(iters);
+    check("scan files as written, cut short, damaged and junk: read back as written, or refused saying why; the same every time",
+          failures == before, fmt("%.0f read, %.0f refused", scanRead, scanRefused));
   }
   alarm(0);
   printf(failures ? "%d FAILED\n" : "ALL OK\n", failures);

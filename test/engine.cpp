@@ -7,9 +7,11 @@
 #include "Engine/Fasteners.hpp"
 #include "Engine/Implicit.hpp"
 #include "Engine/Math.hpp"
+#include "Engine/MeshTree.hpp"
 #include "Engine/Model.hpp"
 #include "Engine/Sculpt.hpp"
 #include "Engine/Print.hpp"
+#include "Engine/Scan.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
@@ -106,7 +108,500 @@ struct Case {
   int faces, edges, corners, circles;  // as the app expects them for the shape
 };
 
+// MARK: scans
+
+// Meshes as other apps write them, built here byte by byte.
+struct Mesh3 {
+  std::vector<float> p;  // 3 per point
+  std::vector<uint32_t> t;
+};
+static Mesh3 cubeMesh(float s) {
+  Mesh3 m;
+  for (int i = 0; i < 8; i++) m.p.insert(m.p.end(), {i & 1 ? s : 0, i & 2 ? s : 0, i & 4 ? s : 0});
+  m.t = {0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5};
+  return m;
+}
+// A torus of n × n quads (2n² triangles), its points on a grid of angles.
+static Mesh3 torusMesh(int n, double R, double r) {
+  Mesh3 m;
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < n; j++) {
+      double u = 2 * PI * i / n, v = 2 * PI * j / n;
+      m.p.insert(m.p.end(), {(float)((R + r * std::cos(v)) * std::cos(u)), (float)((R + r * std::cos(v)) * std::sin(u)), (float)(r * std::sin(v))});
+    }
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < n; j++) {
+      uint32_t a = i * n + j, b = ((i + 1) % n) * n + j, c = ((i + 1) % n) * n + (j + 1) % n, d = i * n + (j + 1) % n;
+      m.t.insert(m.t.end(), {a, b, c, a, c, d});
+    }
+  return m;
+}
+static void put32(std::string &s, uint32_t v) {
+  for (int k = 0; k < 4; k++) s += (char)(v >> 8 * k & 255);
+}
+static void putFloat(std::string &s, float f) {
+  uint32_t b;
+  memcpy(&b, &f, 4);
+  put32(s, b);
+}
+static std::string stlBinary(const Mesh3 &m, const char *header = "") {
+  std::string s(80, '\0');
+  memcpy(&s[0], header, std::min<size_t>(80, strlen(header)));
+  put32(s, (uint32_t)(m.t.size() / 3));
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    for (int i = 0; i < 3; i++) putFloat(s, 0);
+    for (int c = 0; c < 3; c++)
+      for (int i = 0; i < 3; i++) putFloat(s, m.p[3 * m.t[k + c] + i]);
+    s += std::string(2, '\0');
+  }
+  return s;
+}
+static std::string stlText(const Mesh3 &m, const char *name, const char *eol = "\n") {
+  std::string s = std::string("solid ") + name + eol;
+  char b[200];
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    s += std::string("  facet normal 0 0 0") + eol + "    outer loop" + eol;
+    for (int c = 0; c < 3; c++) {
+      const float *q = &m.p[3 * m.t[k + c]];
+      snprintf(b, sizeof b, "      vertex %.6e %.6e %.6e", q[0], q[1], q[2]);
+      s += b + std::string(eol);
+    }
+    s += std::string("    endloop") + eol + "  endfacet" + eol;
+  }
+  return s + "endsolid " + name + eol;
+}
+static BKScanSoup *readText(const std::string &s, const char *ext, const BKScanLimits *l = nullptr) {
+  return bk_scan_read((const uint8_t *)s.data(), (int64_t)s.size(), ext, l);
+}
+// The soup's triangles as point triples (each turned to start at its least point), sorted: the same surface either way.
+static std::vector<std::array<float, 9>> surface(const BKScanSoup *s) {
+  std::vector<std::array<float, 9>> out;
+  if (!s) return out;
+  for (int t = 0; t < s->triangleCount; t++) {
+    std::array<float, 9> a;
+    int first = 0;
+    for (int c = 1; c < 3; c++)
+      if (std::lexicographical_compare(&s->positions[3 * s->indices[3 * t + c]], &s->positions[3 * s->indices[3 * t + c]] + 3,
+                                       &s->positions[3 * s->indices[3 * t + first]], &s->positions[3 * s->indices[3 * t + first]] + 3))
+        first = c;
+    for (int c = 0; c < 3; c++)
+      for (int i = 0; i < 3; i++) a[3 * c + i] = s->positions[3 * s->indices[3 * t + (first + c) % 3] + i];
+    out.push_back(a);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+// The volume a soup's part encloses (its triangles as they turn).
+static double soupVolume(const BKScanSoup *s, int part = -1) {
+  double v = 0;
+  int from = part < 0 ? 0 : s->partStart[part], to = part < 0 ? s->triangleCount : s->partStart[part + 1];
+  for (int t = from; t < to; t++) {
+    const float *a = &s->positions[3 * s->indices[3 * t]], *b = &s->positions[3 * s->indices[3 * t + 1]], *c = &s->positions[3 * s->indices[3 * t + 2]];
+    v += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) - (double)a[1] * ((double)b[0] * c[2] - (double)b[2] * c[0]) +
+          (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0]));
+  }
+  return v / 6;
+}
+static std::string plyCube(int format) {
+  Mesh3 m = cubeMesh(10);
+  // Each point with a colour after it, each face (quads, two of them split) with a flag after its corners.
+  std::string s = std::string("ply\r\nformat ") + (format == 0 ? "ascii" : format == 1 ? "binary_little_endian" : "binary_big_endian") +
+                  " 1.0\r\ncomment made by hand\r\nelement vertex 8\r\nproperty float x\r\nproperty double y\r\nproperty int z\r\n"
+                  "property uchar red\r\nelement face 6\r\nproperty list uchar int vertex_indices\r\nproperty ushort flags\r\n"
+                  "element extra 2\r\nproperty list ushort float stuff\r\nend_header\r\n";
+  static const uint32_t quads[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+  auto raw = [&](uint64_t v, int size) {
+    for (int k = 0; k < size; k++) s += (char)(v >> 8 * (format == 2 ? size - 1 - k : k) & 255);
+  };
+  for (int i = 0; i < 8; i++) {
+    float x = m.p[3 * i];
+    double y = m.p[3 * i + 1];
+    int z = (int)m.p[3 * i + 2];
+    if (format == 0) {
+      char b[100];
+      snprintf(b, sizeof b, "%g %g %d %d\n", x, y, z, 200 + i);
+      s += b;
+    } else {
+      uint32_t xb;
+      uint64_t yb;
+      memcpy(&xb, &x, 4), memcpy(&yb, &y, 8);
+      raw(xb, 4), raw(yb, 8), raw((uint32_t)z, 4), raw(200 + i, 1);
+    }
+  }
+  for (auto &q : quads) {
+    if (format == 0) {
+      char b[100];
+      snprintf(b, sizeof b, "4 %u %u %u %u 7\n", q[0], q[1], q[2], q[3]);
+      s += b;
+    } else {
+      raw(4, 1);
+      for (uint32_t v : q) raw(v, 4);
+      raw(7, 2);
+    }
+  }
+  for (int e = 0; e < 2; e++) {
+    if (format == 0) s += "2 1.5 2.5\n";
+    else raw(2, 2), raw(0x3FC00000, 4), raw(0x40200000, 4);
+  }
+  return s;
+}
+static BKScanSoup *read3mf(const std::vector<std::pair<std::string, std::string>> &parts) {
+  std::vector<const char *> names;
+  std::vector<const uint8_t *> bytes;
+  std::vector<int64_t> lengths;
+  for (auto &p : parts) names.push_back(p.first.c_str()), bytes.push_back((const uint8_t *)p.second.data()), lengths.push_back((int64_t)p.second.size());
+  return bk_scan_read_3mf(names.data(), bytes.data(), lengths.data(), (int)parts.size(), nullptr);
+}
+static std::string meshXml(const Mesh3 &m) {
+  std::string s = "<mesh><vertices>";
+  char b[200];
+  for (size_t i = 0; i < m.p.size(); i += 3) {
+    snprintf(b, sizeof b, "<vertex x=\"%g\" y=\"%g\" z=\"%g\"/>", m.p[i], m.p[i + 1], m.p[i + 2]);
+    s += b;
+  }
+  s += "</vertices>\n<triangles>";
+  for (size_t k = 0; k < m.t.size(); k += 3) {
+    snprintf(b, sizeof b, "<triangle v1=\"%u\" v2=\"%u\" v3=\"%u\" pid=\"1\"/>\n", m.t[k], m.t[k + 1], m.t[k + 2]);
+    s += b;
+  }
+  return s + "</triangles></mesh>";
+}
+
+// The tree over a mesh's triangles: nearest points as looking at every triangle finds them, to the bit; winding numbers
+// as summing every triangle's solid angle finds them, near enough to tell inside from out; quickly for millions of
+// triangles.
+static void meshTreeChecks() {
+  using bce::MeshTree;
+  using bce::V3;
+  const double d[1] = {40};
+  BKShape *ball = bk_primitive(BK_SPHERE, d);
+  BKSculptMesh *m = bk_remesh(ball, I, 1.0);
+  std::vector<V3> P;
+  for (int i = 0; m && i < m->vertexCount; i++) P.push_back({m->positions[3 * i], m->positions[3 * i + 1], m->positions[3 * i + 2]});
+  std::vector<uint32_t> T(m ? m->indices : nullptr, m ? m->indices + 3 * m->triangleCount : nullptr);
+  MeshTree tree(P, T);
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> u(-30, 30);
+  double worst = 0;
+  int wrongSide = 0, wrongNear = 0;
+  for (int k = 0; k < 400; k++) {
+    V3 q{u(rng), u(rng), u(rng)};
+    double w = tree.winding(q), exact = tree.windingExactly(q), r = norm(q);
+    worst = std::max(worst, std::fabs(w - exact));
+    if (std::fabs(r - 20) > 0.5 && (w > 0.5) != (r < 20)) wrongSide++;
+    MeshTree::Near n = tree.nearest(q);
+    double best = INFINITY;
+    uint32_t bestTri = 0;
+    for (uint32_t t = 0; t < T.size() / 3; t++) {
+      double d2 = norm2(bce::nearestOnTriangle(q, P[T[3 * t]], P[T[3 * t + 1]], P[T[3 * t + 2]]) - q);
+      if (d2 < best) best = d2, bestTri = t;
+    }
+    if (n.d2 != best || n.tri != bestTri) wrongNear++;
+  }
+  check("a mesh's tree: its nearest points as every triangle gives them, its winding numbers within 0.05 of the exact sums, inside and out told",
+        m && worst < 0.05 && !wrongSide && !wrongNear && std::fabs(tree.winding({0, 0, 0}) - 1) < 0.05 && std::fabs(tree.winding({0, 0, 500})) < 1e-6,
+        fmt("worst %.2g off, %.0f on the wrong side, %.0f nearest wrong", worst, wrongSide, wrongNear));
+  // With its top cut off, the middle is still more in than out.
+  std::vector<uint32_t> open;
+  for (size_t t = 0; t < T.size(); t += 3)
+    if (P[T[t]].z < 15 || P[T[t + 1]].z < 15 || P[T[t + 2]].z < 15) open.insert(open.end(), {T[t], T[t + 1], T[t + 2]});
+  MeshTree openTree(P, open);
+  double mid = openTree.winding({0, 0, 0}), above = openTree.winding({0, 0, 25});
+  // (The cap seen from the middle: 2π(1 − cos θ) of 4π, cos θ a little over 15/20 where the cut is ragged.)
+  check("an open mesh's winding numbers: the middle short of 1 by the hole it sees, more out than in above it",
+        mid > 1 - (1 - 15.0 / 20) / 2 && mid < 1 - (1 - 16.5 / 20) / 2 && std::fabs(mid - openTree.windingExactly({0, 0, 0})) < 0.05 && above < 0.5,
+        fmt("middle %.4f, above the hole %.4f", mid, above));
+  bk_sculpt_mesh_free(m), bk_free(ball);
+  // Speed: a 2-million-triangle torus, its tree built and asked 100 000 times each way.
+  {
+    std::vector<V3> tp;
+    std::vector<uint32_t> tt;
+    int n = 1000;
+    for (int i = 0; i < n; i++)
+      for (int j = 0; j < n; j++) {
+        double a = 2 * PI * i / n, b = 2 * PI * j / n;
+        tp.push_back({(40 + 15 * std::cos(b)) * std::cos(a), (40 + 15 * std::cos(b)) * std::sin(a), 15 * std::sin(b)});
+      }
+    for (int i = 0; i < n; i++)
+      for (int j = 0; j < n; j++) {
+        uint32_t a = i * n + j, b = ((i + 1) % n) * n + j, c = ((i + 1) % n) * n + (j + 1) % n, e = i * n + (j + 1) % n;
+        tt.insert(tt.end(), {a, b, c, a, c, e});
+      }
+    auto t0 = std::chrono::steady_clock::now();
+    MeshTree big(tp, tt);
+    double built = ms(t0);
+    t0 = std::chrono::steady_clock::now();
+    double inside = 0;
+    std::uniform_real_distribution<double> v(-60, 60);
+    for (int k = 0; k < 100000; k++) inside += big.winding({v(rng), v(rng), v(rng) / 3}) > 0.5;
+    double wound = ms(t0);
+    // (Near the surface, as measuring how far a mesh strays asks: within 1 mm of a point on it.)
+    std::uniform_real_distribution<double> off(-1, 1);
+    std::vector<V3> near;
+    for (int k = 0; k < 100000; k++) near.push_back(tp[rng() % tp.size()] + V3{off(rng), off(rng), off(rng)});
+    t0 = std::chrono::steady_clock::now();
+    double far = 0;
+    for (V3 q : near) far = std::max(far, big.nearest(q).d2);
+    double nearest = ms(t0);
+    // (The torus fills 2π²·40·15² of the 120·120·40 box: about 30%.)
+    check("a 2-million-triangle mesh's tree built quickly, its winding numbers and nearest points found quickly",
+          std::fabs(inside / 100000 - 2 * PI * PI * 40 * 225 / (120.0 * 120 * 40)) < 0.01 && (!timed || (built < 2000 && wound < 3000 && nearest < 2000)),
+          fmt("built in %.0f ms, 100k winding numbers in %.0f ms, 100k nearest in %.0f ms", built, wound, nearest) + fmt(" (%.1f%% inside)", inside / 1000));
+  }
+}
+
+static void scanReaders() {
+  using bce::readNumber;
+  // Numbers as text, the same on every machine and in every locale.
+  {
+    struct N {
+      const char *text;
+      double want;
+      int used;
+    } cases[] = {{"1.5", 1.5, 3},       {"-2e3", -2000, 4},  {"+7", 7, 2},        {".5", 0.5, 2},          {"5.", 5, 2},
+                 {"1e-5", 1e-5, 4},     {"0.1", 0.1, 3},     {"12abc", 12, 2},    {"3e", 3, 1},            {"1E+2", 100, 4},
+                 {"0000000000000000000000012.5", 12.5, 27}, {"123456789012345678901234", 1.2345678901234568e23, 24},
+                 {"1e400", INFINITY, 5}, {"-1e-400", -0.0, 7}, {"-inf", -INFINITY, 4}, {"Infinity", INFINITY, 8}};
+    bool ok = true;
+    std::string bad;
+    for (auto &c : cases) {
+      const char *s = c.text, *e = s + strlen(s);
+      double v = 0;
+      bool read = readNumber(s, e, v);
+      // (Kept to 18 digits: the long one within a few parts in 10^17.)
+      bool right = read && s - c.text == c.used && (v == c.want || std::fabs(v - c.want) <= 1e-16 * std::fabs(c.want)) && std::signbit(v) == std::signbit(c.want);
+      if (!right) ok = false, bad += std::string(" ") + c.text;
+    }
+    const char *nan = "NaN", *none = "-.e5";
+    double v = 0;
+    ok = ok && readNumber(nan, nan + 3, v) && std::isnan(v);
+    ok = ok && !readNumber(none, none + 4, v);
+    // Floats read back as they were written (9 digits), across the range.
+    std::mt19937 rng(7);
+    for (int i = 0; i < 20000 && ok; i++) {
+      uint32_t bits = rng();
+      float f;
+      memcpy(&f, &bits, 4);
+      if (!std::isfinite(f)) continue;
+      char b[40];
+      snprintf(b, sizeof b, "%.9g", f);
+      const char *s = b;
+      ok = readNumber(s, b + strlen(b), v) && (float)v == f;
+      if (!ok) bad += std::string(" ") + b;
+    }
+    check("numbers as text read the same everywhere: signs, exponents, long runs of digits, floats back as written", ok, bad);
+  }
+  Mesh3 cube = cubeMesh(10);
+  // Binary STL: points made one, even where the header starts "solid" as some apps write it.
+  {
+    std::string plain = stlBinary(cube), solid = stlBinary(cube, "solid cube made by some app");
+    BKScanSoup *a = readText(plain, "stl"), *b = readText(solid, "STL");
+    check("a binary STL: 8 points, 12 triangles, one part, in mm (also with a header starting \"solid\")",
+          a && b && a->vertexCount == 8 && a->triangleCount == 12 && a->partCount == 1 && a->scale == 1 && !a->unitGuessed &&
+              surface(a) == surface(b) && soupVolume(a) == 1000,
+          a ? fmt("%.0f points, %.0f triangles", a->vertexCount, a->triangleCount) : bk_last_error());
+    bk_scan_soup_free(a), bk_scan_soup_free(b);
+    std::string cut = plain.substr(0, plain.size() - 7);
+    BKScanSoup *c = readText(cut, "stl");
+    check("a binary STL cut short refused", !c && std::string(bk_last_error()) == "stl: cut short", bk_last_error());
+    bk_scan_soup_free(c);
+    // (Bytes after its triangles: some apps pad the file.)
+    BKScanSoup *d = readText(plain + std::string(10, '\0'), "stl");
+    check("a binary STL with bytes after its triangles read", d && d->triangleCount == 12, d ? "" : bk_last_error());
+    bk_scan_soup_free(d);
+  }
+  // Text STL: Windows line ends, exponents, two solids (each closed: two parts, named); with an open one, one part.
+  {
+    Mesh3 moved = cube;
+    for (size_t i = 0; i < moved.p.size(); i += 3) moved.p[i] += 20;
+    std::string two = stlText(cube, "first", "\r\n") + stlText(moved, "second one", "\r\n");
+    BKScanSoup *a = readText(two, "stl");
+    check("a text STL of two closed solids: two parts, named",
+          a && a->partCount == 2 && a->vertexCount == 16 && a->triangleCount == 24 && std::string(a->partNames[0]) == "first" &&
+              std::string(a->partNames[1]) == "second one" && soupVolume(a, 0) == 1000 && soupVolume(a, 1) == 1000,
+          a ? fmt("%.0f parts, %.0f points", a->partCount, a->vertexCount) : bk_last_error());
+    bk_scan_soup_free(a);
+    Mesh3 open = moved;
+    open.t.resize(open.t.size() - 3);
+    BKScanSoup *b = readText(stlText(cube, "a") + stlText(open, "b"), "stl");
+    check("a text STL with an open solid: one part (a scan in patches is one body)", b && b->partCount == 1 && b->triangleCount == 23 && b->partNames[0] == std::string(""),
+          b ? "" : bk_last_error());
+    bk_scan_soup_free(b);
+    BKScanSoup *c = readText("solid x\nfacet normal 0 0 1\nouter loop\nvertex 1 2 oops\n", "stl");
+    check("a text STL with a word for a number refused, with its line", !c && std::string(bk_last_error()) == "stl: line 4: not a number", bk_last_error());
+    bk_scan_soup_free(c);
+    BKScanSoup *d = readText("solid x\nendsolid x\n", "stl"), *e = readText("solid x\nfacet\nouter loop\nvertex 0 0 0\nendloop\nendfacet\nendsolid\n", "stl");
+    check("a text STL with no triangles refused (or only faces of fewer than three corners)",
+          !d && !e && std::string(bk_last_error()) == "stl: no triangles", bk_last_error());
+    bk_scan_soup_free(d), bk_scan_soup_free(e);
+  }
+  // OBJ: quads, every way of naming a corner, counting back, a line going on, names; a face turning back on itself cut
+  // into triangles inside it.
+  {
+    std::string obj =
+        "# a cube\nmtllib x.mtl\no box\nv 0 0 0\nv 10 0 0\nv 0 10 0\nv 10 10 0\nv 0 0 10\nv 10 0 10\nv 0 10 10\nv 10 10 10 1.0 0.5 0.5\n"
+        "vt 0 0\nvn 0 0 1\nusemtl red\ns 1\nf 1 3 4 2\nf 5/1 6/1 8/1 7/1\nf 1//1 2//1 6//1 5//1\nf 3/1/1 7/1/1 8/1/1 4/1/1\n"
+        "f -8 -4 \\\n -2 -6\nf 2 4 8 6 # last\n";
+    BKScanSoup *a = readText(obj, "obj");
+    check("an OBJ of quads, its corners named every way: the cube, closed, one part named after its object",
+          a && a->vertexCount == 8 && a->triangleCount == 12 && a->partCount == 1 && std::string(a->partNames[0]) == "box" && soupVolume(a) == 1000,
+          a ? fmt("%.0f points, %.0f triangles, volume %g", a->vertexCount, a->triangleCount, soupVolume(a)) : bk_last_error());
+    bk_scan_soup_free(a);
+    // An L: six corners, turning back at one.
+    BKScanSoup *l = readText("v 0 0 0\nv 20 0 0\nv 20 10 0\nv 10 10 0\nv 10 20 0\nv 0 20 0\nf 1 2 3 4 5 6\n", "obj");
+    double area = 0;
+    bool up = true;
+    for (int t = 0; l && t < l->triangleCount; t++) {
+      const float *p0 = &l->positions[3 * l->indices[3 * t]], *p1 = &l->positions[3 * l->indices[3 * t + 1]], *p2 = &l->positions[3 * l->indices[3 * t + 2]];
+      double z = ((double)p1[0] - p0[0]) * ((double)p2[1] - p0[1]) - ((double)p1[1] - p0[1]) * ((double)p2[0] - p0[0]);
+      area += z / 2, up = up && z > 0;
+    }
+    check("an OBJ face shaped like an L: cut into triangles inside it", l && l->triangleCount == 4 && up && area == 300, fmt("area %g", area));
+    bk_scan_soup_free(l);
+    const char *bad[][2] = {{"v 1 2\nf 1 1 1\n", "obj: line 1: not a number"},
+                            {"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n", "obj: line 4: a corner that isn't there"},
+                            {"v 0 0 0\nf 1 -2 1\n", "obj: line 2: a corner that isn't there"},
+                            {"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 x\n", "obj: line 4: not a number"},
+                            {"v 0 0 0\nv 1 0 0\n", "obj: has points but no surface"},
+                            {"hello\n", "obj: no triangles"}};
+    std::string got;
+    bool ok = true;
+    for (auto &b : bad) {
+      BKScanSoup *s = readText(b[0], "obj");
+      if (s || bk_last_error() != std::string(b[1])) ok = false, got += std::string(" [") + bk_last_error() + "]";
+      bk_scan_soup_free(s);
+    }
+    check("OBJ files that can't be read refused, saying where", ok, got);
+    // Metres: under 2 units across.
+    BKScanSoup *m = readText("v 0 0 0\nv 0.01 0 0\nv 0 0.01 0\nv 0 0 0.01\nf 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n", "obj");
+    check("an OBJ 0.01 units across: taken as metres", m && m->unitGuessed && m->scale == 1000 && m->positions[3] == 10, m ? fmt("%g", m->positions[3]) : bk_last_error());
+    bk_scan_soup_free(m);
+  }
+  // PLY: text, little- and big-endian, every kind of value, things it doesn't use passed over: the same cube.
+  {
+    BKScanSoup *a = readText(plyCube(0), "ply"), *b = readText(plyCube(1), "ply"), *c = readText(plyCube(2), "ply");
+    check("a PLY cube as text, little-endian and big-endian: the same, closed",
+          a && b && c && a->vertexCount == 8 && a->triangleCount == 12 && surface(a) == surface(b) && surface(a) == surface(c) && soupVolume(a) == 1000,
+          a && b && c ? "" : bk_last_error());
+    bk_scan_soup_free(a), bk_scan_soup_free(b), bk_scan_soup_free(c);
+    std::string cloud = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n1 0 0\n0 1 0\n";
+    std::string huge = "ply\nformat binary_little_endian 1.0\nelement vertex 4000000000\nproperty float x\nproperty float y\nproperty float z\n"
+                       "element face 1\nproperty list uchar int vertex_indices\nend_header\n0123456789";
+    std::string bin = plyCube(1);
+    const char *bad[][2] = {{cloud.c_str(), "ply: has points but no surface"},
+                            {huge.c_str(), "ply: cut short"},
+                            {"ply\nformat ascii 1.0\nelement vertex 1\n", "ply: cut short"},
+                            {"plx\n", "ply: not a PLY file"},
+                            // (Points without places, their element passed over: once read past the end of them.)
+                            {"ply\nformat ascii 1.0\nelement vertex 3\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n3 0 1 2\n",
+                             "ply: no x, y and z"},
+                            {"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\n"
+                             "property list uchar int vertex_indices\nend_header\n0 0 0 1 0 0 0 1 0 3 0 1 3\n",
+                             "ply: a corner that isn't there"}};
+    std::string got;
+    bool ok = true;
+    auto t0 = std::chrono::steady_clock::now();
+    for (auto &b : bad) {
+      BKScanSoup *s = readText(b[0], "ply");
+      if (s || bk_last_error() != std::string(b[1])) ok = false, got += std::string(" [") + bk_last_error() + "]";
+      bk_scan_soup_free(s);
+    }
+    double took = ms(t0);
+    for (size_t cut = 0; cut < bin.size(); cut++) {
+      BKScanSoup *s = readText(bin.substr(0, cut), "ply");
+      if (s) ok = false, got += fmt(" read cut at %.0f", cut);
+      bk_scan_soup_free(s);
+    }
+    check("PLY files that can't be read refused (4 billion points claimed in a few bytes: at once; cut anywhere)", ok && took < 50, got + fmt(" %.1f ms", took));
+  }
+  // 3MF from other apps: components placed in turn (an asymmetric turn), a part in another model file, centimetres;
+  // an object made of itself refused.
+  {
+    std::string rels = "<?xml version=\"1.0\"?><Relationships xmlns=\"x\"><Relationship Target=\"/3D/main.model\" Id=\"r0\" "
+                       "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/></Relationships>";
+    // The cube turned a quarter about z (x → y), then moved; the second file's cube stretched 2× along x.
+    std::string main = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- made by hand -->\n<model unit=\"centimeter\" xml:lang=\"en-US\" "
+                       "xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" xmlns:p=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\">"
+                       "<metadata name=\"Title\">a &lt;test&gt;</metadata><resources>"
+                       "<object id=\"1\" type=\"model\" name=\"Cube &amp; co\">" + meshXml(cubeMesh(1)) + "</object>"
+                       "<object id=\"2\" name=\"Pair\"><components><component objectid=\"1\" transform=\"0 1 0 -1 0 0 0 0 1 5 0 0\"/>"
+                       "<component objectid=\"7\" p:path=\"/3D/Objects/other.model\" transform=\"2 0 0 0 1 0 0 0 1 0 0 3\"/></components></object>"
+                       "</resources><build><item objectid=\"2\" transform=\"1 0 0 0 1 0 0 0 1 0 0 1\" printable=\"1\"/></build></model>";
+    std::string other = "<?xml version=\"1.0\"?><model unit=\"centimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+                        "<resources><object id=\"7\" type=\"model\">" + meshXml(cubeMesh(1)) + "</object></resources><build/></model>";
+    BKScanSoup *a = read3mf({{"_rels/.rels", rels}, {"3D/main.model", main}, {"3D/Objects/other.model", other}});
+    // The first cube's corner (1, 0, 0): turned to (0, 1, 0), moved to (5, 1, 1), in mm (50, 10, 10).
+    bool corner = false;
+    double lo[3] = {1e9, 1e9, 1e9}, hi[3] = {-1e9, -1e9, -1e9};
+    for (int i = 0; a && i < a->vertexCount; i++) {
+      const float *q = &a->positions[3 * i];
+      corner = corner || (q[0] == 50 && q[1] == 10 && q[2] == 10);
+      for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], (double)q[k]), hi[k] = std::max(hi[k], (double)q[k]);
+    }
+    check("a 3MF from another app: components placed in turn, a part from another model file, in centimetres, named",
+          a && a->partCount == 2 && a->triangleCount == 24 && a->scale == 10 && corner && std::string(a->partNames[0]) == "Cube & co" &&
+              std::string(a->partNames[1]) == "Pair" && soupVolume(a, 0) == 1000 && soupVolume(a, 1) == 2000 && lo[0] == 0 && hi[0] == 50 && lo[2] == 10 && hi[2] == 50,
+          a ? fmt("%.0f parts, x %g … %g", a->partCount, lo[0], hi[0]) : bk_last_error());
+    bk_scan_soup_free(a);
+    // Mirrored: still outward.
+    std::string mirrored = main;
+    mirrored.replace(mirrored.find("1 0 0 0 1 0 0 0 1 0 0 1"), 23, "-1 0 0 0 1 0 0 0 1 0 0 1");
+    BKScanSoup *m = read3mf({{"_rels/.rels", rels}, {"3D/main.model", mirrored}, {"3D/Objects/other.model", other}});
+    check("a 3MF mirrored by its placement: still turned outward", m && soupVolume(m, 0) == 1000 && soupVolume(m, 1) == 2000, m ? "" : bk_last_error());
+    bk_scan_soup_free(m);
+    std::string loop = "<model><resources><object id=\"1\"><components><component objectid=\"2\"/></components></object>"
+                       "<object id=\"2\"><components><component objectid=\"1\"/></components></object></resources>"
+                       "<build><item objectid=\"1\"/></build></model>";
+    std::string lost = "<model><resources><object id=\"1\"><components><component objectid=\"3\" p:path=\"/3D/gone.model\"/></components>"
+                       "</object></resources><build><item objectid=\"1\"/></build></model>";
+    std::pair<std::vector<std::pair<std::string, std::string>>, const char *> bad[] = {
+        {{{"3D/3dmodel.model", loop}}, "3mf: an object made of itself"},
+        {{{"3D/3dmodel.model", lost}}, "3mf: a part that isn't there: 3d/gone.model"},
+        {{{"3D/other.model", lost}}, "3mf: no model in the package"},
+        {{{"3D/3dmodel.model", main.substr(0, main.size() / 2)}}, "3mf: cut short"}};
+    std::string got;
+    bool ok = true;
+    for (auto &b : bad) {
+      BKScanSoup *s = read3mf(b.first);
+      if (s || bk_last_error() != std::string(b.second)) ok = false, got += std::string(" [") + bk_last_error() + "]";
+      bk_scan_soup_free(s);
+    }
+    check("3MF packages that can't be read refused, saying why", ok, got);
+  }
+  // Too much for the limits, and files that aren't meshes.
+  {
+    BKScanLimits few = {10, 0};
+    BKScanSoup *a = readText(stlBinary(cube), "stl", &few), *b = readText("x", "step");
+    check("a file over the limits, and one that isn't a mesh, refused",
+          !a && !b && std::string(bk_last_error()) == "scan: not a mesh file", bk_last_error());
+    bk_scan_soup_free(a), bk_scan_soup_free(b);
+  }
+  // Speed: a 2-million-triangle binary STL and its text twin (a fine torus), read and welded.
+  {
+    Mesh3 torus = torusMesh(1000, 40, 15);
+    std::string bin = stlBinary(torus);
+    auto t0 = std::chrono::steady_clock::now();
+    BKScanSoup *a = readText(bin, "stl");
+    double binary = ms(t0);
+    std::string text = stlText(torus, "torus");
+    t0 = std::chrono::steady_clock::now();
+    BKScanSoup *b = readText(text, "stl");
+    double asText = ms(t0);
+    check("a 2-million-triangle STL read and welded quickly, as binary and as text",
+          a && b && a->vertexCount == 1000000 && a->triangleCount == 2000000 && b->triangleCount == 2000000 && (!timed || (binary < 1500 && asText < 6000)),
+          fmt("binary %.0f ms, text %.0f ms (%.0f MB)", binary, asText, text.size() / 1e6));
+    bk_scan_soup_free(a), bk_scan_soup_free(b);
+  }
+}
+
 int main() {
+  // BCAD_ONLY=scans: the scan files alone.
+  if (getenv("BCAD_ONLY") && std::string(getenv("BCAD_ONLY")) == "scans") {
+    scanReaders();
+    meshTreeChecks();
+    printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
+    return failures ? 1 : 0;
+  }
   // MARK: shapes
   double r3 = std::sqrt(3.0), h4 = 4 * r3 / 2, h3 = 3 * r3 / 2;
   double prism5R = 10, c5 = std::cos(PI / 5);
@@ -4239,6 +4734,10 @@ int main() {
           fmt("made in %.0f ms, hollowed in %.0f ms, %.0f%% left", made, hollowed, 100 * after / std::max(before, 1e-9)));
     bk_free(hollow), bk_free(round), bk_sculpt_mesh_free(fine), bk_free(ball), bk_free(cube), bk_free(box);
   }
+
+  // MARK: scans
+  scanReaders();
+  meshTreeChecks();
 
   printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
   return failures ? 1 : 0;

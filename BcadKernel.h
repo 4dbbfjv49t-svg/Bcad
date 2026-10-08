@@ -265,6 +265,32 @@ void bk_print_mesh_free(BKPrintMesh *m);
 // what's wrong with shape N ("empty", "open", "inside out"; for bk_print_mesh also "thin": a triangle float flattens or
 // turns over, or two points it makes one), or "file: " and why nothing was written.
 int bk_export_step(const BKShape *const *shapes, const char *const *names, int count, const char *path);
+
+// A mesh from another app's or a scanner's file: its points (mm; those one to the last bit made one) and triangles as the
+// file holds them, in parts (separate bodies where each is closed; otherwise one).
+typedef struct {
+  int vertexCount, triangleCount, partCount;
+  float *positions;   // 3 per vertex
+  uint32_t *indices;  // 3 per triangle
+  int *partStart;     // partCount + 1 offsets (in triangles)
+  char **partNames;   // per part ("" where the file names none)
+  double scale;       // mm per unit of the file
+  int unitGuessed;    // 1: the file says no unit and is under 2 units across, so taken as metres
+  int skipped;        // faces left out (fewer than three corners)
+} BKScanSoup;
+// The most a file may hold (0: 50 million each).
+typedef struct {
+  double triangles, points;
+} BKScanLimits;
+// An STL (binary or text), OBJ or PLY file's bytes, by its extension. NULL when it can't be read (bk_last_error says why:
+// "stl: cut short", "obj: line 12: not a number", "ply: has points but no surface", "scan: too large: …" …).
+BKScanSoup *bk_scan_read(const uint8_t *bytes, int64_t length, const char *extension, const BKScanLimits *limits);
+// A 3MF package from any app, unzipped: its parts' names (as in the package) and bytes, the model files and _rels/.rels.
+// NULL when it can't be read ("3mf: …").
+BKScanSoup *bk_scan_read_3mf(const char *const *names, const uint8_t *const *bytes, const int64_t *lengths, int count,
+                             const BKScanLimits *limits);
+void bk_scan_soup_free(BKScanSoup *s);
+
 const char *bk_last_error(void);
 
 #ifdef __cplusplus
