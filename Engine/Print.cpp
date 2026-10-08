@@ -84,35 +84,7 @@ bool shells(const Solid &s, Shells &out, std::string &why) {
       std::vector<uint32_t> fwd, back;
       for (size_t k = i; k < j; k++) (out.from(sides[k].second) == u ? fwd : back).push_back(sides[k].second);
       std::vector<std::pair<uint32_t, uint32_t>> pairs;
-      if (fwd.size() == 1 && back.size() == 1) {
-        pairs.push_back({fwd[0], back[0]});
-      } else {
-        V3 d = unit(P[v] - P[u]);
-        V3 e1 = unit(std::fabs(d.x) < 0.9 ? cross(d, V3{1, 0, 0}) : cross(d, V3{0, 1, 0})), e2 = cross(d, e1);
-        struct Round {
-          double angle;
-          uint32_t side;
-          bool fwd;
-        };
-        std::vector<Round> round;
-        for (auto *group : {&fwd, &back})
-          for (uint32_t side : *group) {
-            V3 w = P[out.across(side)] - P[u];
-            w = w - d * dot(w, d);
-            round.push_back({trig::atan2(dot(w, e2), dot(w, e1)), side, group == &fwd});
-          }
-        std::sort(round.begin(), round.end(), [](const Round &a, const Round &b) { return a.angle != b.angle ? a.angle < b.angle : a.side < b.side; });
-        size_t n = round.size(), first = 0;
-        while (first < n && round[first].fwd) first++;
-        bool alternate = n % 2 == 0 && first < n;
-        for (size_t k = 0; k < n && alternate; k++) alternate = round[(first + k) % n].fwd == (k % 2 == 1);
-        if (alternate) {
-          for (size_t k = 0; k < n; k += 2) pairs.push_back({round[(first + k + 1) % n].side, round[(first + k) % n].side});
-        } else {
-          // (Never expected of a closed solid: met in order instead.)
-          for (size_t k = 0; k < std::min(fwd.size(), back.size()); k++) pairs.push_back({fwd[k], back[k]});
-        }
-      }
+      pairAround(P[u], P[v], fwd, back, [&](uint32_t side) { return P[out.across(side)]; }, pairs);
       for (auto [f, b] : pairs) {
         mate[f] = b, mate[b] = f;
         edgeOf[f] = edgeOf[b] = (uint32_t)out.edges.size();

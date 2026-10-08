@@ -19,6 +19,8 @@ bool remesh(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, doubl
 
 // Whether a mesh passes through itself: two of its triangles that share no corner crossing (touching doesn't count).
 bool selfCrossing(const std::vector<V3> &pts, const std::vector<uint32_t> &tris);
+// The same, every triangle that crosses another marked (1).
+bool selfCrossings(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, std::vector<uint8_t> &mark);
 // The nearest point of triangle abc to q.
 V3 nearestOnTriangle(V3 q, V3 a, V3 b, V3 c);
 

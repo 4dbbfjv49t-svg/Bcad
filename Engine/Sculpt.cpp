@@ -699,6 +699,7 @@ bool crossing(const std::vector<V3> &P, const std::vector<uint32_t> &T, std::vec
 }  // namespace
 
 bool selfCrossing(const std::vector<V3> &P, const std::vector<uint32_t> &T) { return crossing(P, T, nullptr); }
+bool selfCrossings(const std::vector<V3> &P, const std::vector<uint32_t> &T, std::vector<uint8_t> &mark) { return crossing(P, T, &mark); }
 
 bool hollowByGrid(const std::vector<V3> &pts, const std::vector<uint32_t> &tris, double t, std::vector<V3> &outPts,
                   std::vector<uint32_t> &outTris, std::string &why) {
