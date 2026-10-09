@@ -487,10 +487,12 @@ bool arrange(const Sketch &s, Arrangement &A, std::string &why) {
   return true;
 }
 
-// Each loop's pieces joined where one runs straight on into the next (one line on, or one circle).
-void simplify(std::vector<Elem> &loop, double eps) {
+// Each loop's pieces joined where one runs straight on into the next (one line on, or one circle), but not at a point
+// the loops pass more than once (`twice`, sorted): a loop would then run through it mid-side.
+void simplify(std::vector<Elem> &loop, double eps, const std::vector<std::pair<double, double>> &twice) {
   auto joins = [&](const Elem &a, const Elem &b) {
     if (a.arc != b.arc) return false;
+    if (std::binary_search(twice.begin(), twice.end(), std::make_pair(a.r1, a.z1))) return false;
     if (!a.arc) {
       V3 d{a.r1 - a.r0, a.z1 - a.z0, 0}, e{b.r1 - b.r0, b.z1 - b.z0, 0}, end{b.r1 - a.r0, b.z1 - a.z0, 0};
       return dot2(d, e) > 0 && std::fabs(cross2(d, end)) <= eps * len2(d);
@@ -529,6 +531,15 @@ bool chosenLoops(const Arrangement &A, const std::vector<int> &chosen, std::vect
   std::vector<char> left(nh, 0);
   for (int h = 0; h < nh; h++) left[h] = in[h] && !in[h ^ 1];
   std::vector<char> used(nh, 0);
+  // Points two loops (or one, twice) pass through: where chosen faces, or a face and its hole, touch.
+  std::vector<int> arriving(A.out.size(), 0);
+  std::vector<std::pair<double, double>> twice;
+  for (int h = 0; h < nh; h++)
+    if (left[h] && ++arriving[A.dest(h)] == 2) {
+      Elem e = A.elemOf(h);
+      twice.push_back({e.r1, e.z1});
+    }
+  std::sort(twice.begin(), twice.end());
   std::vector<std::vector<Elem>> traced;
   for (int h = 0; h < nh; h++) {
     if (!left[h] || used[h]) continue;
@@ -551,7 +562,7 @@ bool chosenLoops(const Arrangement &A, const std::vector<int> &chosen, std::vect
       g = nx;
     }
     if (g != h) return why = "sketch: the regions can't be traced", false;
-    simplify(loop, A.eps);
+    simplify(loop, A.eps, twice);
     traced.push_back(std::move(loop));
   }
   // Outlines (counter-clockwise), and each hole in the smallest outline round it.

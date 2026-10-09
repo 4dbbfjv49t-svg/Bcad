@@ -1207,6 +1207,23 @@ static void sketchRegionChecks() {
     bk_sketch_regions_free(g);
   }
   {
+    // Two regions chosen together whose outlines meet at a point where two straight sides run on in one line: joined
+    // into one side there, it passed through that point mid-side and an end of the solid came out with a triangle of no
+    // area, open. (A sketch the fuzzer found.)
+    double pts[] = {-0.25, -0.125, 0.25, 0.25, 0.125, 0.25, 0.375, -0.125, 0.125, 0.25, 0.375, 0.375, 0.25, 0.5, 0.25, 0.375, 0.375, -0.125, -0.125, 0.375, 0.25, 0.375, 0.25, 0.5, 0.25, 0.25, -0.125, -0.375, -0.25, 0.125, 0.375, 0};
+    BKCurve curves[] = {{1, {4, 14, 8}, 0.375, 0}, {1, {10, 5, 9}, 0.5, 0}, {1, {2, 10, 2}, 0.125, 0}, {1, {6, 9, 15}, 0.5, 1}, {0, {15, 12, 3}, 0.47544038128817595, 0}, {0, {8, 10, 15}, 0, 0}, {2, {6, 0, 7}, 0.125, 0}, {1, {3, 3, 6}, 0.044878848278883665, 0}, {0, {11, 5, 4}, 0.125, 0}, {2, {6, 15, 9}, 0.5, 0}, {0, {1, 6, 0}, 0.032235474278064447, 0}};
+    BKSketch s{16, 11, 0, pts, nullptr, curves, nullptr};
+    double seeds[4] = {0.015889011054771536, 0.72283908872947888, 0.20896634362449132, 0.42892762233729642};
+    int start[3] = {0, 0, 0};
+    BKForm form{BK_FORM_EXTRUDE, -0.17686880748700107, 0.034320894576433059, -1};
+    BKShape *shape = bk_sketch_solid(&s, start, nullptr, seeds, 2, &form);
+    BKMesh *m = shape ? bk_mesh(shape, 0.05) : nullptr;
+    double sv = 0;
+    std::string why;
+    check("two regions meeting at a point on a straight side stand up closed", m && m->valid && closed(m, sv, why, true) && near(sv, m->volume, 0.05 * m->volume), why);
+    bk_mesh_free(m), bk_free(shape);
+  }
+  {
     // The same curves in another order: the same regions.
     SketchB b, c;
     b.rect(0, 0, 10, 10), b.circle(5, 5, 3), b.line(0, 5, 10, 5);
