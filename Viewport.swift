@@ -420,7 +420,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.setVertexBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
         enc.setFragmentBytes(&f, length: MemoryLayout<FrameU>.stride, index: 1)
         let accent = color(lib.accent), accent2 = color(lib.accent2), glow = Float(max(0.35, lib.brightness))
-        let alive = Set(lib.doc.bodies.map(\.id)), chosen = Set(lib.selection)
+        let alive = Set(lib.doc.bodies.map(\.id) + (lib.sketchPreview == nil ? [] : [Renderer.previewID])), chosen = Set(lib.selection)
         bodies = bodies.filter { alive.contains($0.key) }
 
         drawBed(enc, accent: accent)
@@ -461,6 +461,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             let facePicking = (lib.mode == .angles && lib.hover.edge < 0 && lib.hover.corner < 0) || lib.mode == .hollow
             var faceHover = facePicking && hovered ? Int32(lib.hover.face) : -1
             if lib.mode == .measure, let mh = lib.measureHover, mh.snap == .face, mh.body == b.id { faceHover = Int32(mh.index) }
+            // Choosing where to sketch: the flat face under the pointer.
+            if lib.mode == .sketch, lib.sketch == nil, hovered { faceHover = Int32(lib.hover.face) }
             var u = BodyU(model: model, normalM: nm, color: SIMD4(c, 1), rim: rim, hoverFace: faceHover, flags: selected ? 1 : 0)
             enc.setRenderPipelineState(meshPipe)
             enc.setDepthStencilState(depthWrite)
@@ -489,6 +491,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if lib.mode == .sculpt, let r = lib.sculptRing, let place = lib.sculptPlace { drawBrush(enc, r, place, accent: accent2) }
 
         if lib.mode == .split, let plane = lib.splitPlane { drawPlane(enc, plane, accent: accent, hatch: accent2) }
+        if lib.mode == .sketch, let s = lib.sketch { drawSketch(enc, s, accent: accent, accent2: accent2) }
         if lib.mode == .select, !lib.selection.isEmpty { drawGizmo(enc) }
         if let g = self.view?.guides, !g.isEmpty {
             let c = color(lib.accent3)
@@ -813,6 +816,260 @@ final class Renderer: NSObject, MTKViewDelegate {
         drawLines(enc, lines, depth: depthOff)
     }
 
+    // MARK: sketch
+
+    // The solid an extrude or revolve would make, kept among the bodies' buffers under a name of its own.
+    static let previewID = UUID()
+
+    // Points round an arc from s to e counter-clockwise about c (a whole circle when they're the same).
+    static func arcPoints(_ c: SIMD2<Double>, _ s: SIMD2<Double>, _ e: SIMD2<Double>) -> [SIMD2<Double>] {
+        let r = simd_length(s - c), a0 = atan2(s.y - c.y, s.x - c.x)
+        var span = atan2(e.y - c.y, e.x - c.x) - a0
+        while span <= 1e-12 { span += 2 * .pi }
+        let n = max(8, Int(span / (2 * .pi) * 72))
+        return (0...n).map { k in let a = a0 + span * Double(k) / Double(n); return c + SIMD2(cos(a), sin(a)) * r }
+    }
+
+    // The sketch on its plane: a grid and its axes, its regions (the chosen ones brighter), its curves (free ones in the
+    // accent, held ones in ink, a face's edges in the third accent, chosen ones in the second, construction ones dashed),
+    // its points, its dimensions' lines, what's being drawn, what the pointer snaps to, and the solid it would make.
+    private func drawSketch(_ enc: MTLRenderCommandEncoder, _ s: SketchSession, accent: SIMD4<Float>, accent2: SIMD4<Float>) {
+        let sk = s.sketch, model = simd_float4x4(s.world)
+        let third = color(lib.accent3)
+        let wpp = view?.worldPerPoint(at: SIMD3<Double>(lib.camera.target)) ?? Double(lib.camera.distance) * 0.001
+        var lines: [LineV] = []
+        func f3(_ p: SIMD2<Double>) -> SIMD3<Float> { SIMD3(Float(p.x), Float(p.y), 0) }
+        func seg(_ a: SIMD2<Double>, _ b: SIMD2<Double>, _ w: Float, _ c: SIMD4<Float>, into out: inout [LineV]) {
+            Renderer.segment(f3(a), f3(b), width: w, color: c, into: &out)
+        }
+        func poly(_ pts: [SIMD2<Double>], _ w: Float, _ c: SIMD4<Float>) { Renderer.polyline(pts.map(f3), width: w, color: c, into: &lines) }
+        func dashed(_ pts: [SIMD2<Double>], _ w: Float, _ c: SIMD4<Float>) {
+            let dash = 6 * wpp
+            var on = true, left = dash
+            for k in pts.indices.dropFirst() {
+                var a = pts[k - 1]
+                let b = pts[k]
+                var rest = simd_length(b - a)
+                while rest > 1e-12 {
+                    let step = min(rest, left), q = a + (b - a) / simd_length(b - a) * step
+                    if on { seg(a, q, w, c, into: &lines) }
+                    a = q
+                    rest -= step
+                    left -= step
+                    if left <= 1e-12 { on.toggle(); left = dash }
+                }
+            }
+        }
+        // The grid, its lines at least 14 points apart, round where the view looks.
+        let step = [1.0, 2, 5, 10, 20, 50, 100, 200, 500, 1000].first { $0 / wpp >= 14 } ?? 1000
+        let t = s.world.inverse * SIMD4(SIMD3<Double>(lib.camera.target), 1)
+        let half = min(400, (Double(lib.camera.distance) * 0.9 / step).rounded(.up)) * step
+        let cx = (t.x / step).rounded() * step, cy = (t.y / step).rounded() * step
+        var grid: [LineV] = []
+        var k = -half
+        while k <= half + step * 0.01 {
+            for (v, across) in [(cx + k, true), (cy + k, false)] {
+                let major = abs(v.remainder(dividingBy: step * 5)) < step * 0.01
+                let c = SIMD4<Float>(Renderer.ink, major ? 0.12 : 0.05)
+                if across { seg(SIMD2(v, cy - half), SIMD2(v, cy + half), 0.8, c, into: &grid) } else { seg(SIMD2(cx - half, v), SIMD2(cx + half, v), 0.8, c, into: &grid) }
+            }
+            k += step
+        }
+        drawLines(enc, grid, model: model, depth: depthRead)
+
+        // Regions: those chosen to make, then the others (brighter while choosing).
+        let n = SIMD4<Float>(SIMD3<Float>(s.normal), 0)
+        for chosen in [false, true] {
+            var tri: [SIMD4<Float>] = []
+            for (i, r) in s.regions.enumerated() where s.chosen.contains(i) == chosen {
+                tri += r.triangles.map { SIMD4(f3($0), -1) }
+            }
+            guard !tri.isEmpty, let pb = device.makeBuffer(bytes: tri, length: tri.count * 16),
+                  let nb = device.makeBuffer(bytes: [SIMD4<Float>](repeating: n, count: tri.count), length: tri.count * 16) else { continue }
+            let tint = chosen ? SIMD4(accent2.x, accent2.y, accent2.z, 0.42) : SIMD4(accent.x, accent.y, accent.z, s.stage == .draw ? 0.07 : 0.16)
+            var u = BodyU(model: model, normalM: matrix_identity_float4x4, color: tint, rim: SIMD4(0, 0, 0, 0), hoverFace: -1, flags: 0)
+            enc.setRenderPipelineState(glassPipe)
+            enc.setDepthStencilState(depthOff)
+            enc.setVertexBuffer(pb, offset: 0, index: 0)
+            enc.setVertexBuffer(nb, offset: 0, index: 3)
+            enc.setVertexBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
+            enc.setFragmentBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: tri.count)
+        }
+
+        // Curves.
+        var marked = Set<Int32>()
+        for item in s.selection + s.picks { if case .curve(let c) = item { marked.insert(c) } }
+        if s.stage == .revolve { marked.insert(s.axis) }
+        let hot = s.hover?.kind == .curve ? s.hover?.curve ?? -1 : -1
+        for (i, c) in sk.curves.enumerated() {
+            let p = c.points.map { sk.points[Int($0)] }
+            var pts: [SIMD2<Double>]
+            switch c.kind {
+            case .line:
+                if c.reference && c.construction {
+                    // An axis: the whole line through the origin.
+                    let d = simd_normalize(p[1] - p[0])
+                    pts = [p[0] - d * half * 2, p[1] + d * half * 2]
+                } else {
+                    pts = p
+                }
+            case .circle: pts = Renderer.arcPoints(p[0], p[0] + SIMD2(c.radius, 0), p[0] + SIMD2(c.radius, 0))
+            case .arc: pts = Renderer.arcPoints(p[0], p[1], p[2])
+            }
+            let fixed = s.solved.curveFixed.indices.contains(i) && s.solved.curveFixed[i]
+            let w: Float = Int32(i) == hot ? 3.4 : 2.2
+            if marked.contains(Int32(i)) {
+                poly(pts, 3.2, SIMD4(accent2.x, accent2.y, accent2.z, 1))
+            } else if c.reference && c.construction {
+                let a = Renderer.axisColors[i == Int(Sketch.xAxis) ? 0 : 1]
+                poly(pts, 1.2, SIMD4(a.x, a.y, a.z, 0.5))
+            } else if c.reference {
+                poly(pts, w, SIMD4(third.x, third.y, third.z, 0.9))
+            } else if c.construction {
+                dashed(pts, 1.6, SIMD4(Renderer.ink, 0.55))
+            } else {
+                poly(pts, w, fixed ? SIMD4(Renderer.ink, 0.92) : SIMD4(accent.x, accent.y, accent.z, 1))
+            }
+        }
+
+        // Points, as small squares.
+        var chosenPoints = Set<Int32>()
+        for item in s.selection + s.picks { if case .point(let p) = item { chosenPoints.insert(p) } }
+        let r = 3 * wpp
+        for i in sk.points.indices where lib.shownPoint(sk, Int32(i)) {
+            let p = sk.points[i]
+            let held = (i < sk.fixed.count && sk.fixed[i]) || (s.solved.pointFixed.indices.contains(i) && s.solved.pointFixed[i])
+            let c = chosenPoints.contains(Int32(i)) ? SIMD4(accent2.x, accent2.y, accent2.z, 1) : held ? SIMD4(Renderer.ink, 0.92) : SIMD4(accent.x, accent.y, accent.z, 1)
+            poly([p + SIMD2(-r, -r), p + SIMD2(r, -r), p + SIMD2(r, r), p + SIMD2(-r, r), p + SIMD2(-r, -r)], 2.2, c)
+        }
+
+        // Dimensions: their lines, through where their values are shown.
+        for (i, rule) in sk.rules.enumerated() where rule.dimension {
+            let chosen = s.selection.contains(.rule(i)) || s.editingRule == i
+            let c = chosen ? SIMD4(accent2.x, accent2.y, accent2.z, 1) : SIMD4(Renderer.ink, 0.55)
+            for piece in Renderer.dimensionLines(rule, sk) { poly(piece, chosen ? 1.8 : 1.2, c) }
+        }
+
+        // What's being drawn, from its clicks to the pointer.
+        if s.stage == .draw, let h = s.hover {
+            let band = SIMD4(accent2.x, accent2.y, accent2.z, 0.9)
+            switch s.tool {
+            case .line:
+                if let a = s.chain >= 0 ? sk.points[Int(s.chain)] : s.clicks.first { poly([a, h.at], 2, band) }
+            case .rectangle:
+                if let a = s.clicks.first { poly([a, SIMD2(h.at.x, a.y), h.at, SIMD2(a.x, h.at.y), a], 2, band) }
+            case .circle:
+                if let c = s.clicks.first, simd_length(h.at - c) > 0 { poly(Renderer.arcPoints(c, h.at, h.at), 2, band) }
+            case .arc:
+                if s.clicks.count == 1 { poly([s.clicks[0], h.at], 2, band) }
+                if s.clicks.count == 2, let c = Workbench.centre(s.clicks[0], s.clicks[1], h.at) {
+                    let a = s.clicks[0], b = s.clicks[1]
+                    let ccw = (b.x - a.x) * (h.at.y - a.y) - (b.y - a.y) * (h.at.x - a.x) < 0
+                    poly(ccw ? Renderer.arcPoints(c, a, b) : Renderer.arcPoints(c, b, a), 2, band)
+                }
+            default: break
+            }
+            // What the pointer snaps to.
+            let p = h.at, m = 5 * wpp
+            let mark = SIMD4(accent2.x, accent2.y, accent2.z, 1)
+            switch h.kind {
+            case .point: poly([p + SIMD2(-m, -m), p + SIMD2(m, -m), p + SIMD2(m, m), p + SIMD2(-m, m), p + SIMD2(-m, -m)], 2.4, mark)
+            case .midpoint: poly([p + SIMD2(m, 0), p + SIMD2(0, m), p + SIMD2(-m, 0), p + SIMD2(0, -m), p + SIMD2(m, 0)], 2.4, mark)
+            case .curve: poly(Renderer.arcPoints(p, p + SIMD2(m * 0.8, 0), p + SIMD2(m * 0.8, 0)), 2.4, mark)
+            case .grid, .free:
+                poly([p - SIMD2(m * 0.6, 0), p + SIMD2(m * 0.6, 0)], 1.4, SIMD4(Renderer.ink, 0.6))
+                poly([p - SIMD2(0, m * 0.6), p + SIMD2(0, m * 0.6)], 1.4, SIMD4(Renderer.ink, 0.6))
+            }
+            if h.aligned != 0, let a = s.chain >= 0 ? sk.points[Int(s.chain)] : s.clicks.first {
+                let d = h.aligned == 1 ? SIMD2<Double>(1, 0) : SIMD2(0, 1)
+                dashed([a - d * half, a + d * half], 1, SIMD4(third.x, third.y, third.z, 0.8))
+            }
+        }
+        drawLines(enc, lines, model: model, depth: depthOff)
+
+        // The solid it would make, see-through (red where it cuts).
+        if let pv = lib.sketchPreview, let g = upload(Renderer.previewID, pv.mesh) {
+            let pm = simd_float4x4(pv.place)
+            let tint = pv.cut ? SIMD4<Float>(1, 0.2, 0.3, 0.38) : SIMD4(accent.x, accent.y, accent.z, 0.42)
+            var u = BodyU(model: pm, normalM: pm, color: tint, rim: SIMD4(accent.x, accent.y, accent.z, 0.6), hoverFace: -1, flags: 0)
+            enc.setRenderPipelineState(glassPipe)
+            enc.setDepthStencilState(depthRead)
+            enc.setVertexBuffer(g.pos, offset: 0, index: 0)
+            enc.setVertexBuffer(g.nrm, offset: 0, index: 3)
+            enc.setVertexBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
+            enc.setFragmentBytes(&u, length: MemoryLayout<BodyU>.stride, index: 2)
+            enc.drawIndexedPrimitives(type: .triangle, indexCount: g.count, indexType: .uint32, indexBuffer: g.idx, indexBufferOffset: 0)
+            if let eb = g.edges { drawLines(enc, eb, count: g.edgeCount, model: pm, depth: depthOff) }
+        }
+    }
+
+    // A dimension's lines (sketch coordinates): a distance between its ends, set out through its label; a radius or
+    // diameter across its circle towards the label; an angle's arc through the label.
+    static func dimensionLines(_ r: SketchRule, _ sk: Sketch) -> [[SIMD2<Double>]] {
+        func pt(_ i: Int32) -> SIMD2<Double>? { sk.points.indices.contains(Int(i)) ? sk.points[Int(i)] : nil }
+        func ends(_ c: Int32) -> (SIMD2<Double>, SIMD2<Double>)? {
+            guard sk.curves.indices.contains(Int(c)), let a = pt(sk.curves[Int(c)].points[0]) else { return nil }
+            let cv = sk.curves[Int(c)]
+            guard cv.kind == .line, let b = pt(cv.points[1]) else { return nil }
+            return (a, b)
+        }
+        func across(_ a: SIMD2<Double>, _ b: SIMD2<Double>, _ l: SIMD2<Double>) -> [[SIMD2<Double>]] {
+            let d = b - a, len = simd_length(d)
+            guard len > 0 else { return [] }
+            let nrm = SIMD2(-d.y, d.x) / len, off = simd_dot(l - a, nrm)
+            let a2 = a + nrm * off, b2 = b + nrm * off
+            return [[a, a2], [b, b2], [a2, b2]]
+        }
+        func foot(_ p: SIMD2<Double>, _ a: SIMD2<Double>, _ b: SIMD2<Double>) -> SIMD2<Double> {
+            let d = b - a, l2 = simd_dot(d, d)
+            return l2 > 0 ? a + d * (simd_dot(p - a, d) / l2) : a
+        }
+        let l = r.label
+        switch Int(r.kind) {
+        case BK_DIM_DISTANCE:
+            guard r.points.count >= 2, let a = pt(r.points[0]), let b = pt(r.points[1]) else { return [] }
+            return across(a, b, l)
+        case BK_DIM_HORIZONTAL:
+            guard r.points.count >= 2, let a = pt(r.points[0]), let b = pt(r.points[1]) else { return [] }
+            return [[a, SIMD2(a.x, l.y)], [b, SIMD2(b.x, l.y)], [SIMD2(a.x, l.y), SIMD2(b.x, l.y)]]
+        case BK_DIM_VERTICAL:
+            guard r.points.count >= 2, let a = pt(r.points[0]), let b = pt(r.points[1]) else { return [] }
+            return [[a, SIMD2(l.x, a.y)], [b, SIMD2(l.x, b.y)], [SIMD2(l.x, a.y), SIMD2(l.x, b.y)]]
+        case BK_DIM_LENGTH:
+            guard let c = r.curves.first, let (a, b) = ends(c) else { return [] }
+            return across(a, b, l)
+        case BK_DIM_POINT_LINE:
+            guard let p = r.points.first.flatMap(pt), let c = r.curves.first, let (a, b) = ends(c) else { return [] }
+            let f = foot(p, a, b)
+            return [[p, f], [(p + f) / 2, l]]
+        case BK_DIM_LINES:
+            guard r.curves.count >= 2, let (a0, b0) = ends(r.curves[0]), let (a1, b1) = ends(r.curves[1]) else { return [] }
+            let m = (a1 + b1) / 2, f = foot(m, a0, b0)
+            return [[m, f], [(m + f) / 2, l]]
+        case BK_DIM_RADIUS, BK_DIM_DIAMETER:
+            guard let c = r.curves.first, sk.curves.indices.contains(Int(c)), let o = pt(sk.curves[Int(c)].points[0]) else { return [] }
+            let cv = sk.curves[Int(c)]
+            let rad = cv.kind == .circle ? cv.radius : pt(cv.points[1]).map { simd_length($0 - o) } ?? 0
+            let d = simd_length(l - o) > 0 ? (l - o) / simd_length(l - o) : SIMD2(1, 0)
+            let rim = o + d * rad
+            var out = [[r.kind == Int32(BK_DIM_DIAMETER) ? o - d * rad : o, rim]]
+            if simd_length(l - o) > rad { out.append([rim, l]) }
+            return out
+        case BK_DIM_ANGLE:
+            guard r.curves.count >= 2, let (a0, b0) = ends(r.curves[0]), let (a1, b1) = ends(r.curves[1]) else { return [] }
+            var u = b0 - a0, v = b1 - a1
+            if r.side & 1 != 0 { u = -u }
+            if r.side & 2 != 0 { v = -v }
+            guard let corner = Workbench.meet(a0, b0 - a0, a1, b1 - a1) else { return [] }
+            let rad = max(1e-6, simd_length(l - corner))
+            let s = corner + u / simd_length(u) * rad, e = corner + v / simd_length(v) * rad
+            return [Renderer.arcPoints(corner, s, e)]
+        default:
+            return []
+        }
+    }
+
     // MARK: camera helpers
 
     // Frames the visible shapes (or the bed when there are none). False while shapes are still being built.
@@ -1059,7 +1316,7 @@ final class CadView: MTKView {
     var renderer: Renderer!
     var dragAxis: Int?
     var splitHandle: Int?   // 0, 1: tilt rings · 2: the move arrow
-    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), split, tilt(Int), sculpt }
+    private enum Drag { case none, orbit, pan, body, axis(Int), ring(Int), scaleAxis(Int), split, tilt(Int), sculpt, sketchPoint(Int32) }
     private var drag: Drag = .none
     // The brush of the stroke under way, and where it began (the body's own coordinates).
     private var strokeBrush: SculptBrush?
@@ -1086,6 +1343,14 @@ final class CadView: MTKView {
     var guides: [(SIMD3<Double>, SIMD3<Double>)] = []
     // The ruler's length at the middle of its line, and what the pointer snaps to beside it.
     private let lengthTag = Tag(), snapTag = Tag()
+    // A sketch's dimensions' values (where each is, to double-click), the field one is typed in and which one that is,
+    // whether a point is being dragged, and which faces are flat (by mesh and face).
+    private var dimensionTags: [Tag] = []
+    private var dimensionRects: [(rule: Int, rect: CGRect)] = []
+    private let valueField = NSTextField()
+    private var valueRule = -1
+    private var sketchDragging = false
+    private var flatSeen: [SIMD2<Int>: Bool] = [:]
 
     init() {
         let r = Renderer()
@@ -1103,6 +1368,14 @@ final class CadView: MTKView {
         presentsWithTransaction = true
         addSubview(lengthTag)
         addSubview(snapTag)
+        valueField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        valueField.alignment = .center
+        valueField.focusRingType = .none
+        valueField.target = self
+        valueField.action = #selector(valueEntered)
+        valueField.delegate = self
+        valueField.isHidden = true
+        addSubview(valueField)
     }
 
     // Draws once on the next turn of the main loop, however often it's asked. Frames are drawn here rather than left to
@@ -1178,7 +1451,7 @@ final class CadView: MTKView {
         return (o, normalize(e - o))
     }
 
-    private func worldPerPoint(at p: SIMD3<Double>) -> Double {
+    func worldPerPoint(at p: SIMD3<Double>) -> Double {
         let d = length(SIMD3<Double>(lib.camera.eye) - p)
         return 2 * d * tan(Double(lib.camera.fov) / 2) / Double(max(1, bounds.height))
     }
@@ -1358,6 +1631,7 @@ final class CadView: MTKView {
         } else {
             snapTag.isHidden = true
         }
+        placeDimensions()
     }
 
     // Round mode: corner, then edge, then face under the pointer.
@@ -1411,10 +1685,121 @@ final class CadView: MTKView {
         return nil
     }
 
+    // MARK: sketch
+
+    // Where the pointer's ray meets the sketch's plane (sketch coordinates), and how far a point on the screen spans there.
+    private func sketchPoint(_ p: CGPoint) -> (SIMD2<Double>, Double)? {
+        guard let s = lib.sketch else { return nil }
+        let (o, d) = ray(p)
+        let n = s.normal, origin = s.world.columns.3.xyz
+        let across = simd_dot(d, n)
+        guard abs(across) > 1e-9 else { return nil }
+        let t = simd_dot(origin - o, n) / across
+        guard t > 0 else { return nil }
+        let w = o + d * t
+        let q = s.world.inverse * SIMD4(w, 1)
+        return (SIMD2(q.x, q.y), worldPerPoint(at: w))
+    }
+
+    private func flatFace(_ id: UUID, _ face: Int) -> Bool {
+        guard let m = lib.meshes[id] else { return false }
+        let key = SIMD2(m.stamp, face)
+        if let f = flatSeen[key] { return f }
+        if flatSeen.count > 256 { flatSeen.removeAll() }
+        let f = Workbench.flatFace(m, face)
+        flatSeen[key] = f
+        return f
+    }
+
+    // The dimension whose value is under the pointer.
+    private func dimensionAt(_ p: CGPoint) -> Int? {
+        dimensionRects.last { $0.rect.insetBy(dx: -3, dy: -3).contains(p) }?.rule
+    }
+
+    // A click (a press that hardly moved): with no sketch yet, it starts one on the flat face or the bed clicked; else the
+    // tool takes it (a dimension's value is only a label to the drawing tools).
+    private func sketchClick(_ e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        guard let s = lib.sketch else {
+            if let h = hitBody(p) {
+                if flatFace(h.body, h.face) { lib.sketchOnFace(h.body, face: h.face) } else { lib.flash(L("Pick the bed or a flat face to sketch on")) }
+                return
+            }
+            let (o, d) = ray(p)
+            if abs(d.z) > 1e-9, -o.z / d.z > 0 { lib.sketchOnPlane(0) }
+            return
+        }
+        if s.stage == .draw, s.tool != .select, s.tool != .dimension, dimensionAt(p) != nil { return }
+        guard let (q, per) = sketchPoint(p) else { return }
+        lib.sketchClick(q, perPoint: per, free: e.modifierFlags.contains(.command), shift: e.modifierFlags.contains(.shift))
+    }
+
+    // A dimension's value typed: the sketch made to hold it.
+    @objc private func valueEntered() {
+        guard valueRule >= 0 else { return }
+        let text = valueField.stringValue.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
+        let rule = valueRule
+        closeValue()
+        if let v = Double(text) { lib.setDimension(rule, v) } else { lib.updateSketch { $0.editingRule = nil } }
+    }
+
+    private func closeValue() {
+        valueRule = -1
+        valueField.isHidden = true
+        if window?.firstResponder === valueField.currentEditor() { window?.makeFirstResponder(self) }
+    }
+
+    // The value field over the dimension being typed, and the other dimensions' values.
+    private func placeDimensions() {
+        var shown = 0
+        dimensionRects = []
+        if lib.mode == .sketch, let s = lib.sketch {
+            for (i, r) in s.sketch.rules.enumerated() where r.dimension && shown < 300 {
+                guard let at = project(s.world(r.label)) else { continue }
+                if dimensionTags.count <= shown {
+                    let t = Tag()
+                    addSubview(t, positioned: .below, relativeTo: valueField)
+                    dimensionTags.append(t)
+                }
+                let t = dimensionTags[shown]
+                let chosen = s.selection.contains(.rule(i))
+                t.show(Workbench.dimensionText(r), color: NSColor(chosen ? lib.accent2 : lib.accent), at: at)
+                t.isHidden = s.editingRule == i
+                dimensionRects.append((i, t.frame))
+                shown += 1
+            }
+        }
+        for t in dimensionTags.dropFirst(shown) where !t.isHidden { t.isHidden = true }
+        if lib.mode == .sketch, let s = lib.sketch, let i = s.editingRule, s.sketch.rules.indices.contains(i), let at = project(s.world(s.sketch.rules[i].label)) {
+            valueField.frame = CGRect(x: (at.x - 42).rounded(), y: (at.y - 11).rounded(), width: 84, height: 22)
+            if valueRule != i {
+                valueRule = i
+                valueField.stringValue = MMField.format(s.sketch.rules[i].value)
+                valueField.isHidden = false
+                window?.makeFirstResponder(valueField)
+                valueField.currentEditor()?.selectAll(nil)
+            }
+        } else if valueRule >= 0 {
+            closeValue()
+        }
+    }
+
     // MARK: events
 
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
+        if lib.mode == .sketch {
+            if lib.sketch != nil {
+                if let (q, per) = sketchPoint(p) { lib.sketchHover(q, perPoint: per, free: e.modifierFlags.contains(.command)) }
+                if lib.hover != Hover() { lib.hover = Hover() }
+            } else {
+                // Choosing the plane: a flat face lights up under the pointer.
+                let h = hitBody(p)
+                let hv = h.map { Hover(body: $0.body, face: flatFace($0.body, $0.face) ? $0.face : -1) } ?? Hover()
+                if hv != lib.hover { lib.hover = hv }
+            }
+            return
+        }
         if lib.mode == .sculpt {
             // The brush follows the pointer over the body, turned to the way it goes (coming onto it: the view's right).
             let r = lib.sculptBusy ? nil : sculptHit(p)
@@ -1445,6 +1830,7 @@ final class CadView: MTKView {
         if lib.hover != Hover() { lib.hover = Hover() }
         if case .sculpt = drag {} else if lib.sculptRing != nil { lib.sculptRing = nil }
         if lib.measureHover != nil { lib.measureHover = nil }
+        if lib.sketch?.hover != nil { lib.sketch?.hover = nil }
     }
 
     override func mouseDown(with e: NSEvent) {
@@ -1519,6 +1905,21 @@ final class CadView: MTKView {
                 drag = shift ? .pan : .orbit
             }
             return
+        case .sketch:
+            // A press on a free point (the select tool) drags it; a double click on a dimension's value types a new one;
+            // anything else turns the view (Shift: pans) and, if it hardly moves, is a click.
+            drag = shift ? .pan : .orbit
+            guard let s = lib.sketch else { return }
+            if e.clickCount == 2, let i = dimensionAt(p) {
+                lib.editDimension(i)
+                drag = .none
+                return
+            }
+            if s.stage == .draw, s.tool == .select, let (q, per) = sketchPoint(p), case .point(let i)? = lib.itemAt(q, perPoint: per),
+               !(Int(i) < s.sketch.fixed.count && s.sketch.fixed[Int(i)]) {
+                drag = .sketchPoint(i)
+            }
+            return
         case .select, .thread:
             break
         }
@@ -1563,7 +1964,7 @@ final class CadView: MTKView {
         defer { redraw() }
         // Shapes stay exactly where they are until the pointer has really moved: a click's jitter would snap them to a mark.
         switch drag {
-        case .body, .axis, .ring, .scaleAxis: if !moved { return }
+        case .body, .axis, .ring, .scaleAxis, .sketchPoint: if !moved { return }
         default: break
         }
         switch drag {
@@ -1641,6 +2042,13 @@ final class CadView: MTKView {
                 if let was = lib.sculptRing, length(hit.at - was.at) > 1e-6 { lib.sculptWay = hit.at - was.at }
                 lib.sculptRing = hit
             }
+        case .sketchPoint(let i):
+            guard let (q, _) = sketchPoint(p) else { return }
+            if !sketchDragging {
+                lib.sketchDragBegin()
+                sketchDragging = true
+            }
+            lib.sketchDrag(i, to: q)
         case .tilt(let k):
             guard let c = project(startPlane) else { return }
             let a0 = atan2(Double(downAt.y - c.y), Double(downAt.x - c.x)), a1 = atan2(Double(p.y - c.y), Double(p.x - c.x))
@@ -1680,6 +2088,10 @@ final class CadView: MTKView {
                 lib.measure(end)
             }
             if !moved && (lib.mode == .select || lib.mode == .thread) && !e.modifierFlags.contains(.shift) { lib.selection = [] }
+            if !moved && lib.mode == .sketch { sketchClick(e) }
+        case .sketchPoint:
+            if sketchDragging { lib.sketchDragEnd() } else { sketchClick(e) }
+            sketchDragging = false
         case .scaleAxis:
             if !moved { lib.undoLastIfUnchanged() } else { lib.finishScale() }
         case .ring, .body, .axis:
@@ -1922,6 +2334,16 @@ final class CadView: MTKView {
             }
         }
         lib.sceneVersion += 1
+    }
+}
+
+// The dimension field: Esc leaves it as it was.
+extension CadView: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === valueField, selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        closeValue()
+        lib.updateSketch { $0.editingRule = nil }
+        return true
     }
 }
 

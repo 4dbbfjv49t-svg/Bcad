@@ -20,6 +20,20 @@ print:
 - Over 2 million triangles, it is simplified. The note says how far the result strays (usually a few micrometres).
 - A file with no unit that is under 2 units across is read as metres.
 
+## Sketches
+Press **Sketch** (K), then click the bed or a flat face. The view turns to face it; a face's edges are there to draw
+and measure to.
+- **Draw:** Line (L, one after another), Rectangle (R), Circle (C), Arc (A, through 3 points), Construction (X: lines
+  that bound nothing). Clicks snap to points, middles, curves and the grid (⌘: free) and add the matching constraint.
+- **Constrain:** choose curves or points and pick a constraint: coincident, on the curve, horizontal, vertical,
+  parallel, perpendicular, tangent, equal, concentric, midpoint, collinear, symmetric, fix.
+- **Dimension (D):** click a line, a circle, or two items, then where the value goes, and type it. Double-click a value
+  to change it. Free geometry is in the accent colour, fully constrained geometry in ink; the bar counts what's left.
+- **Extrude (E) / Revolve (V):** click the regions (a lone one is chosen already), set the distance or the angle and
+  axis, then New body, Merge, Subtract or Intersect. Enter makes it, as one undo step.
+- Results are exact like the built-in shapes (flat faces, true cylinders and turned faces), so rounding, hollowing,
+  measuring, STEP and printing work on them. The layer row changes the distance and opens the sketch again.
+
 ## Plans
 - **Free:** one document a day (saved and exported as often as you like that day), no ads, no human figures.
 - **Pro** ($9 a month or $90 a year): unlimited saving and exporting.

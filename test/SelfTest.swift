@@ -1165,6 +1165,204 @@ enum SelfTest {
               lib.doc.bodies.count == 1 && lib.fileURL == nil && lib.title == "cube" && lib.dirty, lib.title)
         lib.fileURL = fileBefore
         lib.docName = nil
+        // Sketches, made directly: a rectangle stood up is a box, a square turned all the way round and a quarter of the way
+        // is as Pappus says, a circle cut 4 mm into a cube's top; saved and opened again (version 5); what a file can't hold
+        // is refused.
+        do {
+            var sk = Sketch.start()
+            let p = [SIMD2<Double>(0, 0), SIMD2(40, 0), SIMD2(40, 20), SIMD2(0, 20)].map { sk.point($0) }
+            for i in 0..<4 { sk.curves.append(SketchCurve(kind: .line, points: [p[i], p[(i + 1) % 4]])) }
+            let regions = sk.regions()
+            let plate = Profile(sketch: sk, regions: regions.map(\.ref), form: Form(kind: Int32(BK_FORM_EXTRUDE), low: 0, high: 10))
+            let pm = mesh(.profile(plate))
+            check("a sketched 40 × 20 rectangle stood up 10 mm is a box", regions.count == 1 && abs((pm?.volume ?? 0) - 8000) < 1e-6
+                  && pm?.faceInfo.count == 6 && pm.map(manifold) == true, String(format: "%.6f mm³, %d faces", pm?.volume ?? 0, pm?.faceInfo.count ?? 0))
+            var ring = Sketch.start()
+            let q = [SIMD2<Double>(10, 0), SIMD2(20, 0), SIMD2(20, 10), SIMD2(10, 10)].map { ring.point($0) }
+            for i in 0..<4 { ring.curves.append(SketchCurve(kind: .line, points: [q[i], q[(i + 1) % 4]])) }
+            let around = Profile(sketch: ring, regions: ring.regions().map(\.ref), form: Form(kind: Int32(BK_FORM_REVOLVE), low: 0, high: 360, axis: Sketch.yAxis))
+            var quarter = around
+            quarter.form.high = 90
+            let am = mesh(.profile(around)), qm = mesh(.profile(quarter))
+            check("a sketched square turned round the sketch's y axis, all the way and a quarter (Pappus)",
+                  abs((am?.volume ?? 0) - 3000 * .pi) < 1e-6 && abs((qm?.volume ?? 0) - 750 * .pi) < 1e-6 && am.map(manifold) == true && qm.map(manifold) == true,
+                  String(format: "%.6f, %.6f mm³", am?.volume ?? 0, qm?.volume ?? 0))
+            var hole = Sketch.start()
+            hole.curves.append(SketchCurve(kind: .circle, points: [0], radius: 5))
+            let holeProfile = Profile(sketch: hole, regions: hole.regions().map(\.ref), form: Form(kind: Int32(BK_FORM_EXTRUDE), low: -4, high: 0),
+                                      frame: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 10])
+            let cut = Node.feature(of: box, profile: holeProfile, op: Int32(BK_SUBTRACT))
+            let cm = mesh(cut)
+            check("a sketched circle cut 4 mm into a cube's top", abs((cm?.volume ?? 0) - (8000 - 100 * .pi)) < 1e-6 && cm.map(manifold) == true,
+                  String(format: "%.6f mm³", cm?.volume ?? 0))
+            let sketched = Document(bodies: [Solid(name: "Plate", color: Palette.colors[0], node: .profile(plate), place: Placement()),
+                                             Solid(name: "Cut", color: Palette.colors[1], node: cut, place: Placement(move: SIMD3(60, 0, 10)))])
+            let sketchedMeshes = k.queue.sync { sketched.bodies.compactMap { b in k.printMesh(b).map { (b, $0.mesh) } } }
+            let sketchedURL = dir.appendingPathComponent("sketched.3mf")
+            try? ThreeMF.write(sketchedURL, meshes: sketchedMeshes, doc: sketched, bed: bed)
+            opened(sketchedURL)
+            settle()
+            check("sketched bodies saved and opened again (a version 5 file)", sketchedMeshes.count == 2 && lib.doc == sketched
+                  && sketched.bodies.map(\.node.fileVersion).max() == 5 && sketched.bodies.allSatisfy { !(lib.meshes[$0.id]?.vertices.isEmpty ?? true) })
+            var stray = plate
+            stray.sketch.curves[2].points = [99, 0]
+            var skewed = holeProfile
+            skewed.frame = [1, 0.5, 0, 0, 0, 1, 0, 0, 0, 0, 1, 10]
+            check("a sketch a file can't hold is refused (a point that isn't there, a skewed plane, an unknown operation)",
+                  Node.profile(plate).valid && cut.valid && !Node.profile(stray).valid && !Node.feature(of: box, profile: skewed, op: Int32(BK_SUBTRACT)).valid
+                  && !Node.feature(of: box, profile: holeProfile, op: 7).valid)
+        }
+        // Sketching through the pointer and the keys: K, then a click on the bed, starts a sketch looking straight down at
+        // it; R is the rectangle (not Angles); two clicks draw one held level and upright; dimensioned and its corner put on
+        // the origin it's fully constrained, and a constraint that adds nothing is refused; Enter, Enter stands it up 10 mm
+        // as one undo step; opened again from its layer with a new width, the body follows. On a cube's top face: its edges
+        // to draw to, the arrows leave the cube alone, a circle cut 4 mm in. Delete takes off what's drawn only, and
+        // leaving a sketch that made nothing asks first.
+        do {
+            func tap(_ code: UInt16) -> Bool {
+                NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "",
+                                 charactersIgnoringModifiers: "", isARepeat: false, keyCode: code).map { lib.key($0) } ?? false
+            }
+            func clickAt(_ w: SIMD3<Double>) {
+                guard let p = view.project(w) else { return }
+                view.mouseDown(with: event(.leftMouseDown, p, []))
+                view.mouseUp(with: event(.leftMouseUp, p, []))
+            }
+            // The middle of curve c (sketch and world are the same on the bed).
+            func middle(_ c: Int) -> SIMD3<Double> {
+                guard let s = lib.sketch?.sketch, s.curves.indices.contains(c) else { return .zero }
+                let a = s.points[Int(s.curves[c].points[0])], b = s.points[Int(s.curves[c].points[1])]
+                return SIMD3((a.x + b.x) / 2, (a.y + b.y) / 2, 0)
+            }
+            use([])
+            lib.settings = Settings()
+            lib.camera = Camera()
+            lib.camera.distance = 150
+            _ = tap(40)
+            let picking = lib.mode == .sketch && lib.sketch == nil
+            clickAt(SIMD3(0, 0, 0))
+            flown(0, .pi / 2)
+            check("K, then a click on the bed, starts a sketch on it, looking straight down", picking && lib.sketch?.world == matrix_identity_double4x4
+                  && abs(lib.camera.pitch - .pi / 2) < 1e-4, String(format: "pitch %.4f", lib.camera.pitch))
+            _ = tap(15)
+            check("R in a sketch is the rectangle tool, not Angles", lib.mode == .sketch && lib.sketch?.tool == .rectangle)
+            clickAt(SIMD3(5, 5, 0))
+            clickAt(SIMD3(35, 25, 0))
+            let drawn = lib.sketch
+            check("a rectangle in two clicks: four lines held level and upright, free to move and size (4 ways)",
+                  drawn?.sketch.drawn == 4 && drawn?.sketch.rules.count == 4 && drawn?.solved.freedom == 4 && drawn?.sketch.points.last.map { simd_length($0 - SIMD2(5, 25)) < 1e-9 } == true,
+                  "\(drawn?.sketch.drawn ?? 0) curves, \(drawn?.sketch.rules.count ?? 0) rules, \(drawn?.solved.freedom ?? -1) free")
+            // (The height first: once 40 wide, the left side lies on the sketch's y axis.)
+            _ = tap(2)
+            clickAt(middle(5))
+            clickAt(middle(5) - SIMD3(8, 0, 0))
+            let heightRule = (lib.sketch?.sketch.rules.count ?? 0) - 1
+            let typing = lib.sketch?.editingRule == heightRule && lib.sketch?.sketch.rules.last?.kind == Int32(BK_DIM_LENGTH)
+            lib.setDimension(heightRule, 20)
+            clickAt(middle(2))
+            clickAt(middle(2) - SIMD3(0, 8, 0))
+            lib.setDimension((lib.sketch?.sketch.rules.count ?? 0) - 1, 40)
+            lib.setSketchTool(.select)
+            lib.updateSketch { $0.selection = [.point(0), .point(5)] }
+            lib.applyConstraint(Int32(BK_RULE_COINCIDENT))
+            let held = lib.sketch
+            let corners = held.map { s in [5, 6, 7, 8].map { s.sketch.points[$0] } } ?? []
+            let placed = corners.count == 4 && zip(corners, [SIMD2<Double>(0, 0), SIMD2(40, 0), SIMD2(40, 20), SIMD2(0, 20)]).allSatisfy { simd_length($0 - $1) < 1e-9 }
+            check("dimensioned 40 × 20 (typed at the label) and its corner on the origin, the rectangle is fully constrained",
+                  typing && placed && held?.solved.freedom == 0 && held?.solved.curveFixed.dropFirst(2).allSatisfy { $0 } == true,
+                  corners.map { String(format: "(%.3f, %.3f)", $0.x, $0.y) }.joined(separator: " "))
+            lib.note = nil
+            lib.updateSketch { $0.selection = [.curve(2)] }
+            let ruleCount = lib.sketch?.sketch.rules.count
+            lib.applyConstraint(Int32(BK_RULE_HORIZONTAL))
+            check("a constraint that adds nothing is refused, saying so", lib.sketch?.sketch.rules.count == ruleCount && lib.note == L("This is already fixed by other constraints"),
+                  lib.note ?? "")
+            _ = tap(36)
+            let extruding = lib.sketch?.stage == .extrude && lib.sketch?.chosen == [0]
+            _ = tap(36)
+            settle()
+            let made = lib.doc.bodies.first
+            var isProfile = false
+            if let made, case .profile = made.node { isProfile = true }
+            let madeVolume = made.flatMap { lib.meshes[$0.id]?.volume } ?? 0
+            check("Enter, Enter stands it up 10 mm: an exact 40 × 20 × 10 body where it was drawn",
+                  extruding && lib.mode == .select && lib.doc.bodies.count == 1 && isProfile && abs(madeVolume - 8000) < 1e-6
+                  && made.map { near(bounds($0.id).0, SIMD3(0, 0, 0), 1e-9) && near(bounds($0.id).1, SIMD3(40, 20, 10), 1e-9) } == true,
+                  String(format: "%.6f mm³", madeVolume))
+            lib.undo()
+            let undone = lib.doc.bodies.isEmpty
+            lib.redo()
+            settle()
+            check("making it is one undo step", undone && lib.doc.bodies.count == 1)
+            if let made {
+                lib.editSketch(made.id, level: 0)
+                let widthNow = lib.sketch?.sketch.rules.firstIndex { $0.kind == Int32(BK_DIM_LENGTH) && abs($0.value - 40) < 1e-9 }
+                if let widthNow { lib.setDimension(widthNow, 50) }
+                lib.sketchEnter()
+                lib.sketchEnter()
+                settle()
+            }
+            let edited = made.flatMap { lib.meshes[$0.id]?.volume } ?? 0
+            check("its sketch opened again from the layer, 50 wide, the body follows", lib.mode == .select && lib.doc.bodies.count == 1 && abs(edited - 10000) < 1e-6,
+                  String(format: "%.6f mm³", edited))
+
+            let cube = Solid(name: "Cube", color: Palette.colors[0], node: box, place: Placement(move: SIMD3(0, 0, 10)))
+            use([cube])
+            lib.selection = [cube.id]
+            lib.camera = Camera()
+            lib.camera.target = SIMD3(0, 0, 10)
+            lib.camera.distance = 150
+            _ = tap(40)
+            clickAt(SIMD3(0, 0, 20))
+            flown(0, .pi / 2)
+            let edges = lib.sketch?.sketch.curves.filter { $0.reference && !$0.construction }.count ?? 0
+            check("a click on a cube's top sketches on it, its four edges there to draw to, joined by default", lib.sketch?.onBody == cube.id && edges == 4
+                  && lib.sketch?.op == Int32(BK_UNION), "\(edges) edges")
+            let placeBefore = lib.body(cube.id)?.place
+            _ = tap(123)
+            check("the arrows leave the shapes alone while sketching", lib.body(cube.id)?.place == placeBefore)
+            // (A circle through a grid point 5 from the middle: snapped to the grid, it's exactly 5 round.)
+            _ = tap(8)
+            clickAt(SIMD3(0, 0, 20))
+            clickAt(SIMD3(3, 4, 20))
+            _ = tap(14)
+            let regionsOnFace = lib.sketch?.regions.count ?? 0
+            clickAt(SIMD3(0, 0, 20))
+            lib.setSketchForm(distance: -4, op: Int32(BK_SUBTRACT))
+            _ = tap(36)
+            settle()
+            var isFeature = false
+            if let b = lib.body(cube.id), case .feature = b.node { isFeature = true }
+            let cutVolume = lib.meshes[cube.id]?.volume ?? 0
+            check("a circle on the face cut 4 mm into the cube", regionsOnFace == 2 && isFeature && lib.mode == .select && abs(cutVolume - (8000 - 100 * .pi)) < 1e-6,
+                  String(format: "%d regions, %.6f mm³", regionsOnFace, cutVolume))
+
+            lib.camera = Camera()
+            lib.camera.target = SIMD3(0, 0, 0)
+            lib.camera.distance = 150
+            // (Clear of the cube, from where the view looks.)
+            _ = tap(40)
+            clickAt(SIMD3(-40, -40, 0))
+            flown(0, .pi / 2)
+            _ = tap(37)
+            clickAt(SIMD3(-40, -40, 0))
+            clickAt(SIMD3(-20, -40, 0))
+            let lined = lib.sketch?.sketch.drawn == 1
+            lib.updateSketch { $0.selection = [.curve(2)]; $0.chain = -1 }
+            let cubeBefore = lib.body(cube.id)?.node
+            _ = tap(51)
+            let deleted = lib.sketch?.sketch.drawn == 0 && lib.body(cube.id)?.node == cubeBefore && lib.doc.bodies.count == 1
+            clickAt(SIMD3(-40, -40, 0))
+            clickAt(SIMD3(-20, -40, 0))
+            lib.testAnswer = .alertSecondButtonReturn
+            for _ in 0..<6 where lib.mode == .sketch { _ = tap(53) }
+            let stayed = lib.mode == .sketch && lib.sketch?.sketch.drawn == 1
+            lib.testAnswer = .alertFirstButtonReturn
+            _ = tap(53)
+            let left = lib.mode == .select && lib.sketch == nil && lib.doc.bodies.count == 1
+            lib.testAnswer = nil
+            check("Delete takes off what's drawn only; leaving a sketch that made nothing asks first", lined && deleted && stayed && left)
+        }
         // Sizes in mm and in percent on shapes that were edited after they were made: a box split across and a merge.
         let editedNode: Node = .split(of: box, plane: Plane(point: SIMD3(0, 0, 3), normal: SIMD3(0, 0, 1)), side: 1)
         let edited = Solid(name: "Edited", color: Palette.colors[3], node: editedNode, place: Placement(move: SIMD3(0, 0, 10)))

@@ -21,6 +21,8 @@ targets:
       - path: ../Files.swift
       - path: ../Sculpt.swift
       - path: ../Import.swift
+      - path: ../Sketch.swift
+      - path: ../Sketching.swift
       - path: ../Plans.swift
       - path: ../Engine
       - path: ../BcadKernel.h

@@ -44,7 +44,8 @@ struct RootView: View {
                                     if tool {
                                         ModeBar(mode: lib.mode).transition(.move(edge: .bottom).combined(with: .haze))
                                     }
-                                    ShapeBar()
+                                    // (While sketching, the sketch's own bar alone: shapes are added after.)
+                                    if lib.mode != .sketch { ShapeBar() }
                                 }
                                 .padding(.bottom, 16)
                                 // The tools sit beside the inspector, or at the right edge while it's away.
@@ -471,6 +472,8 @@ struct ToolRail: View {
                        lit: lib.mode == .measure, size: 30) { lib.perform(.measure) }
             ToolButton(icon: "hand.draw", title: Action.sculpt.label, key: s.isOn(.sculpt) ? Keys.label(s.key(.sculpt)) : nil, tint: lib.accent2,
                        lit: lib.mode == .sculpt, size: 30) { lib.perform(.sculpt) }
+            ToolButton(icon: "pencil.and.outline", title: Action.sketch.label, key: s.isOn(.sketch) ? Keys.label(s.key(.sketch)) : nil, tint: lib.accent2,
+                       lit: lib.mode == .sketch, size: 30) { lib.perform(.sketch) }
             divider
             ToolButton(icon: "arrow.uturn.backward", title: L("Undo"), key: "⌘Z", size: 30) { lib.undo() }
             ToolButton(icon: "arrow.uturn.forward", title: L("Redo"), key: "⇧⌘Z", size: 30) { lib.redo() }
@@ -527,6 +530,7 @@ struct ModeBar: View {
         case .hollow: L("Hollow")
         case .measure: L("Ruler")
         case .sculpt: L("Sculpt")
+        case .sketch: L("Sketch")
         default: L("Split")
         }
     }
@@ -538,9 +542,12 @@ struct ModeBar: View {
             lib.measureA == nil ? L("Click a corner, an edge, a centre or a face · ⌥ places freely")
                 : lib.measureB == nil ? L("Click the second point") : L("Click to measure again · Esc clears")
         case .sculpt: L("Drag on the shape to sculpt · Shift smooths · ⌥ turns the brush around · [ ] size · drag beside it to turn the view")
+        case .sketch: sketchHint
         default: L("Drag the arrow to move the plane · drag a ring to tilt it")
         }
     }
+
+    private var sketchHint: String { lib.sketchHint() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -554,6 +561,7 @@ struct ModeBar: View {
                 case .hollow: hollow
                 case .measure: measure
                 case .sculpt: sculpt
+                case .sketch: SketchBar()
                 default: split
                 }
                 // Not 28 or 34 points: at those sizes a hovered button ignores clicks along its middle line.
@@ -838,6 +846,7 @@ struct ObjectRow: View {
         case .group: Image(systemName: "square.on.square")
         case .sculpt: Image(systemName: "hand.draw")
         case .figure: Image(systemName: "figure.stand")
+        case .profile: Image(systemName: "pencil.and.outline")
         default: Image(systemName: "cube")
         }
     }
@@ -1007,6 +1016,39 @@ struct LayerRow: View {
             SettingLine(title: L("Sculpted"), detail: L("{n} triangles", ["n": sc.data.triangleCount])) { EmptyView() }
         case .figure(let f):
             SettingLine(title: f.name) { EmptyView() }
+        case .profile(let p):
+            sketched(p, op: -1)
+        case .feature(_, let p, let op):
+            sketched(p, op: op)
+        }
+    }
+
+    // A sketch's layer: what was made of it and how far (the size to change there), the sketch to open again, and (a
+    // layer on a body) to take off.
+    @ViewBuilder private func sketched(_ p: Profile, op: Int32) -> some View {
+        let made = p.form.revolve ? L("Revolve") : L("Extrude")
+        let how = op == Int32(BK_UNION) ? L("Merge") : op == Int32(BK_SUBTRACT) ? L("Subtract") : op == Int32(BK_INTERSECT) ? L("Intersect") : nil
+        SettingLine(title: how.map { made + " · " + $0 } ?? made, detail: L("{n} regions", ["n": p.regions.count])) {
+            HStack(spacing: 6) {
+                if p.form.revolve {
+                    MMField(value: p.form.high - p.form.low, unit: "°", range: 0.1...360, width: 58) { v in
+                        lib.editLayer(item.id, level: level) { n in n.withForm { f in f.high = f.low + v } }
+                    }
+                    .help(L("Angle"))
+                } else {
+                    MMField(value: p.form.high - p.form.low, unit: L("mm"), range: 0.001...10_000, width: 58) { v in
+                        lib.editLayer(item.id, level: level) { n in
+                            n.withForm { f in
+                                // (The same side of the sketch, or as much each way, as before.)
+                                if f.low < 0 && f.high > 0 { let k = v / (f.high - f.low); f.low *= k; f.high *= k } else if f.high <= 0 { f.low = f.high - v } else { f.high = f.low + v }
+                            }
+                        }
+                    }
+                    .help(L("Distance"))
+                }
+                ToolButton(icon: "pencil", title: L("Edit sketch"), tint: lib.accent2, size: 24) { lib.editSketch(item.id, level: level) }
+                if op >= 0 { remove }
+            }
         }
     }
 

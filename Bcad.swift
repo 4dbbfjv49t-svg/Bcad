@@ -693,13 +693,20 @@ indirect enum Node: Codable, Hashable, Sendable {
     case sculpt(Sculpt)
     // A human figure.
     case figure(Figure)
+    // A body made of a sketch's regions, stood up or turned.
+    case profile(Profile)
+    // A sketch's regions stood up or turned, joined to the shape beneath, cut from it or kept where they overlap (op as
+    // BK_UNION …): a layer of it, the sketch on its face.
+    case feature(of: Node, profile: Profile, op: Int32)
 
     // The document version a file holding it needs: 2 with a sculpted body in it, 4 with a figure (3 before figures had
-    // hands and hair; files an earlier Bcad can't open).
+    // hands and hair), 5 with a sketch (files an earlier Bcad can't open).
     var fileVersion: Int {
         switch self {
         case .sculpt: 2
         case .figure: 4
+        case .profile: 5
+        case .feature(let n, _, _): max(5, n.fileVersion)
         case .group(_, let parts): parts.map(\.node.fileVersion).max() ?? 1
         default: inner?.fileVersion ?? 1
         }
@@ -736,7 +743,7 @@ indirect enum Node: Codable, Hashable, Sendable {
 
     var inner: Node? {
         switch self {
-        case .split(let n, _, _), .round(let n, _, _), .hollow(let n, _, _, _), .bevel(let n, _, _, _), .cove(let n, _, _): n
+        case .split(let n, _, _), .round(let n, _, _), .hollow(let n, _, _, _), .bevel(let n, _, _, _), .cove(let n, _, _), .feature(let n, _, _): n
         default: nil
         }
     }
@@ -767,6 +774,7 @@ indirect enum Node: Codable, Hashable, Sendable {
         case .hollow(_, let o, let w, let t): .hollow(of: n, open: o, walls: w, thickness: t)
         case .bevel(_, let p, let l, let c): .bevel(of: n, picks: p, legs: l, corner: c)
         case .cove(_, let p, let r): .cove(of: n, picks: p, radius: r)
+        case .feature(_, let p, let op): .feature(of: n, profile: p, op: op)
         default: n
         }
     }
@@ -806,6 +814,7 @@ indirect enum Node: Codable, Hashable, Sendable {
             .hollow(of: n.following(k), open: o.map { $0.stretched(k) }, walls: w.map { Wall(face: $0.face.stretched(k), thickness: $0.thickness) }, thickness: t)
         case .bevel(let n, let p, let l, let c): .bevel(of: n.following(k), picks: p.map { $0.stretched(k) }, legs: l, corner: c)
         case .cove(let n, let p, let r): .cove(of: n.following(k), picks: p.map { $0.stretched(k) }, radius: r)
+        case .feature(let n, let p, let op): .feature(of: n.following(k), profile: p.following(k), op: op)
         default: self
         }
     }
@@ -956,8 +965,8 @@ struct MergeLink: Codable, Hashable, Sendable {
 
 struct Document: Codable, Equatable, Sendable {
     // The newest version of the document Bcad reads: one a newer Bcad wrote is said to be that, not damaged. 2: sculpted
-    // bodies; 3: figures; 4: figures with hands and hair.
-    static let version = 4
+    // bodies; 3: figures; 4: figures with hands and hair; 5: sketches.
+    static let version = 5
     var version = Document.version
     var bodies: [Solid] = []
 
@@ -1365,6 +1374,13 @@ final class Kernel: @unchecked Sendable {
             })
         case .figure(let f):
             return made(bk_figure(f.values, Int32(f.values.count), 0))
+        case .profile(let p):
+            return made(p.solid())
+        case .feature(let of, let p, let op):
+            guard let s = shape(of) else { return nil }
+            // A sketch that no longer makes a solid leaves the shape beneath as it was, and says why.
+            guard let tool = shape(.profile(p)) else { return s.with { bk_copy($0) } }
+            return made(s.with { a in tool.with { b in bk_boolean(op, a, b) } })
         case .group(let op, let parts):
             // Every part has to build: leaving one out would silently change what the others are merged with or cut from.
             var result: OpaquePointer?
@@ -1780,7 +1796,7 @@ final class Kernel: @unchecked Sendable {
 
 enum Action: String, CaseIterable, Codable {
     // Angles was once a separate rounding tool's key: settings saved then know it by that name.
-    case move, rotate, scale, angles = "round", split, hollow, measure, sculpt, drop, frame, hide, showAll
+    case move, rotate, scale, angles = "round", split, hollow, measure, sculpt, sketch, drop, frame, hide, showAll
 
     var name: String {
         switch self {
@@ -1792,6 +1808,7 @@ enum Action: String, CaseIterable, Codable {
         case .hollow: "Hollow"
         case .measure: "Measure"
         case .sculpt: "Sculpt"
+        case .sketch: "Sketch"
         case .drop: "Drop onto the bed"
         case .frame: "Zoom to fit"
         case .hide: "Hide selection"
@@ -1803,7 +1820,7 @@ enum Action: String, CaseIterable, Codable {
 
 struct Settings: Codable, Equatable {
     static let defaultKeys: [String: String] = [
-        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "measure": "KeyM", "sculpt": "KeyD", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
+        "move": "KeyG", "rotate": "KeyT", "scale": "KeyY", "round": "KeyR", "split": "KeyS", "hollow": "KeyO", "measure": "KeyM", "sculpt": "KeyD", "sketch": "KeyK", "drop": "KeyB", "frame": "KeyF", "hide": "KeyH", "showAll": "KeyU"
     ]
     var keys = Settings.defaultKeys
     var snap = 1.0
@@ -1934,10 +1951,10 @@ enum Marks {
 }
 
 enum Mode: Equatable {
-    case select, split, hollow, angles, thread, measure, sculpt
+    case select, split, hollow, angles, thread, measure, sculpt, sketch
 
     // A tool with its own bar at the bottom in place of the inspector.
-    var isTool: Bool { [.split, .hollow, .measure, .sculpt].contains(self) }
+    var isTool: Bool { [.split, .hollow, .measure, .sculpt, .sketch].contains(self) }
 }
 
 // The inspector's screens: its segments and the gizmo they bring.
@@ -2310,6 +2327,12 @@ final class Workbench: DesignHost {
     @ObservationIgnored private var swipe = 0.0
     @ObservationIgnored private var swiped = false
     @ObservationIgnored private var cameraBeforeAngles: Camera?
+    // Sketching: what's being drawn (nil while the plane to draw on is still to be picked), the solid it would make as
+    // it's being shaped, and the view as it was before.
+    var sketch: SketchSession?
+    var sketchPreview: SketchPreview?
+    @ObservationIgnored var sketchToken = 0
+    @ObservationIgnored var cameraBeforeSketch: Camera?
     // Counts the documents opened or begun here: work begun for one (a save, a build) changes nothing of the next.
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var flight: Task<Void, Never>?
@@ -2677,6 +2700,7 @@ final class Workbench: DesignHost {
 
     func undo() {
         if mode == .sculpt { sculptUndo(); return }
+        if mode == .sketch { sketchUndo(); return }
         guard let d = undoStack.popLast() else { return }
         redoBefore = nil
         redoStack.append(doc)
@@ -2685,6 +2709,7 @@ final class Workbench: DesignHost {
 
     func redo() {
         if mode == .sculpt { sculptRedo(); return }
+        if mode == .sketch { sketchRedo(); return }
         guard let d = redoStack.popLast() else { return }
         redoBefore = nil
         undoStack.append(doc)
@@ -2698,6 +2723,7 @@ final class Workbench: DesignHost {
         if sculptBusy && sculpt == nil { leaveSculpt() }
         doc = d
         selection = selection.filter { id in d.bodies.contains { $0.id == id } }
+        if mode == .sketch { closeSketch() }
         if angleEdit != nil { closeAngles() }
         if mode != .select { cancelMode() }
         rebuildScene()
@@ -2714,7 +2740,7 @@ final class Workbench: DesignHost {
         mutate(id) { $0.color = c }
     }
 
-    private func nextColor() -> SIMD3<UInt8> { Palette.colors[doc.bodies.count % Palette.colors.count] }
+    func nextColor() -> SIMD3<UInt8> { Palette.colors[doc.bodies.count % Palette.colors.count] }
 
     private func spawnPoint() -> SIMD3<Double> {
         let t = camera.target
@@ -3093,6 +3119,7 @@ final class Workbench: DesignHost {
     }
 
     func deleteSelection() {
+        if mode == .sketch { sketchDelete(); return }
         guard !selection.isEmpty else { return }
         if mode == .sculpt || sculptBusy { finishSculpt() }
         if angleEdit != nil { closeAngles() }
@@ -4117,7 +4144,7 @@ final class Workbench: DesignHost {
         return out
     }
 
-    private func rewrite(_ node: Node, level: Int, _ f: (Node) -> Node?) -> Node {
+    func rewrite(_ node: Node, level: Int, _ f: (Node) -> Node?) -> Node {
         if level == 0 { return f(node) ?? node.inner ?? node }
         guard let n = node.inner else { return node }
         return node.wrapping(rewrite(n, level: level - 1, f))
@@ -4177,6 +4204,7 @@ final class Workbench: DesignHost {
         // The current screen again does nothing, unless a tool (split, hollow, the ruler) has the inspector hidden.
         guard s != screen || mode.isTool else { return }
         if mode == .sculpt || sculptBusy { finishSculpt() }
+        if mode == .sketch { leaveSketch(); if mode == .sketch { return } }
         screenStep = s.rawValue >= screen.rawValue ? 1 : -1
         withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
             switch s {
@@ -4393,7 +4421,7 @@ final class Workbench: DesignHost {
         fly(to: target, yaw: yaw, pitch: max(-1.55, min(1.55, pitch)), distance: distance, cancelled: cancelled, done: done)
     }
 
-    private func fly(to target: SIMD3<Float>, yaw: Float, pitch: Float, distance: Float, cancelled: (() -> Void)? = nil, done: (() -> Void)? = nil) {
+    func fly(to target: SIMD3<Float>, yaw: Float, pitch: Float, distance: Float, cancelled: (() -> Void)? = nil, done: (() -> Void)? = nil) {
         flight?.cancel()
         let from = camera
         var turn = yaw - from.yaw
@@ -4424,6 +4452,7 @@ final class Workbench: DesignHost {
     func enter(_ m: Mode) {
         if m == .split && selection.isEmpty { flash(L("Select a shape to split")); return }
         if mode == .sculpt || sculptBusy { finishSculpt() }
+        if mode == .sketch { leaveSketch(); if mode == .sketch { return } }
         withAnimation(Neon.spring) {
             mode = mode == m ? .select : m
             edgePicks = []
@@ -4436,6 +4465,7 @@ final class Workbench: DesignHost {
 
     func cancelMode() {
         if angleEdit != nil { closeAngles(); return }
+        if mode == .sketch { sketchBack(); return }
         if mode == .sculpt || sculptBusy { finishSculpt(); return }
         if mode == .measure, measureA != nil { clearMeasure(); return }
         withAnimation(Neon.spring) {
@@ -4565,7 +4595,7 @@ final class Workbench: DesignHost {
         }
     }
 
-    private func report(_ problems: [String], name: String? = nil) {
+    func report(_ problems: [String], name: String? = nil) {
         guard let text = Self.message(problems) else { return }
         flash(name.map { "\($0): \(text)" } ?? text)
     }
@@ -4586,6 +4616,7 @@ final class Workbench: DesignHost {
         if problems.contains(where: { $0.hasPrefix("shape: the tube is too thick") }) { return L("The tube is too thick for this torus") }
         if problems.contains(where: { $0.hasPrefix("shape:") }) { return L("These sizes don't make a shape") }
         if problems.contains("missing") { return L("Some picked edges or faces no longer exist and were skipped") }
+        if let m = problems.first(where: { $0.hasPrefix("sketch:") }) { return Self.sketchMessage(m) }
         if problems.contains(where: { $0.hasPrefix("remesh: too fine") }) { return L("This detail is too fine for this shape — try a larger one") }
         if problems.contains(where: { $0.hasPrefix("remesh:") || $0.hasPrefix("mesh:") }) { return L("This shape can't be sculpted") }
         return problems.isEmpty ? nil : L("The shape operation failed")
@@ -4607,6 +4638,8 @@ final class Workbench: DesignHost {
         let mods = e.modifierFlags.intersection([.command, .control, .option])
         if !mods.isEmpty { return false }
         let shift = e.modifierFlags.contains(.shift)
+        // Sketching has keys of its own (its tools, Enter, Delete), before the shortcuts.
+        if mode == .sketch, e.keyCode != 53, sketchKey(name, shift: shift) { return true }
         switch name {
         case "Enter":
             if angleEdit != nil { applyAngles(); return true }
@@ -4651,6 +4684,7 @@ final class Workbench: DesignHost {
         case .hollow: enter(.hollow)
         case .measure: enter(.measure)
         case .sculpt: if mode == .sculpt || sculptBusy { finishSculpt() } else { enterSculpt() }
+        case .sketch: if mode == .sketch { leaveSketch() } else { enterSketch() }
         case .drop: dropToBed()
         case .frame: requestFit = true; sceneVersion += 1
         case .hide: hideSelection()
@@ -4728,7 +4762,7 @@ final class Workbench: DesignHost {
     }
 
     // The self-test answers its questions itself.
-    private func answer(_ a: NSAlert) -> NSApplication.ModalResponse {
+    func answer(_ a: NSAlert) -> NSApplication.ModalResponse {
         #if SELFTEST
         if let testAnswer { return testAnswer }
         #endif
@@ -4758,6 +4792,10 @@ final class Workbench: DesignHost {
         angleEdit = nil
         angleOpening = false
         cameraBeforeAngles = nil
+        sketch = nil
+        sketchPreview = nil
+        sketchToken += 1
+        cameraBeforeSketch = nil
         mode = .select
         editBody = nil
         edgePicks = []
@@ -5094,11 +5132,13 @@ struct BcadApp: App {
             }
             CommandGroup(replacing: .pasteboard) {
                 // In a text field these edit its text; otherwise they work on shapes, between files too.
-                Button(L("Cut")) { if !Edits.send(#selector(NSText.cut(_:))) { lib.cutSelection() } }.keyboardShortcut("x")
-                Button(L("Copy")) { if !Edits.send(#selector(NSText.copy(_:))) { lib.copySelection() } }.keyboardShortcut("c")
-                Button(L("Paste")) { if !Edits.send(#selector(NSText.paste(_:))) { lib.paste() } }.keyboardShortcut("v")
-                Button(L("Select All")) { Edits.send(#selector(NSText.selectAll(_:))) ? () : lib.selectAll() }.keyboardShortcut("a")
-                Button(L("Duplicate")) { lib.duplicate() }.keyboardShortcut("d")
+                // (While sketching, on what's drawn: shapes are left alone.)
+                Button(L("Cut")) { if !Edits.send(#selector(NSText.cut(_:))) { lib.cutSelection() } }.keyboardShortcut("x").disabled(lib.mode == .sketch)
+                Button(L("Copy")) { if !Edits.send(#selector(NSText.copy(_:))) { lib.copySelection() } }.keyboardShortcut("c").disabled(lib.mode == .sketch)
+                Button(L("Paste")) { if !Edits.send(#selector(NSText.paste(_:))) { lib.paste() } }.keyboardShortcut("v").disabled(lib.mode == .sketch)
+                Button(L("Select All")) { Edits.send(#selector(NSText.selectAll(_:))) ? () : lib.mode == .sketch ? lib.sketchSelectAll() : lib.selectAll() }
+                    .keyboardShortcut("a")
+                Button(L("Duplicate")) { lib.duplicate() }.keyboardShortcut("d").disabled(lib.mode == .sketch)
                 Button(L("Delete")) { if !Edits.send(#selector(NSText.delete(_:))) { lib.deleteSelection() } }
             }
             CommandGroup(before: .toolbar) {
@@ -5110,13 +5150,15 @@ struct BcadApp: App {
                 Divider()
             }
             CommandMenu(L("Shape")) {
-                Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u")
+                Button(L("Merge")) { lib.combine(Int32(BK_UNION)) }.keyboardShortcut("u").disabled(lib.mode == .sketch)
                 // (⌘⌫ in a text field clears the line, as it does everywhere.)
                 Button(L("Subtract")) {
                     if !Edits.send(#selector(NSResponder.deleteToBeginningOfLine(_:))) { lib.combine(Int32(BK_SUBTRACT)) }
-                }.keyboardShortcut(.delete, modifiers: .command)
-                Button(L("Intersect")) { lib.combine(Int32(BK_INTERSECT)) }.keyboardShortcut("i")
-                Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift])
+                }.keyboardShortcut(.delete, modifiers: .command).disabled(lib.mode == .sketch)
+                Button(L("Intersect")) { lib.combine(Int32(BK_INTERSECT)) }.keyboardShortcut("i").disabled(lib.mode == .sketch)
+                Button(L("Ungroup")) { lib.ungroup() }.keyboardShortcut("g", modifiers: [.command, .shift]).disabled(lib.mode == .sketch)
+                Divider()
+                Button(L("Sketch")) { lib.perform(.sketch) }
                 Divider()
                 Button(L("Split")) { lib.enter(.split) }
                 Button(L("Angles")) { lib.choose(.angles) }

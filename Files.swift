@@ -343,6 +343,10 @@ extension Node {
                 d.indices.allSatisfy { $0 < n }
         case .figure(let f):
             return f.valid
+        case .profile(let p):
+            return p.valid
+        case .feature(let n, let p, let op):
+            return n.valid(depth: depth + 1) && p.valid && (0...2).contains(op)
         }
     }
 }
