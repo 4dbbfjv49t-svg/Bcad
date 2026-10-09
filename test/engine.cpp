@@ -1080,6 +1080,19 @@ static std::string listed(const std::vector<double> &v) {
 
 // The regions curves bound: areas exact (arcs too), crossings, touching, overlapping and nearly meeting curves, loose
 // ends, construction curves, regions inside regions; each one's seed inside it and its sides telling it apart.
+static BKMesh *sketchMesh(SketchB &b, std::vector<std::pair<double, double>> seeds, BKForm form, BKShape **keep = nullptr) {
+  BKSketch s = b.view();
+  std::vector<int> start(seeds.size() + 1, 0);
+  std::vector<double> at;
+  for (auto q : seeds) at.push_back(q.first), at.push_back(q.second);
+  BKShape *shape = bk_sketch_solid(&s, start.data(), nullptr, at.data(), (int)seeds.size(), &form);
+  if (!shape) return nullptr;
+  BKMesh *m = bk_mesh(shape, 0.05);
+  if (keep) *keep = shape;
+  else bk_free(shape);
+  return m;
+}
+
 static void sketchRegionChecks() {
   {
     SketchB b;
@@ -1161,6 +1174,39 @@ static void sketchRegionChecks() {
     check("a slot of two lines and two half circles", sameAreas(areasOf(b), {2 * a * r + PI * r * r}, 1e-9), listed(areasOf(b)));
   }
   {
+    // Two arcs between the same two points (a sliver of a lens), one side of it in a larger region's outline: one chord
+    // each would lie on top of each other, a spike of no width in that outline, and its triangles and its solid's ends
+    // came out wrong. (A sketch the fuzzer found.)
+    double pts[] = {25, 6.25, 6.25, 12.5, 25, -18.75, 25, -18.75, -6.25, 6.25, 25, -18.75, -18.75, 6.25, -12.5, 12.5, -18.75, 25, -18.75, 6.25, -18.75, -0, 18.75, 12.5, -0, -6.25, -0, 6.25, -18.75, -0, 6.25, 6.25, -18.75, -6.25, -6.25, -12.5, -18.75, 18.75, -18.75, 6.25, -18.75, 6.25, -25, -0, -18.75, 25, 6.25, 12.5, -18.75, 18.75};
+    BKCurve curves[] = {{1, {21, 2, 17}, 3.1618977421633692, 0}, {0, {15, 24, 7}, 11.752179248370773, 1}, {0, {3, 17, 0}, 19.45900614960199, 1}, {1, {16, 17, 20}, 1.7232886895747812, 0}, {1, {18, 22, 15}, 6.25, 0}, {1, {7, 10, 15}, 23.723953643732667, 0}, {2, {17, 15, 19}, 6.25, 0}, {1, {1, 13, 4}, 0, 0}, {2, {21, 6, 16}, 18.75, 0}, {0, {13, 0, 20}, 21.567938931910767, 0}, {1, {12, 7, 24}, 12.5, 0}, {2, {13, 15, 15}, 10.481109977192585, 0}, {2, {14, 3, 8}, 6.0260755973951694, 1}, {0, {2, 21, 22}, 3.2713929395546848, 0}, {0, {14, 2, 3}, 18.75, 0}, {0, {13, 16, 18}, 9.1170983152738998, 0}};
+    BKSketch s{25, 16, 0, pts, nullptr, curves, nullptr};
+    BKRegions *g = bk_sketch_regions(&s, 0.05);
+    int wrong = g ? 0 : -1;
+    std::string why;
+    for (int k = 0; g && k < g->regionCount; k++) {
+      double tri = 0, poly = 0;
+      for (int q = g->triangleStart[k]; q < g->triangleStart[k + 1]; q++) {
+        const double *p = g->triangles + 6 * q;
+        tri += ((p[2] - p[0]) * (p[5] - p[1]) - (p[4] - p[0]) * (p[3] - p[1])) / 2;
+      }
+      for (int l = g->loopStart[k]; l < g->loopStart[k + 1]; l++)
+        for (int i = g->pointStart[l], to = g->pointStart[l + 1]; i < to; i++) {
+          int j = i + 1 < to ? i + 1 : g->pointStart[l];
+          poly += (g->points[2 * i] * g->points[2 * j + 1] - g->points[2 * j] * g->points[2 * i + 1]) / 2;
+        }
+      int start[2] = {0, 0};
+      BKForm form{BK_FORM_EXTRUDE, 0, 5, -1};
+      BKShape *shape = bk_sketch_solid(&s, start, nullptr, g->seed + 2 * k, 1, &form);
+      BKMesh *m = shape ? bk_mesh(shape, 0.05) : nullptr;
+      double sv = 0;
+      if (!near(tri, poly, 1e-9 * std::fabs(poly)) || !m || !m->valid || !closed(m, sv, why, true)) wrong++;
+      bk_mesh_free(m), bk_free(shape);
+    }
+    check("two arcs between the same two points: every region's triangles cover it, and each stands up closed", wrong == 0,
+          wrong ? std::to_string(wrong) + " wrong " + why : "");
+    bk_sketch_regions_free(g);
+  }
+  {
     // The same curves in another order: the same regions.
     SketchB b, c;
     b.rect(0, 0, 10, 10), b.circle(5, 5, 3), b.line(0, 5, 10, 5);
@@ -1184,19 +1230,6 @@ static void sketchRegionChecks() {
     check("a region found again by its sides once its circle grows", ok && found >= 0 && after && near(after->area[found], 100 - 9 * PI, 1e-9));
     bk_sketch_regions_free(after), bk_sketch_regions_free(r);
   }
-}
-
-static BKMesh *sketchMesh(SketchB &b, std::vector<std::pair<double, double>> seeds, BKForm form, BKShape **keep = nullptr) {
-  BKSketch s = b.view();
-  std::vector<int> start(seeds.size() + 1, 0);
-  std::vector<double> at;
-  for (auto q : seeds) at.push_back(q.first), at.push_back(q.second);
-  BKShape *shape = bk_sketch_solid(&s, start.data(), nullptr, at.data(), (int)seeds.size(), &form);
-  if (!shape) return nullptr;
-  BKMesh *m = bk_mesh(shape, 0.05);
-  if (keep) *keep = shape;
-  else bk_free(shape);
-  return m;
 }
 
 // Solids made of chosen regions: exact, closed, with the faces the app expects, and what the rest of the engine does with

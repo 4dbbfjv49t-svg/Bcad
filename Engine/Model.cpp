@@ -1059,6 +1059,39 @@ double revolvedSupport(const Model &m, V3 d, V3 &where) {
   return best;
 }
 
+}  // namespace
+
+std::vector<std::vector<int>> fewestChords(const std::vector<std::vector<Elem>> &loops) {
+  std::vector<std::vector<int>> out(loops.size());
+  struct Ends {
+    double v[4];
+    int l, k;
+  };
+  std::vector<Ends> all;
+  for (size_t l = 0; l < loops.size(); l++) {
+    out[l].assign(loops[l].size(), 1);
+    for (size_t k = 0; k < loops[l].size(); k++) {
+      const Elem &e = loops[l][k];
+      bool turn = e.r1 < e.r0 || (e.r1 == e.r0 && e.z1 < e.z0);
+      all.push_back({{turn ? e.r1 : e.r0, turn ? e.z1 : e.z0, turn ? e.r0 : e.r1, turn ? e.z0 : e.z1}, (int)l, (int)k});
+    }
+  }
+  auto same = [](const Ends &p, const Ends &q) { return std::equal(p.v, p.v + 4, q.v); };
+  std::sort(all.begin(), all.end(), [&](const Ends &p, const Ends &q) {
+    for (int i = 0; i < 4; i++)
+      if (p.v[i] != q.v[i]) return p.v[i] < q.v[i];
+    return p.l != q.l ? p.l < q.l : p.k < q.k;
+  });
+  for (size_t i = 0, j; i < all.size(); i = j) {
+    for (j = i + 1; j < all.size() && same(all[i], all[j]);) j++;
+    for (size_t t = i; j - i > 1 && t < j; t++)
+      if (loops[all[t].l][all[t].k].arc) out[all[t].l][all[t].k] = 2;
+  }
+  return out;
+}
+
+namespace {
+
 // A loop's points, each arc in chords (as many as its turn needs at deflection d, times `more`), with the piece each
 // point's side to the next lies on and where each piece starts.
 struct Loop2 {
@@ -1066,13 +1099,14 @@ struct Loop2 {
   std::vector<int> start;
 };
 
-Loop2 loopPoints(const std::vector<Elem> &loop, double d, int more) {
+Loop2 loopPoints(const std::vector<Elem> &loop, double d, int more, const std::vector<int> &least) {
   Loop2 r;
-  for (const Elem &e : loop) {
+  for (size_t k = 0; k < loop.size(); k++) {
+    const Elem &e = loop[k];
     r.start.push_back((int)r.x.size());
     r.x.push_back(e.r0), r.y.push_back(e.z0);
     if (!e.arc) continue;
-    int n = countFor(e.a1 - e.a0, e.rad, d) * more;
+    int n = std::max(countFor(e.a1 - e.a0, e.rad, d), least[k]) * more;
     for (int j = 1; j < n; j++) {
       double a = e.a0 + (e.a1 - e.a0) * j / n;
       r.x.push_back(e.cr + e.rad * trig::cos(a)), r.y.push_back(e.cz + e.rad * trig::sin(a));
@@ -1131,7 +1165,8 @@ bool extrudeAt(const Model &m, Solid &out, double d, int more) {
   size_t nl = m.outline.size();
   int regions = regionCount(m);
   std::vector<Loop2> rings(nl);
-  for (size_t l = 0; l < nl; l++) rings[l] = loopPoints(m.outline[l], d, more);
+  auto least = fewestChords(m.outline);
+  for (size_t l = 0; l < nl; l++) rings[l] = loopPoints(m.outline[l], d, more, least[l]);
   // The ends: a flat face each, top and bottom, per region.
   std::vector<std::array<int, 2>> capFace(regions, {-1, -1});
   for (int g = 0; g < regions; g++) {
@@ -1246,8 +1281,8 @@ void buildExtruded(const Model &m, Solid &out, double d) {
 }
 
 // Where a profile piece's mesh rings go, as t along it: evenly within the chord error (times `more` on an arc).
-std::vector<double> ringsOf(const Elem &e, double d, int more) {
-  int n = e.arc ? countFor(e.a1 - e.a0, e.rad, d) * more : 1;
+std::vector<double> ringsOf(const Elem &e, double d, int more, int least) {
+  int n = e.arc ? std::max(countFor(e.a1 - e.a0, e.rad, d), least) * more : 1;
   std::vector<double> ts;
   for (int j = 0; j <= n; j++) ts.push_back(j == n ? 1.0 : (double)j / n);
   return ts;
@@ -1270,8 +1305,9 @@ bool revolveAt(const Model &m, Solid &out, double d, int more) {
   auto at = [&](double r, double z, int j) { return r == 0 ? V3{0, 0, z} : V3{r * cs[j], r * sn[j], z}; };
   size_t nl = m.outline.size();
   std::vector<std::vector<std::vector<double>>> steps(nl);
+  auto least = fewestChords(m.outline);
   for (size_t l = 0; l < nl; l++)
-    for (const Elem &e : m.outline[l]) steps[l].push_back(ringsOf(e, d, more));
+    for (size_t k = 0; k < m.outline[l].size(); k++) steps[l].push_back(ringsOf(m.outline[l][k], d, more, least[l][k]));
   // A part turn's flat ends: a face each per region, at angle 0 and at the turn.
   int regions = whole ? 0 : regionCount(m);
   std::vector<std::array<int, 2>> capFace(regions, {-1, -1});

@@ -581,11 +581,12 @@ bool chosenLoops(const Arrangement &A, const std::vector<int> &chosen, std::vect
   return true;
 }
 
-// A loop's points with each arc in chords within `d` of it.
-std::vector<V3> polyline(const std::vector<Elem> &loop, double d) {
+// A loop's points with each arc in chords within `d` of it (at least `least` of them, as fewestChords says).
+std::vector<V3> polyline(const std::vector<Elem> &loop, double d, const std::vector<int> &least) {
   std::vector<V3> out;
-  for (const Elem &e : loop) {
-    int n = e.arc ? chordsFor(e.a1 - e.a0, e.rad, d) : 1;
+  for (size_t k = 0; k < loop.size(); k++) {
+    const Elem &e = loop[k];
+    int n = e.arc ? std::max(chordsFor(e.a1 - e.a0, e.rad, d), least[k]) : 1;
     for (int j = 0; j < n; j++) {
       double x, y;
       e.point((double)j / n, x, y);
@@ -713,9 +714,10 @@ bool sketchRegions(const Sketch &s, double deflection, std::vector<SketchRegion>
     std::vector<int> region;
     if (!chosenLoops(A, {f}, loops, region, why)) return false;
     // (Arcs' chords of loops a hair apart may cross: finer ones then.)
+    auto least = fewestChords(loops);
     for (int k = 0; k < 4 && r.triangles.empty(); k++) {
       r.loops.clear();
-      for (const auto &l : loops) r.loops.push_back(polyline(l, d / (1 << (2 * k))));
+      for (size_t l = 0; l < loops.size(); l++) r.loops.push_back(polyline(loops[l], d / (1 << (2 * k)), least[l]));
       r.triangles = cover(r.loops);
     }
     r.seed = seedOf(A, f, r.triangles);
@@ -803,7 +805,12 @@ bool sketchShape(const Sketch &s, const std::vector<RegionRef> &refs, const Sket
   }
   double turn = (form.high - form.low) * pi / 180;
   std::shared_ptr<Model> m;
-  if (turn >= 2 * pi - 1e-12 && loops.size() == 1) m = turnedModel(loops[0]);
+  // (A turned profile's own mesh gives every arc one chord at least: one whose ends are another piece's, as revolvedModel
+  // gives two, would lie on that piece.)
+  bool twins = false;
+  for (const auto &l : fewestChords(loops))
+    for (int n : l) twins = twins || n > 1;
+  if (turn >= 2 * pi - 1e-12 && loops.size() == 1 && !twins) m = turnedModel(loops[0]);
   else m = revolvedModel(std::move(loops), std::move(region), std::min(turn, 2 * pi));
   // Its frame: x out along N, z along the line, y the way it turns (z × x), at the line's start; turned by `low` first.
   V3 Y = cross(D, N);

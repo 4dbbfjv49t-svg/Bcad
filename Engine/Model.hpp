@@ -241,6 +241,9 @@ std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<El
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
 // A sketch's regions (loops and the region each bounds, as Model::outline and Model::region) stood up from z = lo to hi,
 // or turned about the z axis by `turn` (in (0, 2π]); each loop's pieces joined end to end exactly, volumes worked out.
+// Per loop and piece, the fewest chords it may have: 2 for an arc whose two ends are another piece's two ends (a lens of
+// two arcs, or of an arc and a line), whose single chords would lie on top of each other; otherwise 1.
+std::vector<std::vector<int>> fewestChords(const std::vector<std::vector<Elem>> &loops);
 std::shared_ptr<Model> extrudedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double lo, double hi);
 std::shared_ptr<Model> revolvedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double turn);
 // The area a closed loop of pieces in the plane bounds (above zero counter-clockwise): its share from one piece.

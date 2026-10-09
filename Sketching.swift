@@ -318,7 +318,8 @@ extension Workbench {
         let sk = s.sketch
         if !free {
             var best = 9 * perPoint, hit: SketchSnap?
-            for i in sk.points.indices where shownPoint(sk, Int32(i)) {
+            let shown = Self.shownPoints(sk)
+            for i in sk.points.indices where shown.contains(Int32(i)) {
                 let d = (sk.points[i] - p).length
                 if d < best { best = d; hit = SketchSnap(kind: .point, at: sk.points[i], point: Int32(i)) }
             }
@@ -371,9 +372,10 @@ extension Workbench {
     }
 
     // Points to snap to: the origin and every curve's points but the axes' ends.
-    func shownPoint(_ sk: Sketch, _ i: Int32) -> Bool {
-        if i == 0 { return true }
-        return sk.curves.contains { c in !(c.reference && c.construction) && c.points.contains(i) }
+    static func shownPoints(_ sk: Sketch) -> Set<Int32> {
+        var out: Set<Int32> = [0]
+        for c in sk.curves where !(c.reference && c.construction) { out.formUnion(c.points) }
+        return out
     }
 
     // The nearest point to p on curve c (an axis as the whole line it lies on).
@@ -441,7 +443,8 @@ extension Workbench {
     func itemAt(_ p: SIMD2<Double>, perPoint: Double) -> SketchItem? {
         guard let sk = sketch?.sketch else { return nil }
         var best = 9 * perPoint, hit: SketchItem?
-        for i in sk.points.indices where shownPoint(sk, Int32(i)) {
+        let shown = Self.shownPoints(sk)
+        for i in sk.points.indices where shown.contains(Int32(i)) {
             let d = (sk.points[i] - p).length
             if d < best { best = d; hit = .point(Int32(i)) }
         }

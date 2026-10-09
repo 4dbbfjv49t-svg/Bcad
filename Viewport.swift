@@ -937,7 +937,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         var chosenPoints = Set<Int32>()
         for item in s.selection + s.picks { if case .point(let p) = item { chosenPoints.insert(p) } }
         let r = 3 * wpp
-        for i in sk.points.indices where lib.shownPoint(sk, Int32(i)) {
+        let shown = Workbench.shownPoints(sk)
+        for i in sk.points.indices where shown.contains(Int32(i)) {
             let p = sk.points[i]
             let held = (i < sk.fixed.count && sk.fixed[i]) || (s.solved.pointFixed.indices.contains(i) && s.solved.pointFixed[i])
             let c = chosenPoints.contains(Int32(i)) ? SIMD4(accent2.x, accent2.y, accent2.z, 1) : held ? SIMD4(Renderer.ink, 0.92) : SIMD4(accent.x, accent.y, accent.z, 1)

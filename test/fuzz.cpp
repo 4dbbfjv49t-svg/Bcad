@@ -815,7 +815,12 @@ static void sketchRun(int k) {
     curves.push_back(cv);
   }
   std::string what = fmt("sketch %.0f: %.0f points, %.0f curves", k, np, nc) + fmt(" at %g", scale);
-  if (getenv("BCAD_FUZZ_DUMP") && atoi(getenv("BCAD_FUZZ_DUMP")) == k) {
+  // BCAD_FUZZ_DUMP=k: sketch k written out (to make again by hand); the ones before it only drawn the same (their random
+  // numbers taken), nothing made of them.
+  int dump = getenv("BCAD_FUZZ_DUMP") ? atoi(getenv("BCAD_FUZZ_DUMP")) : -1;
+  bool quick = dump >= 0 && k != dump;
+  if (dump >= 0 && k > dump) exit(0);
+  if (dump == k) {
     printf("points");
     for (double x : pts) printf(" %.17g", x);
     printf("\ncurves");
@@ -831,8 +836,9 @@ static void sketchRun(int k) {
     if (!*bk_last_error()) fail(what + ": regions refused without saying why");
     return;
   }
-  BKRegions *again = bk_sketch_regions(&sk, d);
-  if (!again || again->regionCount != r->regionCount || memcmp(again->area, r->area, sizeof(double) * r->regionCount) ||
+  BKRegions *again = quick ? nullptr : bk_sketch_regions(&sk, d);
+  if (quick) {
+  } else if (!again || again->regionCount != r->regionCount || memcmp(again->area, r->area, sizeof(double) * r->regionCount) ||
       memcmp(again->seed, r->seed, 2 * sizeof(double) * r->regionCount))
     fail(what + ": regions not the same twice");
   bk_sketch_regions_free(again);
@@ -856,8 +862,8 @@ static void sketchRun(int k) {
   }
   // Each one found again by its seed alone.
   std::vector<int> none(n + 1, 0), found(n, -2);
-  if (n && (!bk_sketch_match(&sk, none.data(), nullptr, r->seed, n, found.data()))) fail(what + ": regions not matched");
-  for (int g = 0; g < n; g++)
+  if (n && !quick && (!bk_sketch_match(&sk, none.data(), nullptr, r->seed, n, found.data()))) fail(what + ": regions not matched");
+  for (int g = 0; g < n && !quick; g++)
     if (found[g] != g) fail(what + fmt(": region %.0f's seed found region %.0f", g, found[g]));
   // Solids of chosen regions.
   for (int tries = 0; tries < 3 && n; tries++) {
@@ -896,7 +902,8 @@ static void sketchRun(int k) {
       if (junk && rnd() % 4 == 0) f.high = wild(400);
     }
     doing(what + fmt(": solid of %.0f regions, form %.0f", m, f.kind) + fmt(" %g to %g", f.low, f.high), 120);
-    if (getenv("BCAD_FUZZ_DUMP") && atoi(getenv("BCAD_FUZZ_DUMP")) == k) {
+    if (quick) continue;
+    if (dump == k) {
       printf("solid %d %.17g %.17g %d seeds", f.kind, f.low, f.high, f.axis);
       for (double x : seeds) printf(" %.17g", x);
       printf("\n");
@@ -942,6 +949,7 @@ static void sketchRun(int k) {
   std::vector<int> drag;
   std::vector<double> to;
   if (rnd() % 3 == 0) drag.push_back((int)(rnd() % np)), to.push_back((uni() - 0.5) * scale), to.push_back((uni() - 0.5) * scale);
+  if (quick) return;
   doing(what + fmt(": %.0f rules, %.0f dragged", nr, drag.size()), 60);
   BKSolveReport rep{};
   int st = bk_sketch_solve(&sk, (int)drag.size(), drag.data(), to.data(), &rep);
