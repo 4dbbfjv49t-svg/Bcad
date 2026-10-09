@@ -177,6 +177,57 @@ int main() {
     bk_sculpt_mesh_free(m), bk_free(ball);
   }
 
+  // A sketch's regions found, its rules solved and a plate with holes stood up and a ring turned from it on eight
+  // threads at once: each to the bit as alone.
+  {
+    // A 40 × 20 rectangle (its sides level and upright, one corner held, its width and height set) with two circles in it.
+    std::vector<double> pts0 = {0, 0, 39, 1, 41, 21, -1, 19, 10, 10, 30, 10, -5, 0, -5, 1};
+    std::vector<BKCurve> curves = {{BK_CURVE_LINE, {0, 1, -1}, 0, 0}, {BK_CURVE_LINE, {1, 2, -1}, 0, 0}, {BK_CURVE_LINE, {2, 3, -1}, 0, 0},
+                                   {BK_CURVE_LINE, {3, 0, -1}, 0, 0}, {BK_CURVE_CIRCLE, {4, -1, -1}, 3, 0},  {BK_CURVE_CIRCLE, {5, -1, -1}, 3, 0},
+                                   {BK_CURVE_LINE, {6, 7, -1}, 0, BK_CURVE_CONSTRUCTION}};
+    std::vector<BKRule> rules = {{BK_RULE_HORIZONTAL, {-1, -1, -1}, {0, -1}, 0, 1}, {BK_RULE_VERTICAL, {-1, -1, -1}, {1, -1}, 0, 1},
+                                 {BK_RULE_HORIZONTAL, {-1, -1, -1}, {2, -1}, 0, 1}, {BK_RULE_VERTICAL, {-1, -1, -1}, {3, -1}, 0, 1},
+                                 {BK_RULE_FIX, {0, -1, -1}, {-1, -1}, 0, 1},         {BK_DIM_LENGTH, {-1, -1, -1}, {0, -1}, 40, 1},
+                                 {BK_DIM_LENGTH, {-1, -1, -1}, {1, -1}, 20, 1}};
+    auto made = [&]() -> uint64_t {
+      std::vector<double> pts = pts0;
+      std::vector<BKCurve> cs = curves;
+      BKSketch s{(int)pts.size() / 2, (int)cs.size(), (int)rules.size(), pts.data(), nullptr, cs.data(), rules.data()};
+      BKSolveReport r{};
+      if (bk_sketch_solve(&s, 0, nullptr, nullptr, &r) != BK_SOLVE_OK || r.freedom != 10) return 0;
+      BKRegions *g = bk_sketch_regions(&s, 0.05);
+      if (!g) return 0;
+      uint64_t h = 1469598103934665603ull;
+      auto mix = [&](const void *d, size_t n) {
+        for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)d)[i]) * 1099511628211ull;
+      };
+      mix(pts.data(), pts.size() * sizeof(double));
+      mix(g->area, g->regionCount * sizeof(double)), mix(g->seed, 2 * g->regionCount * sizeof(double));
+      bk_sketch_regions_free(g);
+      int start[2] = {0, 0};
+      double seed[2] = {20, 2};
+      BKForm forms[2] = {{BK_FORM_EXTRUDE, 0, 5, -1}, {BK_FORM_REVOLVE, 0, 120, 6}};
+      for (const BKForm &f : forms) {
+        BKShape *solid = bk_sketch_solid(&s, start, nullptr, seed, 1, &f);
+        if (!solid) return 0;
+        uint64_t m = hashOf(solid);
+        mix(&m, sizeof m);
+        bk_free(solid);
+      }
+      return h;
+    };
+    uint64_t alone = made();
+    std::atomic<int> wrong{0};
+    std::vector<std::thread> pool;
+    for (int t = 0; t < 8; t++)
+      pool.emplace_back([&] {
+        if (made() != alone) wrong++;
+      });
+    for (auto &t : pool) t.join();
+    check("threads: a sketch solved, its regions found and solids made of it on eight threads at once, as alone", wrong == 0 && alone != 0,
+          std::to_string(wrong.load()) + " wrong");
+  }
+
   // A tree of merges 400 deep, worked out on a thread with the main thread's stack (8 MB): meshed, boxed, counted.
   {
     const int depth = 400;

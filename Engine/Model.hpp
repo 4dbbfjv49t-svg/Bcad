@@ -30,6 +30,8 @@ struct Elem {
   }
   // The point at t ∈ [0, 1] (the ends exactly at the ends).
   void at(double t, double &r, double &z) const;
+  // The same in a whole plane (not kept to r ≥ 0: a sketch's loops).
+  void point(double t, double &x, double &y) const;
   // Outward normal at t, for a profile running counter-clockwise round its region.
   void normalAt(double t, double &nr, double &nz) const;
   // The nearest point to (r, z), as t.
@@ -150,10 +152,10 @@ inline void gapOfPiece(const double *g, V3 a, V3 b, V3 c, const V3 q[3], double 
 struct RadialSpec;
 
 // A shape the way Bcad makes it: flat-sided, turned round the z axis, a tube swept along an oval in the xy plane, round
-// the z axis with its radius changing with the angle too (a bolt or a nut: Radial.hpp), or a mesh as it is (a sculpted
-// body: its triangles are its surface exactly).
+// the z axis with its radius changing with the angle too (a bolt or a nut: Radial.hpp), a mesh as it is (a sculpted
+// body: its triangles are its surface exactly), or a sketch's regions stood up or turned (Sketch.hpp).
 struct Model {
-  enum Kind { Poly, Turned, Swept, Radial, Mesh } kind = Poly;
+  enum Kind { Poly, Turned, Swept, Radial, Mesh, Extruded, Revolved } kind = Poly;
   // Flat-sided: corners, and faces as corner loops counter-clockwise seen from outside.
   std::vector<V3> verts;
   std::vector<std::vector<int>> loops;
@@ -163,6 +165,13 @@ struct Model {
   // heights where its mesh has rings on slopes and arcs (where a part on the same axis ends).
   int around = 0;
   std::vector<double> levels;
+  // Extruded: closed loops in the xy plane (r as x, z as y; outlines counter-clockwise, holes clockwise: the solid on
+  // each piece's left), stood up from z = lo to z = hi. Revolved: loops in the half-plane (r ≥ 0, z) the same way round,
+  // turned about the z axis from angle 0 (the half-plane y = 0, x ≥ 0) by `turn` (at most 2π). `region`: per loop, the
+  // region it bounds (an outline and its holes are one region, one flat face each end).
+  std::vector<std::vector<Elem>> outline;
+  std::vector<int> region;
+  double lo = 0, hi = 0, turn = 0;
   // Swept: the oval's semi-axes along (cos phi, sin phi) and across it, and the tube's outline round the oval's line
   // (r along the oval's outward normal, z up), counter-clockwise.
   double a = 0, b = 0, phi = 0;
@@ -230,6 +239,12 @@ double profileMoment(const Elem &e);
 // out.
 std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<Elem> section);
 std::shared_ptr<Model> polyModel(std::vector<V3> verts, std::vector<std::vector<int>> loops);
+// A sketch's regions (loops and the region each bounds, as Model::outline and Model::region) stood up from z = lo to hi,
+// or turned about the z axis by `turn` (in (0, 2π]); each loop's pieces joined end to end exactly, volumes worked out.
+std::shared_ptr<Model> extrudedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double lo, double hi);
+std::shared_ptr<Model> revolvedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double turn);
+// The area a closed loop of pieces in the plane bounds (above zero counter-clockwise): its share from one piece.
+double pieceArea(const Elem &e);
 // A body that is a closed mesh as given (points, and triangles counter-clockwise seen from outside); null with `why` when
 // it isn't one: open, a side run the same way twice, turned inside out, a corner out of range, a point not a number.
 // (`uncrossed`: already known not to pass through itself, so not looked at again.)

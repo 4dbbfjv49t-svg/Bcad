@@ -540,8 +540,9 @@ bool ovalVoid(V3 C, V3 X, V3 Y, V3 Z, double bottom, double side, double top, do
 // A primitive moved in: each of its faces by its rule.
 bool primitiveVoid(const Node &node, const Affine &Wn, int sign, bool flip, bool inBool, Ctx &ctx, Solid &out) {
   const Model &m = *node.model;
-  // A bolt or nut, or a mesh body, has no inset of its own here: hollowed from its faces instead.
-  if (m.kind == Model::Radial || m.kind == Model::Mesh) return false;
+  // A bolt or nut, a mesh body or a sketch's regions stood up or turned has no inset of its own here: hollowed from its
+  // faces instead.
+  if (m.kind == Model::Radial || m.kind == Model::Mesh || m.kind == Model::Extruded || m.kind == Model::Revolved) return false;
   const Rules &r = ctx.rules;
   // Its faces as meshed in place (forms exactly as the shape's own).
   Solid placed;

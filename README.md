@@ -41,7 +41,7 @@ The version is in `VERSION.txt` (not `VERSION`: that name would stand in for the
 
 ## Test
 - `./test/engine.sh`: the engine against exact maths (Linux or macOS).
-- `./test/corpus.sh`: 456 saved cases; `--perturb` also tries each one moved, turned and rescaled.
+- `./test/corpus.sh`: 497 saved cases; `--perturb` also tries each one moved, turned and rescaled.
 - `./test/selftest.sh`: the app's own checks (macOS): kernel, files, editing, mouse.
 - `python3 test/printcheck.py DIR`: the self-test's print samples read as slicers read them (needs `lib3mf trimesh numpy`).
 - `./test/slicers.sh DIR`: the samples opened in Bambu Studio, PrusaSlicer and Cura's engine.

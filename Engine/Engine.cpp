@@ -10,9 +10,11 @@
 #include "Engine/Print.hpp"
 #include "Engine/Scan.hpp"
 #include "Engine/Sculpt.hpp"
+#include "Engine/Sketch.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -988,6 +990,154 @@ BKSculptMesh *bk_scan_repair(const float *positions, int vertexCount, const uint
     throw std::bad_alloc();
   }
   return out;
+} catch (...) {
+  return caught(), nullptr;
+}
+
+// MARK: - sketches
+
+// A sketch as the engine holds it, checked (NULL arrays, counts, indices, sizes); false with the reason said.
+static bool sketchIn(const BKSketch *s, Sketch &out) {
+  if (!s || s->pointCount < 0 || s->curveCount < 0 || s->ruleCount < 0) return lastError = "sketch: no sketch", false;
+  if (s->pointCount > 4000 || s->curveCount > 4000 || s->ruleCount > 8000) return lastError = "sketch: too large", false;
+  if ((s->pointCount && !s->points) || (s->curveCount && !s->curves) || (s->ruleCount && !s->rules)) return lastError = "sketch: no sketch", false;
+  out.points.resize(s->pointCount);
+  for (int i = 0; i < s->pointCount; i++) out.points[i] = {s->points[2 * i], s->points[2 * i + 1], 0};
+  out.fixed.assign(s->pointCount, 0);
+  if (s->fixed)
+    for (int i = 0; i < s->pointCount; i++) out.fixed[i] = s->fixed[i] != 0;
+  out.curves.resize(s->curveCount);
+  for (int i = 0; i < s->curveCount; i++) {
+    const BKCurve &c = s->curves[i];
+    SketchCurve &o = out.curves[i];
+    o.kind = c.kind, o.radius = c.radius, o.flags = c.flags;
+    for (int k = 0; k < 3; k++) o.p[k] = c.p[k];
+  }
+  out.rules.resize(s->ruleCount);
+  for (int i = 0; i < s->ruleCount; i++) {
+    const BKRule &r = s->rules[i];
+    SketchRule &o = out.rules[i];
+    o.kind = r.kind, o.value = r.value, o.side = r.side;
+    for (int k = 0; k < 3; k++) o.p[k] = r.p[k];
+    for (int k = 0; k < 2; k++) o.c[k] = r.c[k];
+  }
+  std::string why;
+  if (!sketchValid(out, why)) return lastError = why, false;
+  return true;
+}
+
+// Regions chosen earlier, as bk_sketch_match and bk_sketch_solid take them.
+static bool refsIn(const int *sideStart, const int *sides, const double *seeds, int refCount, std::vector<RegionRef> &out) {
+  if (refCount < 0 || refCount > 10000 || (refCount && (!sideStart || !seeds))) return lastError = "sketch: no region chosen", false;
+  out.resize(refCount);
+  for (int k = 0; k < refCount; k++) {
+    int from = sideStart[k], to = sideStart[k + 1];
+    if (from < 0 || to < from || to - from > 100000 || (to > from && !sides)) return lastError = "sketch: a chosen region's sides aren't given", false;
+    out[k].sides.assign(sides + from, sides + to);
+    std::sort(out[k].sides.begin(), out[k].sides.end());
+    if (!std::isfinite(seeds[2 * k]) || !std::isfinite(seeds[2 * k + 1])) return lastError = "sketch: sizes must be numbers", false;
+    out[k].seed = {seeds[2 * k], seeds[2 * k + 1], 0};
+  }
+  return true;
+}
+
+int bk_sketch_solve(BKSketch *s, int dragCount, const int *drag, const double *targets, BKSolveReport *report) try {
+  if (report) report->status = BK_SOLVE_FAILED, report->freedom = 0, report->dependent = -1, report->conflicting = 0, report->residual = 0;
+  Sketch sk;
+  if (!sketchIn(s, sk)) return BK_SOLVE_FAILED;
+  if (dragCount < 0 || dragCount > s->pointCount || (dragCount && (!drag || !targets))) return lastError = "sketch: nothing to drag", BK_SOLVE_FAILED;
+  std::vector<int> d(drag, drag + dragCount);
+  std::vector<V3> t;
+  for (int k = 0; k < dragCount; k++) t.push_back({targets[2 * k], targets[2 * k + 1], 0});
+  SolveReport r;
+  std::string why;
+  if (!solveSketch(sk, d, t, r, why)) return lastError = why, BK_SOLVE_FAILED;
+  if (r.solved) {
+    for (int i = 0; i < s->pointCount; i++) s->points[2 * i] = sk.points[i].x, s->points[2 * i + 1] = sk.points[i].y;
+    for (int c = 0; c < s->curveCount; c++) s->curves[c].radius = sk.curves[c].radius;
+  } else {
+    lastError = r.dependent >= 0 ? "sketch: rule " + std::to_string(r.dependent) + " can't hold with the others" : "sketch: the rules can't all hold";
+  }
+  if (report) {
+    report->status = r.solved ? BK_SOLVE_OK : BK_SOLVE_FAILED, report->freedom = r.freedom, report->dependent = r.dependent;
+    report->conflicting = r.conflicting, report->residual = r.residual;
+    if (report->pointFixed)
+      for (int i = 0; i < s->pointCount; i++) report->pointFixed[i] = r.pointFixed[i];
+    if (report->curveFixed)
+      for (int c = 0; c < s->curveCount; c++) report->curveFixed[c] = r.curveFixed[c];
+  }
+  return r.solved ? BK_SOLVE_OK : BK_SOLVE_FAILED;
+} catch (...) {
+  return caught(), BK_SOLVE_FAILED;
+}
+
+BKRegions *bk_sketch_regions(const BKSketch *s, double deflection) try {
+  Sketch sk;
+  if (!sketchIn(s, sk)) return nullptr;
+  std::vector<SketchRegion> regions;
+  std::string why;
+  if (!sketchRegions(sk, deflection, regions, why)) return lastError = why, nullptr;
+  std::vector<double> area, seed, points, triangles;
+  std::vector<int> sideStart{0}, sides, loopStart{0}, pointStart{0}, triangleStart{0};
+  for (const auto &r : regions) {
+    area.push_back(r.area), seed.push_back(r.seed.x), seed.push_back(r.seed.y);
+    sides.insert(sides.end(), r.sides.begin(), r.sides.end()), sideStart.push_back((int)sides.size());
+    for (const auto &l : r.loops) {
+      for (V3 q : l) points.push_back(q.x), points.push_back(q.y);
+      pointStart.push_back((int)points.size() / 2);
+    }
+    loopStart.push_back((int)pointStart.size() - 1);
+    for (V3 q : r.triangles) triangles.push_back(q.x), triangles.push_back(q.y);
+    triangleStart.push_back((int)triangles.size() / 6);
+  }
+  auto *out = new BKRegions();
+  out->regionCount = (int)regions.size();
+  out->area = mallocCopy(area), out->seed = mallocCopy(seed), out->sideStart = mallocCopy(sideStart), out->sides = mallocCopy(sides);
+  out->loopStart = mallocCopy(loopStart), out->pointStart = mallocCopy(pointStart), out->points = mallocCopy(points);
+  out->triangleStart = mallocCopy(triangleStart), out->triangles = mallocCopy(triangles);
+  return out;
+} catch (...) {
+  return caught(), nullptr;
+}
+
+void bk_sketch_regions_free(BKRegions *r) {
+  if (!r) return;
+  free(r->area), free(r->seed), free(r->sideStart), free(r->sides), free(r->loopStart), free(r->pointStart), free(r->points);
+  free(r->triangleStart), free(r->triangles);
+  delete r;
+}
+
+int bk_sketch_match(const BKSketch *s, const int *sideStart, const int *sides, const double *seeds, int refCount, int *regionOut) try {
+  Sketch sk;
+  std::vector<RegionRef> refs;
+  if (!sketchIn(s, sk) || !refsIn(sideStart, sides, seeds, refCount, refs)) return 0;
+  if (refCount && !regionOut) return lastError = "sketch: nowhere to say", 0;
+  std::vector<int> found;
+  std::string why;
+  if (!sketchMatch(sk, refs, found, why)) return lastError = why, 0;
+  for (int k = 0; k < refCount; k++) regionOut[k] = found[k];
+  return 1;
+} catch (...) {
+  return caught(), 0;
+}
+
+BKShape *bk_sketch_solid(const BKSketch *s, const int *sideStart, const int *sides, const double *seeds, int refCount, const BKForm *form) try {
+  Sketch sk;
+  std::vector<RegionRef> refs;
+  if (!sketchIn(s, sk) || !refsIn(sideStart, sides, seeds, refCount, refs)) return nullptr;
+  if (!form) return lastError = "sketch: no form", nullptr;
+  SketchForm f;
+  f.kind = form->kind, f.low = form->low, f.high = form->high, f.axis = form->axis;
+  Shape out;
+  std::string why;
+  if (!sketchShape(sk, refs, f, out, why)) return lastError = why, nullptr;
+  // Made at the details asked most: where an end's triangulation can't be made (curves too near each other), refused.
+  for (double d : {0.05, 0.01}) {
+    Solid m;
+    mesh(out, d, m);
+    if (m.tri.empty()) return lastError = "sketch: curves too close together to make", nullptr;
+  }
+  return new BKShape{out};
 } catch (...) {
   return caught(), nullptr;
 }

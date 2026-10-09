@@ -12,6 +12,7 @@
 #include "Engine/Sculpt.hpp"
 #include "Engine/Print.hpp"
 #include "Engine/Scan.hpp"
+#include "Engine/Sketch.hpp"
 #include "Engine/Step.hpp"
 #include "Engine/Treat.hpp"
 
@@ -917,7 +918,617 @@ static void scanReaders() {
   }
 }
 
+// MARK: sketches
+
+// The same closedness for a mesh in the engine's own doubles.
+static bool closedSolid(const bce::Solid &m, double &signedVolume, std::string &why) {
+  std::map<std::tuple<double, double, double>, int> weld;
+  std::vector<int> id(m.p.size());
+  for (size_t i = 0; i < m.p.size(); i++) {
+    auto key = std::make_tuple(m.p[i].x, m.p[i].y, m.p[i].z);
+    auto it = weld.find(key);
+    id[i] = it == weld.end() ? (weld[key] = (int)weld.size()) : it->second;
+  }
+  std::map<std::pair<int, int>, int> directed;
+  signedVolume = m.meshVolume();
+  for (size_t t = 0; t < m.tri.size(); t += 3) {
+    int v[3] = {id[m.tri[t]], id[m.tri[t + 1]], id[m.tri[t + 2]]};
+    if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) return why = "a triangle with two corners in one place", false;
+    for (int k = 0; k < 3; k++) directed[{v[k], v[(k + 1) % 3]}]++;
+  }
+  for (auto &[e, n] : directed) {
+    if (n != 1) return why = "an edge run the same way twice", false;
+    if (!directed.count({e.second, e.first})) return why = "an open edge", false;
+  }
+  return !m.tri.empty() || (why = "empty", false);
+}
+
+// A loop of straight pieces through these points (x, y), closed.
+static std::vector<bce::Elem> polygon(std::vector<std::pair<double, double>> pts) {
+  std::vector<bce::Elem> out;
+  for (size_t i = 0; i < pts.size(); i++) {
+    auto a = pts[i], b = pts[(i + 1) % pts.size()];
+    out.push_back(bce::Elem::line(a.first, a.second, b.first, b.second));
+  }
+  return out;
+}
+// A whole circle as one arc (counter-clockwise, or clockwise for a hole), starting at angle 0.
+static std::vector<bce::Elem> circleLoop(double cx, double cy, double r, bool hole = false) {
+  return {hole ? bce::Elem::arcOf(cx, cy, r, 0, -2 * PI) : bce::Elem::arcOf(cx, cy, r, 0, 2 * PI)};
+}
+
+// Extruded and revolved models from loops made by hand: exact volume and box, a closed outward mesh whose volume and
+// faces' deficits add up to the exact volume, and the faces, edges, corners and circles the app expects.
+static void profileModels() {
+  struct Made {
+    const char *name;
+    std::shared_ptr<bce::Model> model;
+    double volume;
+    double lo[3], hi[3];
+    int faces, edges, corners, circles;
+  };
+  using bce::Elem;
+  double a = 20, b = 5;  // a slot: 20 between its ends' centres, 5 the radius of each
+  std::vector<Elem> slot = {Elem::line(0, -b, a, -b), Elem::arcOf(a, 0, b, -PI / 2, PI / 2), Elem::line(a, b, 0, b), Elem::arcOf(0, 0, b, PI / 2, 3 * PI / 2)};
+  std::vector<Elem> ring = polygon({{5, 0}, {10, 0}, {10, 4}, {5, 4}});
+  double holeMoment = 7 * 4 * PI;  // ∬ r dA over a disc of radius 2 at r = 7
+  std::vector<Made> made = {
+      {"extruded rectangle", bce::extrudedModel({polygon({{-10, -15}, {10, -15}, {10, 15}, {-10, 15}})}, {0}, 0, 10), 6000, {-10, -15, 0}, {10, 15, 10}, 6, 12, 8, 0},
+      {"extruded circle", bce::extrudedModel({circleLoop(3, 4, 10)}, {0}, -5, 15), PI * 100 * 20, {-7, -6, -5}, {13, 14, 15}, 3, 3, 2, 2},
+      {"extruded plate with two holes",
+       bce::extrudedModel({polygon({{0, 0}, {40, 0}, {40, 20}, {0, 20}}), circleLoop(10, 10, 3, true), circleLoop(30, 10, 3, true)}, {0, 0, 0}, 0, 5),
+       (800 - 2 * PI * 9) * 5, {0, 0, 0}, {40, 20, 5}, 8, 18, 12, 4},
+      {"extruded slot", bce::extrudedModel({slot}, {0}, 0, 3), (2 * a * b + PI * b * b) * 3, {-b, -b, 0}, {a + b, b, 3}, 6, 12, 8, 4},
+      {"two squares extruded", bce::extrudedModel({polygon({{0, 0}, {5, 0}, {5, 5}, {0, 5}}), polygon({{10, 0}, {15, 0}, {15, 5}, {10, 5}})}, {0, 1}, 0, 2),
+       100, {0, 0, 0}, {15, 5, 2}, 12, 24, 16, 0},
+      {"revolved ring, whole turn", bce::revolvedModel({ring}, {0}, 2 * PI), PI * 75 * 4, {-10, -10, 0}, {10, 10, 4}, 4, 6, 4, 4},
+      {"revolved ring, a quarter turn", bce::revolvedModel({ring}, {0}, PI / 2), PI * 75, {0, 0, 0}, {10, 10, 4}, 6, 12, 8, 0},
+      {"revolved ring, half a turn", bce::revolvedModel({ring}, {0}, PI), PI * 75 * 2, {-10, 0, 0}, {10, 10, 4}, 6, 12, 8, 4},
+      {"revolved square with a round hole", bce::revolvedModel({polygon({{2, 0}, {12, 0}, {12, 10}, {2, 10}}), circleLoop(7, 5, 2, true)}, {0, 0}, 2 * PI),
+       2 * PI * (700 - holeMoment), {-12, -12, 0}, {12, 12, 10}, 5, 8, 5, 6},
+      {"revolved cone, half a turn", bce::revolvedModel({polygon({{0, 0}, {10, 0}, {0, 10}})}, {0}, PI), PI * 100 * 10 / 6, {-10, 0, 0}, {10, 10, 10}, 4, 7, 3, 1},
+  };
+  for (const auto &c : made) {
+    bce::Shape s = bce::shapeOf(c.model);
+    bce::Solid m;
+    bce::mesh(s, 0.05, m);
+    double sv = 0, deficit = 0;
+    std::string why;
+    bool shut = closedSolid(m, sv, why);
+    for (const auto &f : m.faces) deficit += f.deficit;
+    bce::V3 lo, hi;
+    bce::bounds(s, lo, hi);
+    bool box = true;
+    for (int k = 0; k < 3; k++) box = box && near(lo[k], c.lo[k], 1e-9) && near(hi[k], c.hi[k], 1e-9);
+    bool topo = (int)m.faces.size() == c.faces && (int)m.edges.size() == c.edges && (int)m.corners.size() == c.corners && (int)m.circles.size() == c.circles;
+    bool vol = near(bce::volume(s), c.volume, 1e-9 * c.volume), sums = near(sv + deficit, c.volume, 1e-9 * c.volume);
+    // Every face numbered and finite, every edge between faces of its own.
+    bool numbered = true;
+    for (uint32_t f : m.triFace) numbered = numbered && f < m.faces.size();
+    for (const auto &e : m.edges) numbered = numbered && e.f0 >= 0 && e.f0 < (int)m.faces.size() && e.f1 < (int)m.faces.size();
+    char note[400];
+    snprintf(note, sizeof note, "volume %.6f (%.6f) · mesh + deficits %.9f · faces %zu edges %zu corners %zu circles %zu · box %.6g %.6g %.6g – %.6g %.6g %.6g %s",
+             bce::volume(s), c.volume, sv + deficit, m.faces.size(), m.edges.size(), m.corners.size(), m.circles.size(), lo.x, lo.y, lo.z, hi.x, hi.y, hi.z,
+             shut ? "" : why.c_str());
+    check(c.name, vol && sums && shut && sv > 0 && box && topo && numbered, note);
+    // Finer meshes close in on it, and stay closed.
+    bce::Solid fine;
+    bce::mesh(s, 0.002, fine);
+    double fv;
+    bool fineShut = closedSolid(fine, fv, why);
+    if (!fineShut || !(fv >= c.volume * (1 - 2e-3) && fv <= c.volume * (1 + 2e-3)))
+      check((std::string(c.name) + " fine mesh").c_str(), false, fmt("%.4f of %.4f", fv, c.volume) + " " + why);
+  }
+}
+
+// A sketch made by hand: points shared where curves meet at the same place.
+struct SketchB {
+  std::vector<double> pts;
+  std::vector<unsigned char> fixed;
+  std::vector<BKCurve> curves;
+  std::vector<BKRule> rules;
+  int point(double x, double y) {
+    for (size_t i = 0; i < pts.size(); i += 2)
+      if (pts[i] == x && pts[i + 1] == y) return (int)i / 2;
+    pts.push_back(x), pts.push_back(y);
+    return (int)pts.size() / 2 - 1;
+  }
+  int add(BKCurve c) {
+    curves.push_back(c);
+    return (int)curves.size() - 1;
+  }
+  int line(double x0, double y0, double x1, double y1, int flags = 0) { return add({BK_CURVE_LINE, {point(x0, y0), point(x1, y1), -1}, 0, flags}); }
+  int arc(double cx, double cy, double r, double a0, double a1, int flags = 0) {
+    return add({BK_CURVE_ARC, {point(cx, cy), point(cx + r * std::cos(a0), cy + r * std::sin(a0)), point(cx + r * std::cos(a1), cy + r * std::sin(a1))}, 0, flags});
+  }
+  int circle(double cx, double cy, double r, int flags = 0) { return add({BK_CURVE_CIRCLE, {point(cx, cy), -1, -1}, r, flags}); }
+  void rect(double x0, double y0, double x1, double y1) {
+    line(x0, y0, x1, y0), line(x1, y0, x1, y1), line(x1, y1, x0, y1), line(x0, y1, x0, y0);
+  }
+  BKSketch view() {
+    fixed.resize(pts.size() / 2, 0);
+    return {(int)pts.size() / 2, (int)curves.size(), (int)rules.size(), pts.data(), fixed.data(), curves.data(), rules.data()};
+  }
+};
+
+// Its regions' areas, smallest first.
+static std::vector<double> areasOf(SketchB &b, BKRegions **keep = nullptr) {
+  BKSketch s = b.view();
+  BKRegions *r = bk_sketch_regions(&s, 0.05);
+  std::vector<double> out;
+  if (!r) return {-1};
+  for (int k = 0; k < r->regionCount; k++) out.push_back(r->area[k]);
+  std::sort(out.begin(), out.end());
+  if (keep) *keep = r;
+  else bk_sketch_regions_free(r);
+  return out;
+}
+
+static bool sameAreas(const std::vector<double> &a, std::vector<double> b, double tol) {
+  std::sort(b.begin(), b.end());
+  if (a.size() != b.size()) return false;
+  for (size_t k = 0; k < a.size(); k++)
+    if (!near(a[k], b[k], tol * (1 + std::fabs(b[k])))) return false;
+  return true;
+}
+
+static std::string listed(const std::vector<double> &v) {
+  std::string s;
+  for (double x : v) s += fmt("%.6f ", x);
+  return s;
+}
+
+// The regions curves bound: areas exact (arcs too), crossings, touching, overlapping and nearly meeting curves, loose
+// ends, construction curves, regions inside regions; each one's seed inside it and its sides telling it apart.
+static void sketchRegionChecks() {
+  {
+    SketchB b;
+    b.rect(0, 0, 10, 10);
+    BKRegions *r = nullptr;
+    auto a = areasOf(b, &r);
+    bool sides = r && r->regionCount == 1 && r->sideStart[1] == 4 && r->sides[0] == 0 && r->sides[1] == 2 && r->sides[2] == 4 && r->sides[3] == 6;
+    bool seed = r && r->seed[0] > 0 && r->seed[0] < 10 && r->seed[1] > 0 && r->seed[1] < 10;
+    double covered = 0;
+    if (r)
+      for (int t = 0; t < r->triangleStart[1]; t++) {
+        const double *q = r->triangles + 6 * t;
+        covered += ((q[2] - q[0]) * (q[5] - q[1]) - (q[4] - q[0]) * (q[3] - q[1])) / 2;
+      }
+    check("a square bounds one region, on the left of each side, its triangles covering it", sameAreas(a, {100}, 1e-12) && sides && seed && near(covered, 100, 1e-9),
+          listed(a));
+    bk_sketch_regions_free(r);
+  }
+  {
+    SketchB b;
+    b.rect(0, 0, 10, 10), b.circle(5, 5, 2);
+    check("a square with a circle in it: the circle's disc and the square round it", sameAreas(areasOf(b), {100 - 4 * PI, 4 * PI}, 1e-12), listed(areasOf(b)));
+  }
+  {
+    SketchB b;
+    double r = 5, d = 6, lens = 2 * r * r * std::acos(d / (2 * r)) - d / 2 * std::sqrt(4 * r * r - d * d);
+    b.circle(0, 0, r), b.circle(d, 0, r);
+    BKRegions *g = nullptr;
+    auto a = areasOf(b, &g);
+    std::vector<std::vector<int>> sides;
+    for (int k = 0; g && k < g->regionCount; k++) sides.push_back(std::vector<int>(g->sides + g->sideStart[k], g->sides + g->sideStart[k + 1]));
+    std::sort(sides.begin(), sides.end());
+    bool distinct = sides.size() == 3 && sides[0] != sides[1] && sides[1] != sides[2];
+    // (The lens's middle lies on the chords of both its arcs.)
+    std::vector<int> start{0, 0, 0, 0};
+    double seeds[6] = {3, 0, -3, 0, 9, 0};
+    int found[3] = {-1, -1, -1};
+    BKSketch s = b.view();
+    bool matched = bk_sketch_match(&s, start.data(), nullptr, seeds, 3, found) && found[0] >= 0 && found[1] >= 0 && found[2] >= 0 && near(g->area[found[0]], lens, 1e-9) &&
+                   near(g->area[found[1]], 25 * PI - lens, 1e-9);
+    check("two crossing circles: a lens and two crescents, each known by its sides and found by a point inside it",
+          sameAreas(a, {lens, 25 * PI - lens, 25 * PI - lens}, 1e-9) && distinct && matched, listed(a));
+    bk_sketch_regions_free(g);
+  }
+  {
+    SketchB b;
+    double r = 5, seg = r * r * std::acos(1 / r) - std::sqrt(r * r - 1);
+    b.circle(0, 0, r), b.line(-10, 1, 10, 1);
+    check("a line across a circle cuts it in two (its ends outside bound nothing)", sameAreas(areasOf(b), {seg, 25 * PI - seg}, 1e-9), listed(areasOf(b)));
+  }
+  {
+    SketchB b;
+    b.rect(0, 0, 10, 10), b.line(5, 1e-12, 5, 10);
+    check("a line ending a hair off a side still parts the square", sameAreas(areasOf(b), {50, 50}, 1e-9), listed(areasOf(b)));
+  }
+  {
+    SketchB b;
+    b.circle(0, 0, 5), b.circle(3, 0, 2);
+    check("a circle touching another from inside", sameAreas(areasOf(b), {4 * PI, 21 * PI}, 1e-9), listed(areasOf(b)));
+    SketchB c;
+    c.circle(0, 0, 5), c.circle(7, 0, 2);
+    check("circles touching from outside stay two", sameAreas(areasOf(c), {4 * PI, 25 * PI}, 1e-9), listed(areasOf(c)));
+  }
+  {
+    SketchB b;
+    b.rect(0, 0, 10, 10), b.line(2, 0, 8, 0), b.line(10, 5, 15, 5), b.line(-5, -5, 15, 15, BK_CURVE_CONSTRUCTION);
+    check("a line along a side, a loose end and a construction line change nothing", sameAreas(areasOf(b), {100}, 1e-12), listed(areasOf(b)));
+  }
+  {
+    SketchB b;
+    b.rect(0, 0, 30, 30), b.rect(5, 5, 25, 25), b.rect(10, 10, 20, 20);
+    check("squares in squares: each a region with the next as its hole", sameAreas(areasOf(b), {500, 300, 100}, 1e-12), listed(areasOf(b)));
+  }
+  {
+    SketchB b;
+    double a = 20, r = 5;
+    b.line(0, -r, a, -r), b.arc(a, 0, r, -PI / 2, PI / 2), b.line(a, r, 0, r), b.arc(0, 0, r, PI / 2, 3 * PI / 2);
+    // (The arcs' ends worked out in doubles: a hair off the lines' ends, made one with them.)
+    check("a slot of two lines and two half circles", sameAreas(areasOf(b), {2 * a * r + PI * r * r}, 1e-9), listed(areasOf(b)));
+  }
+  {
+    // The same curves in another order: the same regions.
+    SketchB b, c;
+    b.rect(0, 0, 10, 10), b.circle(5, 5, 3), b.line(0, 5, 10, 5);
+    c.line(0, 5, 10, 5), c.circle(5, 5, 3), c.rect(0, 0, 10, 10);
+    check("curves in any order bound the same regions", areasOf(b) == areasOf(c) && areasOf(b).size() == 4, listed(areasOf(b)));
+  }
+  {
+    // A region found again after its sketch changes: by its sides, else by its seed.
+    SketchB b;
+    b.rect(0, 0, 10, 10), b.circle(5, 5, 2);
+    BKSketch s = b.view();
+    BKRegions *r = bk_sketch_regions(&s, 0.05);
+    int ring = r && r->area[0] > r->area[1] ? 0 : 1;
+    std::vector<int> sides(r->sides + r->sideStart[ring], r->sides + r->sideStart[ring + 1]);
+    int start[2] = {0, (int)sides.size()}, found = -2;
+    double seed[2] = {r->seed[2 * ring], r->seed[2 * ring + 1]};
+    b.curves[4].radius = 3;  // the circle grows
+    s = b.view();
+    int ok = bk_sketch_match(&s, start, sides.data(), seed, 1, &found);
+    BKRegions *after = bk_sketch_regions(&s, 0.05);
+    check("a region found again by its sides once its circle grows", ok && found >= 0 && after && near(after->area[found], 100 - 9 * PI, 1e-9));
+    bk_sketch_regions_free(after), bk_sketch_regions_free(r);
+  }
+}
+
+static BKMesh *sketchMesh(SketchB &b, std::vector<std::pair<double, double>> seeds, BKForm form, BKShape **keep = nullptr) {
+  BKSketch s = b.view();
+  std::vector<int> start(seeds.size() + 1, 0);
+  std::vector<double> at;
+  for (auto q : seeds) at.push_back(q.first), at.push_back(q.second);
+  BKShape *shape = bk_sketch_solid(&s, start.data(), nullptr, at.data(), (int)seeds.size(), &form);
+  if (!shape) return nullptr;
+  BKMesh *m = bk_mesh(shape, 0.05);
+  if (keep) *keep = shape;
+  else bk_free(shape);
+  return m;
+}
+
+// Solids made of chosen regions: exact, closed, with the faces the app expects, and what the rest of the engine does with
+// them (rounding, hollowing, merging, measuring, printing, STEP).
+static void sketchSolids() {
+  struct Made {
+    const char *name;
+    std::function<void(SketchB &)> draw;
+    std::vector<std::pair<double, double>> seeds;
+    BKForm form;
+    double volume;
+    double lo[3], hi[3];
+    int faces, edges, corners, circles;
+  };
+  double vase = 0;  // ∬ r dA of the vase's profile: a 10 × 20 rectangle at r 0..10, less a quarter disc of radius 4 at its top inner corner
+  vase = 10 * 20 * 5 - (PI * 16 / 4) * (4 * 4 / (3 * PI));
+  std::vector<Made> made = {
+      {"a rectangle stood up", [](SketchB &b) { b.rect(-10, -15, 10, 15); }, {{0, 0}}, {BK_FORM_EXTRUDE, 0, 10, -1}, 6000, {-10, -15, 0}, {10, 15, 10}, 6, 12, 8, 0},
+      {"a circle stood up both ways", [](SketchB &b) { b.circle(3, 4, 10); }, {{3, 4}}, {BK_FORM_EXTRUDE, -5, 15, -1}, PI * 100 * 20, {-7, -6, -5}, {13, 14, 15}, 3, 3, 2, 2},
+      {"a plate with two holes", [](SketchB &b) { b.rect(0, 0, 40, 20), b.circle(10, 10, 3), b.circle(30, 10, 3); }, {{20, 2}}, {BK_FORM_EXTRUDE, 0, 5, -1},
+       (800 - 18 * PI) * 5, {0, 0, 0}, {40, 20, 5}, 8, 18, 12, 4},
+      {"a plate with its holes filled again (all three regions)", [](SketchB &b) { b.rect(0, 0, 40, 20), b.circle(10, 10, 3), b.circle(30, 10, 3); },
+       {{20, 2}, {10, 10}, {30, 10}}, {BK_FORM_EXTRUDE, 0, 5, -1}, 800 * 5, {0, 0, 0}, {40, 20, 5}, 6, 12, 8, 0},
+      {"two halves of a rectangle as one", [](SketchB &b) { b.rect(0, 0, 20, 10), b.line(10, 0, 10, 10); }, {{5, 5}, {15, 5}}, {BK_FORM_EXTRUDE, 0, 3, -1}, 600, {0, 0, 0},
+       {20, 10, 3}, 6, 12, 8, 0},
+      {"a ring turned whole about the y axis", [](SketchB &b) { b.rect(5, 0, 10, 4), b.line(0, -1, 0, 1, BK_CURVE_CONSTRUCTION); }, {{7, 2}}, {BK_FORM_REVOLVE, 0, 360, 4},
+       PI * 75 * 4, {-10, 0, -10}, {10, 4, 10}, 4, 6, 4, 4},
+      {"a ring turned a quarter", [](SketchB &b) { b.rect(5, 0, 10, 4), b.line(0, -1, 0, 1, BK_CURVE_CONSTRUCTION); }, {{7, 2}}, {BK_FORM_REVOLVE, 0, 90, 4},
+       PI * 75, {0, 0, -10}, {10, 4, 0}, 6, 12, 8, 0},
+      {"a vase turned whole, profile left of its axis", [](SketchB &b) {
+         b.line(0, 0, -10, 0), b.line(-10, 0, -10, 20), b.line(-10, 20, -4, 20), b.arc(0, 20, 4, PI, 3 * PI / 2), b.line(0, 16, 0, 0);
+       },
+       {{-5, 5}}, {BK_FORM_REVOLVE, 0, 360, 4}, 2 * PI * vase, {-10, 0, -10}, {10, 20, 10}, 4, 6, 4, 3},
+      {"a square with a round hole turned whole", [](SketchB &b) { b.rect(2, 0, 12, 10), b.circle(7, 5, 2), b.line(0, 0, 0, 1, BK_CURVE_CONSTRUCTION); }, {{3, 1}},
+       {BK_FORM_REVOLVE, 0, 360, 5}, 2 * PI * 7 * (100 - 4 * PI), {-12, 0, -12}, {12, 10, 12}, 5, 8, 5, 6},
+  };
+  for (const auto &c : made) {
+    SketchB b;
+    c.draw(b);
+    BKShape *shape = nullptr;
+    BKMesh *m = sketchMesh(b, c.seeds, c.form, &shape);
+    if (!m) {
+      check(c.name, false, bk_last_error());
+      continue;
+    }
+    double sv;
+    std::string why;
+    bool shut = closed(m, sv, why), box = true;
+    for (int k = 0; k < 3; k++) box = box && near(m->bbox[k], c.lo[k], 1e-9) && near(m->bbox[3 + k], c.hi[k], 1e-9);
+    bool topo = m->faceCount == c.faces && m->edgeCount == c.edges && m->cornerCount == c.corners && m->circleCount == c.circles;
+    char note[400];
+    snprintf(note, sizeof note, "volume %.6f (%.6f) · mesh %.3f%% · faces %d edges %d corners %d circles %d · box %.4g %.4g %.4g – %.4g %.4g %.4g %s", m->volume, c.volume,
+             100 * (sv - c.volume) / c.volume, m->faceCount, m->edgeCount, m->cornerCount, m->circleCount, m->bbox[0], m->bbox[1], m->bbox[2], m->bbox[3], m->bbox[4],
+             m->bbox[5], shut ? "" : why.c_str());
+    // (A hole's chords cut into it: the mesh may hold a little more than the exact shape there.)
+    check(c.name, near(m->volume, c.volume, 1e-9 * c.volume) && shut && sv > 0 && std::fabs(sv - c.volume) <= 0.04 * c.volume && box && topo, note);
+    // Printable and sent on as STEP.
+    BKPrintMesh *p = bk_print_mesh(shape);
+    if (!p || !p->valid) check((std::string(c.name) + " printable").c_str(), false, bk_last_error());
+    bk_print_mesh_free(p);
+    bk_mesh_free(m), bk_free(shape);
+  }
+  // Refused, each with its reason.
+  {
+    SketchB b;
+    b.rect(0, 0, 10, 10);
+    BKForm flat{BK_FORM_EXTRUDE, 2, 2, -1};
+    bool none = !sketchMesh(b, {{5, 5}}, flat);
+    std::string said = bk_last_error();
+    check("an extrusion of no depth is refused", none && said == "sketch: the extrusion has no depth", said);
+    SketchB c;
+    c.rect(-2, 0, 10, 10), c.line(0, -1, 0, 1, BK_CURVE_CONSTRUCTION);
+    none = !sketchMesh(c, {{5, 5}}, {BK_FORM_REVOLVE, 0, 90, 4});
+    said = bk_last_error();
+    check("a profile across its axis is refused", none && said == "sketch: the profile crosses the axis", said);
+    none = !sketchMesh(b, {{50, 50}}, {BK_FORM_EXTRUDE, 0, 5, -1});
+    said = bk_last_error();
+    check("a region no longer there is refused", none && said == "sketch: a chosen region is gone", said);
+    none = !sketchMesh(b, {{5, 5}}, {BK_FORM_REVOLVE, 0, 400, 0});
+    said = bk_last_error();
+    check("a revolve of more than a turn is refused", none && said == "sketch: an angle must be above 0 and at most 360 degrees", said);
+    b.pts[0] = NAN;
+    BKSketch s = b.view();
+    BKRegions *r = bk_sketch_regions(&s, 0.05);
+    said = bk_last_error();
+    check("a sketch with a point not a number is refused", !r && said == "sketch: sizes must be numbers", said);
+  }
+  // Two squares apart: two pieces.
+  {
+    SketchB b;
+    b.rect(0, 0, 5, 5), b.rect(10, 0, 15, 5);
+    BKShape *s = nullptr;
+    BKMesh *m = sketchMesh(b, {{2, 2}, {12, 2}}, {BK_FORM_EXTRUDE, 0, 2, -1}, &s);
+    check("two squares apart stood up: two pieces", m && s && bk_piece_count(s) == 2 && near(m->volume, 100, 1e-9));
+    bk_mesh_free(m), bk_free(s);
+  }
+  // What the rest of the engine does with them.
+  {
+    SketchB b;
+    b.rect(0, 0, 40, 20), b.circle(10, 10, 3), b.circle(30, 10, 3);
+    BKShape *plate = nullptr;
+    BKMesh *m = sketchMesh(b, {{20, 2}}, {BK_FORM_EXTRUDE, 0, 5, -1}, &plate);
+    // Round the top edge along y = 0 and the top rim of a hole.
+    int kinds[2] = {BK_PICK_EDGE, BK_PICK_EDGE};
+    double picks[12] = {20, 0, 5, 1, 0, 0, 13, 10, 5, 0, 1, 0};
+    double maxR = 0;
+    int missing = 0;
+    BKShape *round = plate ? bk_fillet(plate, kinds, picks, 2, 1, &maxR, &missing) : nullptr;
+    BKMesh *rm = round ? bk_mesh(round, 0.05) : nullptr;
+    // A straight edge rounded by r takes (1 − π/4) r² along it; a hole's rim adds a ring round it.
+    double lost = (1 - PI / 4) * 40;
+    check("a plate's edge and a hole's rim rounded", rm && missing == 0 && rm->volume < m->volume - lost * 0.99 && rm->volume > m->volume - lost - 10,
+          rm ? fmt("%.4f from %.4f", rm->volume, m->volume) : std::string(bk_last_error()));
+    BKShape *hollow = plate ? bk_hollow(plate, nullptr, 0, nullptr, 0, nullptr, nullptr, 0, 1, nullptr) : nullptr;
+    BKMesh *hm = hollow ? bk_mesh(hollow, 0.05) : nullptr;
+    check("a plate hollowed", hm && hm->volume < m->volume && hm->volume > 0.3 * m->volume, hm ? fmt("%.4f of %.4f", hm->volume, m->volume) : std::string(bk_last_error()));
+    // Cut from a box: the box less the plate's volume where they meet.
+    double sizes[3] = {40, 20, 5};
+    BKShape *box = bk_primitive(BK_BOX, sizes);
+    double move[12] = {1, 0, 0, 20, 0, 1, 0, 10, 0, 0, 1, 2.5};
+    BKShape *placed = bk_transform(box, move);
+    BKShape *cut = bk_boolean(BK_SUBTRACT, placed, plate);
+    BKMesh *cm = cut ? bk_mesh(cut, 0.05) : nullptr;
+    check("the plate cut from a box like it leaves its holes' pins", cm && near(cm->volume, 2 * 9 * PI * 5, 1e-6 * 90 * PI), cm ? fmt("%.6f", cm->volume) : std::string(bk_last_error()));
+    // Measured: from a point to a hole's wall.
+    double I3[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, pt[3] = {10, 10, 2.5}, out[6];
+    int wall = -1;
+    for (int f = 0; m && f < m->faceCount; f++)
+      if (near(m->faceInfo[6 * f + 2], 0, 1e-9) && std::fabs(m->faceInfo[6 * f + 3] - 10) < 3.5 && std::fabs(m->faceInfo[6 * f + 4] - 10) < 3.5) wall = f;
+    double d = wall >= 0 ? bk_distance(plate, I3, BK_END_FACE, wall, nullptr, nullptr, nullptr, BK_END_POINT, 0, pt, out) : -1;
+    check("a hole's centre is its radius from its wall", near(d, 3, 1e-9), fmt("%.12f", d));
+    bk_mesh_free(cm), bk_free(cut), bk_free(placed), bk_free(box), bk_mesh_free(hm), bk_free(hollow), bk_mesh_free(rm), bk_free(round), bk_mesh_free(m), bk_free(plate);
+  }
+}
+
+static void rule(SketchB &b, int kind, std::vector<int> p, std::vector<int> c, double value = 0, int side = 1) {
+  BKRule r{kind, {-1, -1, -1}, {-1, -1}, value, side};
+  for (size_t k = 0; k < p.size(); k++) r.p[k] = p[k];
+  for (size_t k = 0; k < c.size(); k++) r.c[k] = c[k];
+  b.rules.push_back(r);
+}
+
+static bce::Sketch toSketch(SketchB &b) {
+  bce::Sketch s;
+  for (size_t i = 0; i < b.pts.size(); i += 2) s.points.push_back({b.pts[i], b.pts[i + 1], 0});
+  s.fixed.assign(s.points.size(), 0);
+  for (const auto &c : b.curves) {
+    bce::SketchCurve o;
+    o.kind = c.kind, o.radius = c.radius, o.flags = c.flags;
+    for (int k = 0; k < 3; k++) o.p[k] = c.p[k];
+    s.curves.push_back(o);
+  }
+  for (const auto &r : b.rules) {
+    bce::SketchRule o;
+    o.kind = r.kind, o.value = r.value, o.side = r.side;
+    for (int k = 0; k < 3; k++) o.p[k] = r.p[k];
+    for (int k = 0; k < 2; k++) o.c[k] = r.c[k];
+    s.rules.push_back(o);
+  }
+  return s;
+}
+
+struct Solved {
+  int status;
+  BKSolveReport r;
+  std::vector<unsigned char> points, curves;
+};
+static Solved solveB(SketchB &b, std::vector<int> drag = {}, std::vector<double> to = {}) {
+  Solved out;
+  BKSketch s = b.view();
+  out.points.assign(s.pointCount, 0), out.curves.assign(s.curveCount, 0);
+  out.r.pointFixed = out.points.data(), out.r.curveFixed = out.curves.data();
+  out.status = bk_sketch_solve(&s, (int)drag.size(), drag.data(), to.data(), &out.r);
+  return out;
+}
+
+// The rules made to hold: derivatives against finite differences; how many ways a sketch can still move as rules are
+// added; what each holds, what's redundant and what can't hold; dragging; and how fast.
+static void sketchSolverChecks() {
+  {
+    // Every rule at once (most of them can't all hold: only their derivatives are looked at).
+    SketchB b;
+    int l0 = b.line(0, 0, 10, 1), l1 = b.line(2, 5, 9, 7), c2 = b.circle(3, -4, 3), a3 = b.arc(-6, 2, 2.5, 0.3, 2.2);
+    int p8 = b.point(1.5, 2.5), p9 = b.point(-3, 4.5);
+    rule(b, BK_RULE_COINCIDENT, {p8, p9}, {}), rule(b, BK_RULE_ON, {p8}, {l0}), rule(b, BK_RULE_ON, {p8}, {c2}), rule(b, BK_RULE_ON, {p9}, {a3});
+    rule(b, BK_RULE_HORIZONTAL, {}, {l0}), rule(b, BK_RULE_VERTICAL, {p8, p9}, {}), rule(b, BK_RULE_PARALLEL, {}, {l0, l1}, 0, -1);
+    rule(b, BK_RULE_PERPENDICULAR, {}, {l0, l1}, 0, -1), rule(b, BK_RULE_TANGENT, {}, {l0, c2}, 0, -1), rule(b, BK_RULE_TANGENT, {}, {c2, a3}, 0, 1);
+    rule(b, BK_RULE_TANGENT, {}, {c2, a3}, 0, -1), rule(b, BK_RULE_TANGENT, {}, {a3, l1}, 0, 1), rule(b, BK_RULE_EQUAL, {}, {l0, l1}), rule(b, BK_RULE_EQUAL, {}, {c2, a3});
+    rule(b, BK_RULE_CONCENTRIC, {}, {c2, a3}), rule(b, BK_RULE_MIDPOINT, {p8}, {l0}), rule(b, BK_RULE_COLLINEAR, {}, {l0, l1}), rule(b, BK_RULE_SYMMETRIC, {p8, p9}, {l1});
+    rule(b, BK_DIM_DISTANCE, {p8, p9}, {}, 5), rule(b, BK_DIM_HORIZONTAL, {p8, p9}, {}, 5, -1), rule(b, BK_DIM_VERTICAL, {p8, p9}, {}, 5);
+    rule(b, BK_DIM_POINT_LINE, {p8}, {l1}, 2), rule(b, BK_DIM_LINES, {}, {l0, l1}, 3), rule(b, BK_DIM_LENGTH, {}, {l1}, 4), rule(b, BK_DIM_RADIUS, {}, {c2}, 2);
+    rule(b, BK_DIM_RADIUS, {}, {a3}, 2), rule(b, BK_DIM_DIAMETER, {}, {a3}, 2), rule(b, BK_DIM_ANGLE, {}, {l0, l1}, 30, 3);
+    double err = bce::sketchJacobianError(toSketch(b));
+    check("every rule's derivatives as finite differences find them", err < 1e-5, fmt("%.3g", err));
+  }
+  {
+    // A line: 4 ways to move; horizontal 3; a length 2; an end held 0.
+    SketchB b;
+    int l = b.line(0, 0, 10, 1);
+    int ways[4];
+    ways[0] = solveB(b).r.freedom;
+    rule(b, BK_RULE_HORIZONTAL, {}, {l});
+    ways[1] = solveB(b).r.freedom;
+    rule(b, BK_DIM_LENGTH, {}, {l}, 20);
+    ways[2] = solveB(b).r.freedom;
+    rule(b, BK_RULE_FIX, {0}, {});
+    Solved s = solveB(b);
+    ways[3] = s.r.freedom;
+    bool where = near(b.pts[3], b.pts[1], 1e-9) && near(std::hypot(b.pts[2] - b.pts[0], b.pts[3] - b.pts[1]), 20, 1e-9);
+    check("a line: 4 ways to move, 3 level, 2 its length set, 0 an end held", ways[0] == 4 && ways[1] == 3 && ways[2] == 2 && ways[3] == 0 && s.curves[0] && where,
+          fmt("%.0f %.0f %.0f", ways[0], ways[1], ways[2]) + fmt(" %.0f", ways[3]));
+  }
+  auto rectangle = [](SketchB &b) {
+    b.line(0, 0, 10, 0.2), b.line(10, 0.2, 10.3, 5), b.line(10.3, 5, -0.1, 5.2), b.line(-0.1, 5.2, 0, 0);
+    rule(b, BK_RULE_HORIZONTAL, {}, {0}), rule(b, BK_RULE_VERTICAL, {}, {1}), rule(b, BK_RULE_HORIZONTAL, {}, {2}), rule(b, BK_RULE_VERTICAL, {}, {3});
+  };
+  {
+    SketchB b;
+    rectangle(b);
+    int before = solveB(b).r.freedom;
+    rule(b, BK_RULE_FIX, {0}, {}), rule(b, BK_DIM_LENGTH, {}, {0}, 30), rule(b, BK_DIM_LENGTH, {}, {1}, 12);
+    Solved s = solveB(b);
+    bool all = true;
+    for (unsigned char f : s.points) all = all && f;
+    for (unsigned char f : s.curves) all = all && f;
+    check("a rectangle: 4 ways to move, then held and sized: none, every point and side held", before == 4 && s.status == BK_SOLVE_OK && s.r.freedom == 0 && all &&
+                                                                                             near(b.pts[4] - b.pts[0], 30, 1e-9) && near(b.pts[5] - b.pts[1], 12, 1e-9),
+          fmt("%.0f then %.0f", before, s.r.freedom));
+  }
+  {
+    SketchB b;
+    rectangle(b);
+    rule(b, BK_RULE_PARALLEL, {}, {0, 2}, 0, -1);
+    Solved s = solveB(b);
+    check("a rule the others hold already is said to add nothing", s.status == BK_SOLVE_OK && s.r.dependent == 4 && !s.r.conflicting && s.r.freedom == 4,
+          fmt("dependent %.0f, %.0f ways", s.r.dependent, s.r.freedom));
+  }
+  {
+    SketchB b;
+    b.line(0, 0, 10, 0);
+    rule(b, BK_DIM_LENGTH, {}, {0}, 10), rule(b, BK_DIM_LENGTH, {}, {0}, 20);
+    std::vector<double> was = b.pts;
+    Solved s = solveB(b);
+    check("lengths of 10 and 20 for one line can't hold: the sketch left as it was", s.status == BK_SOLVE_FAILED && s.r.conflicting && s.r.dependent == 1 && b.pts == was,
+          fmt("dependent %.0f", s.r.dependent));
+  }
+  {
+    SketchB b;
+    b.line(0, 0, 10, 0), b.line(20, 0, 20, 10);
+    rule(b, BK_RULE_FIX, {0}, {}), rule(b, BK_RULE_FIX, {1}, {}), rule(b, BK_RULE_PARALLEL, {}, {0, 1});
+    Solved s = solveB(b);
+    check("parallel asked of lines square to each other turns one round", s.status == BK_SOLVE_OK && near(b.pts[5] - b.pts[7], 0, 1e-9), fmt("%.3g", b.pts[5] - b.pts[7]));
+  }
+  {
+    SketchB b;
+    b.line(0, 0, 10, 0), b.line(0, 10, 5, 10);
+    rule(b, BK_RULE_HORIZONTAL, {}, {0});
+    std::vector<double> other(b.pts.begin() + 4, b.pts.end());
+    Solved s = solveB(b, {1}, {15, 3});
+    bool level = near(b.pts[1], b.pts[3], 1e-9), there = near(b.pts[2], 15, 1e-3) && near(b.pts[3], 3, 1e-2);
+    check("dragging an end: it goes where it's dragged, the line stays level, nothing else moves",
+          s.status == BK_SOLVE_OK && level && there && std::vector<double>(b.pts.begin() + 4, b.pts.end()) == other, fmt("%.6f %.6f", b.pts[2], b.pts[3]));
+  }
+  {
+    SketchB b;
+    b.line(0, 0, 10, 0), b.line(0, 0, 10, 8);
+    rule(b, BK_RULE_FIX, {0}, {}), rule(b, BK_RULE_HORIZONTAL, {}, {0}), rule(b, BK_DIM_ANGLE, {}, {0, 1}, 30, 0);
+    Solved s = solveB(b);
+    double a = std::atan2(b.pts[5], b.pts[4]) * 180 / PI;
+    check("an angle of 30°", s.status == BK_SOLVE_OK && near(a, 30, 1e-8), fmt("%.10f", a));
+  }
+  {
+    SketchB b;
+    b.line(-10, 5, 10, 5), b.circle(0, 0, 3), b.circle(3, 1, 1);
+    rule(b, BK_RULE_FIX, {0}, {}), rule(b, BK_RULE_FIX, {1}, {}), rule(b, BK_RULE_FIX, {2}, {}), rule(b, BK_RULE_TANGENT, {}, {0, 1}, 0, -1);
+    rule(b, BK_RULE_CONCENTRIC, {}, {1, 2});
+    Solved s = solveB(b);
+    check("a circle grows to touch a line; another comes round its centre", s.status == BK_SOLVE_OK && near(b.curves[1].radius, 5, 1e-9) && near(b.pts[6], 0, 1e-9) &&
+                                                                              near(b.pts[7], 0, 1e-9),
+          fmt("radius %.9f", b.curves[1].radius));
+  }
+  {
+    SketchB b;
+    b.line(0, -5, 0, 5);
+    int p = b.point(3, 1), q = b.point(-2, 4), m = b.point(1, 3);
+    rule(b, BK_RULE_FIX, {0}, {}), rule(b, BK_RULE_FIX, {1}, {}), rule(b, BK_RULE_FIX, {p}, {}), rule(b, BK_RULE_SYMMETRIC, {p, q}, {0});
+    rule(b, BK_RULE_MIDPOINT, {m}, {0});
+    Solved s = solveB(b);
+    check("a point mirrored in a line; another at the line's middle", s.status == BK_SOLVE_OK && near(b.pts[2 * q], -3, 1e-9) && near(b.pts[2 * q + 1], 1, 1e-9) &&
+                                                                        near(b.pts[2 * m], 0, 1e-9) && near(b.pts[2 * m + 1], 0, 1e-9));
+  }
+  {
+    SketchB b;
+    b.line(0, 0, 10, 0);
+    b.pts[2] = NAN;
+    Solved s = solveB(b);
+    std::string said = bk_last_error();
+    check("a point not a number is refused", s.status == BK_SOLVE_FAILED && said == "sketch: sizes must be numbers", said);
+  }
+  {
+    // Thirty rectangles, each sized and placed from the first's corner: solved quickly, the same twice over.
+    SketchB b;
+    for (int k = 0; k < 30; k++) {
+      double x = 20 * k, w = 10 + k % 3;
+      int base = (int)b.curves.size(), p0 = (int)b.pts.size() / 2;
+      b.line(x, 0, x + w, 0.3), b.line(x + w, 0.3, x + w, 5), b.line(x + w, 5, x + 0.2, 5.1), b.line(x + 0.2, 5.1, x, 0);
+      rule(b, BK_RULE_HORIZONTAL, {}, {base}), rule(b, BK_RULE_VERTICAL, {}, {base + 1}), rule(b, BK_RULE_HORIZONTAL, {}, {base + 2});
+      rule(b, BK_RULE_VERTICAL, {}, {base + 3}), rule(b, BK_DIM_LENGTH, {}, {base}, 12), rule(b, BK_DIM_LENGTH, {}, {base + 1}, 6);
+      if (k) rule(b, BK_DIM_HORIZONTAL, {0, p0}, {}, 20 * k), rule(b, BK_DIM_VERTICAL, {0, p0}, {}, 0);
+      else rule(b, BK_RULE_FIX, {0}, {});
+    }
+    b.fixed.assign(b.pts.size() / 2, 0);
+    SketchB again = b;
+    auto t0 = std::chrono::steady_clock::now();
+    Solved s = solveB(b);
+    double took = ms(t0);
+    solveB(again);
+    check("thirty sized rectangles solved quickly, the same each time", s.status == BK_SOLVE_OK && s.r.freedom == 0 && b.pts == again.pts && (!timed || took < 30),
+          fmt("%.1f ms, %.0f ways left", took, s.r.freedom));
+  }
+}
+
 int main() {
+  // BCAD_ONLY=sketch: sketches and what's made of them alone.
+  if (getenv("BCAD_ONLY") && std::string(getenv("BCAD_ONLY")) == "sketch") {
+    profileModels();
+    sketchRegionChecks();
+    sketchSolids();
+    sketchSolverChecks();
+    printf(failures ? "FAILURES: %d\n" : "ALL OK\n", failures);
+    return failures ? 1 : 0;
+  }
   // BCAD_ONLY=scans: the scan files alone.
   if (getenv("BCAD_ONLY") && std::string(getenv("BCAD_ONLY")) == "scans") {
     scanReaders();

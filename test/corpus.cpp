@@ -11,7 +11,10 @@
 //               rest standard); Q detail damage seed most ; the shape so far as its mesh at that detail (points joined), damaged
 //               (bits: 1 holes, 2 triangles turned round, 4 a triangle soup, 8 triangles twice, 16 cracks a hair wide, 32 loose
 //               bits, 64 itself again overlapping, moved 10 along x) by a sequence from seed, and repaired as a scan
-//               (simplified to at most `most` triangles, 0: kept as it is)
+//               (simplified to at most `most` triangles, 0: kept as it is); K form low high ax ay bx by n curves… m seeds… ;
+//               a sketch's regions stood up (form 0, low to high mm) or turned about the line a → b (form 1, low to high
+//               degrees): its curves 0 x0 y0 x1 y1 (a line) | 1 cx cy sx sy ex ey (an arc) | 2 cx cy r (a circle), points
+//               shared where they're equal; the regions chosen by a point inside each
 //   operations: F r n picks…   V r n picks…   C legA legB corner n picks…   H t n opens… m walls… (each 6 numbers and a
 //               thickness)   X kind pick   (a pick: kind and 6 numbers)
 //   expected:   made VOLUME TOLERANCE | refused | sec AREA TOLERANCE | any
@@ -244,6 +247,46 @@ BKShape *build(const std::string &prog, std::string &why) {
       bk_free(st.back());
       st.back() = s;
       if (!s) return fail(why);
+    } else if (t == "K") {
+      if (!need(8)) return fail("sketch without its numbers");
+      size_t k = 0;
+      auto next = [&]() { return k < v.size() ? v[k++] : NAN; };
+      int form = (int)next();
+      double low = next(), high = next(), ax = next(), ay = next(), bx = next(), by = next();
+      std::vector<double> pts;
+      std::vector<BKCurve> curves;
+      auto point = [&](double x, double y) {
+        for (size_t i = 0; i < pts.size(); i += 2)
+          if (pts[i] == x && pts[i + 1] == y) return (int)i / 2;
+        pts.push_back(x), pts.push_back(y);
+        return (int)pts.size() / 2 - 1;
+      };
+      int n = (int)next();
+      for (int i = 0; i < n && i < 10000 && k < v.size(); i++) {
+        int kind = (int)next();
+        if (kind == BK_CURVE_LINE) {
+          double x0 = next(), y0 = next(), x1 = next(), y1 = next();
+          curves.push_back({kind, {point(x0, y0), point(x1, y1), -1}, 0, 0});
+        } else if (kind == BK_CURVE_ARC) {
+          double cx = next(), cy = next(), sx = next(), sy = next(), ex = next(), ey = next();
+          curves.push_back({kind, {point(cx, cy), point(sx, sy), point(ex, ey)}, 0, 0});
+        } else {
+          double cx = next(), cy = next(), r = next();
+          curves.push_back({BK_CURVE_CIRCLE, {point(cx, cy), -1, -1}, r, 0});
+        }
+      }
+      int axis = -1;
+      if (form == BK_FORM_REVOLVE) axis = (int)curves.size(), curves.push_back({BK_CURVE_LINE, {point(ax, ay), point(bx, by), -1}, 0, BK_CURVE_CONSTRUCTION});
+      int m = (int)next();
+      std::vector<double> seeds;
+      for (int i = 0; i < m && i < 10000 && k < v.size(); i++) seeds.push_back(next()), seeds.push_back(next());
+      m = (int)seeds.size() / 2;
+      std::vector<int> start(m + 1, 0);
+      BKSketch sk{(int)pts.size() / 2, (int)curves.size(), 0, pts.data(), nullptr, curves.data(), nullptr};
+      BKForm f{form, low, high, axis};
+      BKShape *s = bk_sketch_solid(&sk, start.data(), nullptr, seeds.data(), m, &f);
+      if (!s) return fail(bk_last_error());
+      st.push_back(s);
     } else if (t == "R") {
       // The shape so far made ready for sculpting at detail d: remeshed, as a mesh body.
       if (!need(1)) return fail("remesh without its detail");

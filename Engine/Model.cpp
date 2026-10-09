@@ -4,10 +4,12 @@
 
 #include "Engine/Print.hpp"
 #include "Engine/Radial.hpp"
+#include "Engine/Triangulate.hpp"
 
 #include "BcadKernel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
 #include <utility>
@@ -50,6 +52,19 @@ void Elem::at(double t, double &r, double &z) const {
     r = r0 + (r1 - r0) * t, z = z0 + (z1 - z0) * t;
   }
   if (r < 0) r = 0;
+}
+
+void Elem::point(double t, double &x, double &y) const {
+  if (t <= 0) {
+    x = r0, y = z0;
+  } else if (t >= 1) {
+    x = r1, y = z1;
+  } else if (arc) {
+    double a = a0 + (a1 - a0) * t;
+    x = cr + rad * trig::cos(a), y = cz + rad * trig::sin(a);
+  } else {
+    x = r0 + (r1 - r0) * t, y = z0 + (z1 - z0) * t;
+  }
 }
 
 void Elem::normalAt(double t, double &nr, double &nz) const {
@@ -188,6 +203,12 @@ void Solid::transform(const Affine &a) {
 namespace {
 
 double moment(const Elem &e);
+void closeUp(std::vector<Elem> &loop);
+// A sketch's regions stood up or turned (below, with the primitives).
+void buildExtruded(const Model &m, Solid &out, double d);
+void buildRevolved(const Model &m, Solid &out, double d);
+double extrudedSupport(const Model &m, V3 d, V3 &where);
+double revolvedSupport(const Model &m, V3 d, V3 &where);
 
 // Two face numbers for an edge, without the same face twice.
 void sides(Solid::Edge &e, int a, int b) {
@@ -477,6 +498,8 @@ void Model::build(Solid &out, double deflection) const {
   if (kind == Mesh) out = *mesh;
   if (kind == Poly) buildPoly(*this, out);
   if (kind == Turned) buildTurned(*this, out, d);
+  if (kind == Extruded) buildExtruded(*this, out, d);
+  if (kind == Revolved) buildRevolved(*this, out, d);
   if (kind == Radial) {
     // Checked when it was made at the details asked most; should another fail, nothing rather than a broken mesh.
     std::string why;
@@ -508,7 +531,9 @@ double Model::support(V3 d, V3 *at) const {
   double best = -INFINITY;
   V3 where;
   if (kind == Radial) return radialSupport(*radial, d, at, nullptr);
-  if (kind == Poly || kind == Mesh) {
+  if (kind == Extruded || kind == Revolved) {
+    best = kind == Extruded ? extrudedSupport(*this, d, where) : revolvedSupport(*this, d, where);
+  } else if (kind == Poly || kind == Mesh) {
     for (const auto &v : kind == Mesh ? mesh->p : verts)
       if (dot(v, d) > best) best = dot(v, d), where = v;
   } else if (kind == Turned) {
@@ -986,5 +1011,496 @@ std::shared_ptr<Model> sweptModel(double a, double b, double phi, std::vector<El
 }
 
 double profileMoment(const Elem &e) { return moment(e); }
+
+// MARK: - a sketch's regions, stood up or turned
+
+namespace {
+
+// The largest (x, y) · (dx, dy) over a piece in the plane so far, and where.
+void pieceSupport(const Elem &e, double dx, double dy, double &best, double &bx, double &by) {
+  auto take = [&](double x, double y) {
+    if (x * dx + y * dy > best) best = x * dx + y * dy, bx = x, by = y;
+  };
+  take(e.r0, e.z0), take(e.r1, e.z1);
+  if (e.arc && (dx != 0 || dy != 0)) {
+    double a = trig::atan2(dy, dx), lo = std::min(e.a0, e.a1), hi = std::max(e.a0, e.a1);
+    while (a < lo) a += 2 * pi;
+    while (a >= lo + 2 * pi) a -= 2 * pi;
+    if (a <= hi) take(e.cr + e.rad * trig::cos(a), e.cz + e.rad * trig::sin(a));
+  }
+}
+
+double extrudedSupport(const Model &m, V3 d, V3 &where) {
+  double best = -INFINITY, bx = 0, by = 0;
+  for (const auto &loop : m.outline)
+    for (const Elem &e : loop) pieceSupport(e, d.x, d.y, best, bx, by);
+  double z = m.lo * d.z >= m.hi * d.z ? m.lo : m.hi;
+  where = {bx, by, z};
+  return best + z * d.z;
+}
+
+double revolvedSupport(const Model &m, V3 d, V3 &where) {
+  // Every point at radius r reaches r·D·cos(φ − ψ) round the axis: furthest at the same angle φ for all of them (ψ itself
+  // where the turn passes it, otherwise the end nearer it).
+  double D = trig::hypot(d.x, d.y), psi = trig::atan2(d.y, d.x), phi = psi, g = 1;
+  if (m.turn < 2 * pi) {
+    double p = psi < 0 ? psi + 2 * pi : psi;
+    if (p <= m.turn) {
+      phi = p;
+    } else {
+      double c0 = trig::cos(psi), c1 = trig::cos(m.turn - psi);
+      phi = c0 >= c1 ? 0 : m.turn, g = std::max(c0, c1);
+    }
+  }
+  double best = -INFINITY, br = 0, bz = 0;
+  for (const auto &loop : m.outline)
+    for (const Elem &e : loop) pieceSupport(e, D * g, d.z, best, br, bz);
+  where = {br * trig::cos(phi), br * trig::sin(phi), bz};
+  return best;
+}
+
+// A loop's points, each arc in chords (as many as its turn needs at deflection d, times `more`), with the piece each
+// point's side to the next lies on and where each piece starts.
+struct Loop2 {
+  std::vector<double> x, y;
+  std::vector<int> start;
+};
+
+Loop2 loopPoints(const std::vector<Elem> &loop, double d, int more) {
+  Loop2 r;
+  for (const Elem &e : loop) {
+    r.start.push_back((int)r.x.size());
+    r.x.push_back(e.r0), r.y.push_back(e.z0);
+    if (!e.arc) continue;
+    int n = countFor(e.a1 - e.a0, e.rad, d) * more;
+    for (int j = 1; j < n; j++) {
+      double a = e.a0 + (e.a1 - e.a0) * j / n;
+      r.x.push_back(e.cr + e.rad * trig::cos(a)), r.y.push_back(e.cz + e.rad * trig::sin(a));
+    }
+  }
+  return r;
+}
+
+// The inside of a region's loops (their points numbered on from loop to loop) as triangles counter-clockwise, by a
+// triangulation keeping every side; false where sides cross (chords of curves too near each other) or nothing is inside.
+bool regionCap(const std::vector<const Loop2 *> &loops, std::vector<int> &out) {
+  double lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+  size_t total = 0;
+  for (const Loop2 *l : loops) {
+    for (size_t j = 0; j < l->x.size(); j++)
+      lo[0] = std::min(lo[0], l->x[j]), lo[1] = std::min(lo[1], l->y[j]), hi[0] = std::max(hi[0], l->x[j]), hi[1] = std::max(hi[1], l->y[j]);
+    total += l->x.size();
+  }
+  if (total < 3) return false;
+  double w = std::max(hi[0] - lo[0], hi[1] - lo[1]) + 1, cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+  Tri2 tri(cx - 4 * w, cy - 3 * w, cx + 4 * w, cy - 3 * w, cx, cy + 5 * w);
+  std::vector<int> id(total);
+  std::map<int, int> back;
+  size_t k = 0;
+  for (const Loop2 *l : loops)
+    for (size_t j = 0; j < l->x.size(); j++, k++) {
+      id[k] = tri.insert(l->x[j], l->y[j]);
+      back.insert({id[k], (int)k});
+    }
+  k = 0;
+  for (const Loop2 *l : loops) {
+    size_t n = l->x.size();
+    for (size_t j = 0; j < n; j++) {
+      int a = id[k + j], b = id[k + (j + 1) % n];
+      if (a != b && !tri.keep(a, b)) return false;
+    }
+    k += n;
+  }
+  if (!tri.made().empty()) return false;
+  out.clear();
+  for (int q : tri.insideKept()) {
+    auto it = back.find(q);
+    if (it == back.end()) return false;
+    out.push_back(it->second);
+  }
+  return !out.empty();
+}
+
+int regionCount(const Model &m) {
+  int n = 0;
+  for (int g : m.region) n = std::max(n, g + 1);
+  return n;
+}
+
+bool extrudeAt(const Model &m, Solid &out, double d, int more) {
+  size_t nl = m.outline.size();
+  int regions = regionCount(m);
+  std::vector<Loop2> rings(nl);
+  for (size_t l = 0; l < nl; l++) rings[l] = loopPoints(m.outline[l], d, more);
+  // The ends: a flat face each, top and bottom, per region.
+  std::vector<std::array<int, 2>> capFace(regions, {-1, -1});
+  for (int g = 0; g < regions; g++) {
+    std::vector<const Loop2 *> mine;
+    std::vector<V3> pts;
+    for (size_t l = 0; l < nl; l++)
+      if (m.region[l] == g) {
+        mine.push_back(&rings[l]);
+        for (size_t j = 0; j < rings[l].x.size(); j++) pts.push_back({rings[l].x[j], rings[l].y[j], 0});
+      }
+    std::vector<int> tris;
+    if (mine.empty() || !regionCap(mine, tris)) return false;
+    for (int up = 0; up < 2; up++) {
+      double z = up ? m.hi : m.lo;
+      V3 nrm{0, 0, up ? 1.0 : -1.0};
+      int f = (int)out.faces.size();
+      Solid::Face face{nrm, {}, {}};
+      face.geom.kind = FaceGeom::Flat, face.geom.flat = true, face.geom.pn = nrm, face.geom.pd = up ? z : -z;
+      out.faces.push_back(face);
+      capFace[g][up] = f;
+      uint32_t base = (uint32_t)out.p.size();
+      for (V3 q : pts) out.vertex({q.x, q.y, z}, nrm);
+      for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+        uint32_t a = base + tris[t], b = base + tris[t + 1], c = base + tris[t + 2];
+        if (up) out.triangle(a, b, c, f);
+        else out.triangle(a, c, b, f);
+      }
+    }
+  }
+  // The sides: a flat face per straight piece, a cylinder's per arc (what its chords miss worked out).
+  for (size_t l = 0; l < nl; l++) {
+    const auto &loop = m.outline[l];
+    const Loop2 &r = rings[l];
+    int g = m.region[l], np = (int)loop.size(), n = (int)r.x.size();
+    std::vector<int> faceOf(np);
+    for (int k = 0; k < np; k++) {
+      const Elem &e = loop[k];
+      int s = r.start[k], count = (k + 1 < np ? r.start[k + 1] : n) - s + 1;
+      double sign = e.arc && e.a1 < e.a0 ? -1 : 1;
+      // Outward: to the right of the way the loop runs.
+      auto normal = [&](double x, double y) -> V3 {
+        double dx = e.arc ? sign * (x - e.cr) : e.z1 - e.z0, dy = e.arc ? sign * (y - e.cz) : e.r0 - e.r1, l = trig::hypot(dx, dy);
+        return l > 0 ? V3{dx / l, dy / l, 0} : V3{1, 0, 0};
+      };
+      int f = (int)out.faces.size();
+      faceOf[k] = f;
+      Solid::Face face;
+      if (!e.arc) {
+        V3 nrm = normal(0, 0);
+        face.normal = nrm;
+        face.geom.kind = FaceGeom::Flat, face.geom.flat = true, face.geom.pn = nrm, face.geom.pd = nrm.x * e.r0 + nrm.y * e.z0;
+      } else {
+        double am = (e.a0 + e.a1) / 2;
+        face.normal = {sign * trig::cos(am), sign * trig::sin(am), 0};
+        face.geom.kind = FaceGeom::Turned;
+        face.geom.elem = sign > 0 ? Elem::line(e.rad, m.lo, e.rad, m.hi) : Elem::line(e.rad, m.hi, e.rad, m.lo);
+        face.geom.place = Affine::translation({e.cr, e.cz, 0});
+        double a = std::fabs(e.a1 - e.a0) / (count - 1);
+        face.deficit = sign * (m.hi - m.lo) * (count - 1) * e.rad * e.rad / 2 * (a - trig::sin(a));
+      }
+      out.faces.push_back(face);
+      uint32_t base = (uint32_t)out.p.size();
+      for (int j = 0; j < count; j++) {
+        int q = (s + j) % n;
+        V3 nrm = normal(r.x[q], r.y[q]);
+        out.vertex({r.x[q], r.y[q], m.lo}, nrm);
+        out.vertex({r.x[q], r.y[q], m.hi}, nrm);
+      }
+      for (int j = 0; j + 1 < count; j++) {
+        uint32_t aLo = base + 2 * j, aHi = aLo + 1, bLo = aLo + 2, bHi = aLo + 3;
+        out.triangle(aLo, bLo, bHi, f);
+        out.triangle(aLo, bHi, aHi, f);
+      }
+      // Its rims, bottom and top.
+      for (int up = 0; up < 2; up++) {
+        Solid::Edge rim;
+        double z = up ? m.hi : m.lo;
+        for (int j = 0; j < count; j++) rim.pts.push_back({r.x[(s + j) % n], r.y[(s + j) % n], z});
+        sides(rim, f, capFace[g][up]);
+        if (e.arc) {
+          rim.geom.kind = EdgeGeom::Circle, rim.geom.r = e.rad, rim.geom.z = z, rim.geom.place = Affine::translation({e.cr, e.cz, 0});
+        } else {
+          rim.geom.kind = EdgeGeom::Line;
+        }
+        out.edges.push_back(rim);
+      }
+      if (e.arc && std::fabs(e.a1 - e.a0) >= pi - 1e-6)
+        for (double z : {m.lo, m.hi}) out.circles.push_back({{e.cr, e.cz, z}, {0, 0, 1}, e.rad});
+    }
+    // Upright edges where pieces meet (a seam where the loop is one piece), with a corner at each end.
+    for (int k = 0; k < np; k++) {
+      int q = r.start[k];
+      Solid::Edge up;
+      up.pts = {{r.x[q], r.y[q], m.lo}, {r.x[q], r.y[q], m.hi}};
+      up.geom.kind = EdgeGeom::Line;
+      sides(up, faceOf[(k + np - 1) % np], faceOf[k]);
+      out.edges.push_back(up);
+      out.corners.push_back({r.x[q], r.y[q], m.lo});
+      out.corners.push_back({r.x[q], r.y[q], m.hi});
+    }
+  }
+  return true;
+}
+
+void buildExtruded(const Model &m, Solid &out, double d) {
+  // (Where an end's triangulation fails, the arcs' chords of loops very near each other crossed: finer ones are tried.)
+  for (int more = 1; more <= 16; more *= 2) {
+    out = Solid();
+    if (extrudeAt(m, out, d, more)) return;
+  }
+  out = Solid();
+}
+
+// Where a profile piece's mesh rings go, as t along it: evenly within the chord error (times `more` on an arc).
+std::vector<double> ringsOf(const Elem &e, double d, int more) {
+  int n = e.arc ? countFor(e.a1 - e.a0, e.rad, d) * more : 1;
+  std::vector<double> ts;
+  for (int j = 0; j <= n; j++) ts.push_back(j == n ? 1.0 : (double)j / n);
+  return ts;
+}
+
+bool revolveAt(const Model &m, Solid &out, double d, int more) {
+  bool whole = m.turn >= 2 * pi;
+  double T = whole ? 2 * pi : m.turn, reach = 0;
+  for (const auto &loop : m.outline)
+    for (const Elem &e : loop) reach = std::max({reach, e.r0, e.r1, e.arc ? e.cr + e.rad : 0.0});
+  // One count round the axis for every face, so the faces meet point for point.
+  int count = std::max(whole ? 3 : 1, countFor(T, reach, d)), cols = whole ? count : count + 1;
+  std::vector<double> cs(count + 1), sn(count + 1), cm(count), sm(count);
+  for (int j = 0; j <= count; j++) {
+    bool start = j == 0 || (whole && j == count);
+    cs[j] = start ? 1 : trig::cos(T * j / count), sn[j] = start ? 0 : trig::sin(T * j / count);
+  }
+  for (int j = 0; j < count; j++) cm[j] = trig::cos(T * (j + 0.5) / count), sm[j] = trig::sin(T * (j + 0.5) / count);
+  // A point of the profile at step j round (on the axis, one point whatever the step).
+  auto at = [&](double r, double z, int j) { return r == 0 ? V3{0, 0, z} : V3{r * cs[j], r * sn[j], z}; };
+  size_t nl = m.outline.size();
+  std::vector<std::vector<std::vector<double>>> steps(nl);
+  for (size_t l = 0; l < nl; l++)
+    for (const Elem &e : m.outline[l]) steps[l].push_back(ringsOf(e, d, more));
+  // A part turn's flat ends: a face each per region, at angle 0 and at the turn.
+  int regions = whole ? 0 : regionCount(m);
+  std::vector<std::array<int, 2>> capFace(regions, {-1, -1});
+  for (int g = 0; g < regions; g++) {
+    std::vector<Loop2> mine;
+    for (size_t l = 0; l < nl; l++) {
+      if (m.region[l] != g) continue;
+      Loop2 q;
+      for (size_t k = 0; k < m.outline[l].size(); k++) {
+        const auto &ts = steps[l][k];
+        for (size_t i = 0; i + 1 < ts.size(); i++) {
+          double r, z;
+          m.outline[l][k].at(ts[i], r, z);
+          q.x.push_back(r), q.y.push_back(z);
+        }
+      }
+      mine.push_back(std::move(q));
+    }
+    std::vector<const Loop2 *> refs;
+    std::vector<V3> pts;
+    for (const Loop2 &q : mine) {
+      refs.push_back(&q);
+      for (size_t j = 0; j < q.x.size(); j++) pts.push_back({q.x[j], 0, q.y[j]});
+    }
+    std::vector<int> tris;
+    if (refs.empty() || !regionCap(refs, tris)) return false;
+    for (int end = 0; end < 2; end++) {
+      int j = end ? count : 0;
+      V3 nrm = end ? V3{-sn[count], cs[count], 0} : V3{0, -1, 0};
+      int f = (int)out.faces.size();
+      Solid::Face face{nrm, {}, {}};
+      face.geom.kind = FaceGeom::Flat, face.geom.flat = true, face.geom.pn = nrm, face.geom.pd = 0;
+      out.faces.push_back(face);
+      capFace[g][end] = f;
+      uint32_t base = (uint32_t)out.p.size();
+      for (V3 q : pts) out.vertex(at(q.x, q.z, j), nrm);
+      for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+        uint32_t a = base + tris[t], b = base + tris[t + 1], c = base + tris[t + 2];
+        if (end) out.triangle(a, c, b, f);
+        else out.triangle(a, b, c, f);
+      }
+    }
+  }
+  Affine far;
+  far.m[0] = cs[count], far.m[1] = -sn[count], far.m[4] = sn[count], far.m[5] = cs[count];
+  for (size_t l = 0; l < nl; l++) {
+    const auto &loop = m.outline[l];
+    const size_t ne = loop.size();
+    int g = m.region[l];
+    std::vector<int> faceOf(ne, -1);
+    for (size_t k = 0; k < ne; k++) {
+      const Elem &e = loop[k];
+      const auto &ts = steps[l][k];
+      int pieces = (int)ts.size() - 1;
+      if (e.onAxis()) {
+        // Along the axis, where the two flat ends meet.
+        if (!whole) {
+          Solid::Edge axis;
+          axis.pts = {{0, 0, e.z0}, {0, 0, e.z1}};
+          axis.geom.kind = EdgeGeom::Line;
+          sides(axis, capFace[g][0], capFace[g][1]);
+          out.edges.push_back(axis);
+        }
+        continue;
+      }
+      int f = (int)out.faces.size();
+      faceOf[k] = f;
+      double nr, nz;
+      e.normalAt(0.5, nr, nz);
+      Solid::Face face{whole ? V3{-nr, 0, nz} : V3{nr * trig::cos(T / 2), nr * trig::sin(T / 2), nz}, {}, {}};
+      face.geom.kind = FaceGeom::Turned, face.geom.elem = e;
+      if (e.flat()) face.geom.flat = true, face.geom.pn = {0, 0, nz > 0 ? 1.0 : -1.0}, face.geom.pd = nz > 0 ? e.z0 : -e.z0;
+      // What the mesh misses: the exact volume this piece turns round, less the polygon-sided one its chords turn round.
+      double meshed = 0;
+      for (int i = 0; i < pieces; i++) {
+        double r0, z0, r1, z1;
+        e.at(ts[i], r0, z0);
+        e.at(ts[i + 1], r1, z1);
+        meshed += moment(Elem::line(r0, z0, r1, z1));
+      }
+      face.deficit = T * moment(e) - meshed * count * trig::sin(T / count);
+      out.faces.push_back(face);
+      // Each ring's first vertex (a pole has one, or one per column where the surface comes to a point at an angle).
+      std::vector<uint32_t> ring(pieces + 1);
+      std::vector<char> pole(pieces + 1), fan(pieces + 1);
+      for (int i = 0; i <= pieces; i++) {
+        double r, z;
+        e.at(ts[i], r, z);
+        e.normalAt(ts[i], nr, nz);
+        ring[i] = (uint32_t)out.p.size();
+        if (r == 0) {
+          pole[i] = 1;
+          if (std::fabs(nr) < 1e-12) {
+            out.vertex({0, 0, z}, {0, 0, nz > 0 ? 1.0 : -1.0});
+          } else {
+            fan[i] = 1;
+            for (int j = 0; j < count; j++) out.vertex({0, 0, z}, {nr * cm[j], nr * sm[j], nz});
+          }
+        } else {
+          for (int j = 0; j < cols; j++) out.vertex({r * cs[j], r * sn[j], z}, {nr * cs[j], nr * sn[j], nz});
+        }
+      }
+      for (int i = 0; i < pieces; i++) {
+        if (pole[i] && pole[i + 1]) continue;
+        for (int j = 0; j < count; j++) {
+          int jn = whole ? (j + 1) % count : j + 1;
+          uint32_t A = ring[i] + (pole[i] ? (fan[i] ? j : 0) : j), B = ring[i] + (pole[i] ? (fan[i] ? j : 0) : jn);
+          uint32_t C = ring[i + 1] + (pole[i + 1] ? (fan[i + 1] ? j : 0) : jn), D = ring[i + 1] + (pole[i + 1] ? (fan[i + 1] ? j : 0) : j);
+          if (pole[i]) {
+            out.triangle(A, C, D, f);
+          } else if (pole[i + 1]) {
+            out.triangle(A, B, C, f);
+          } else {
+            out.triangle(A, B, C, f);
+            out.triangle(A, C, D, f);
+          }
+        }
+      }
+      if (whole) {
+        // The seam, where the turned face meets itself (none on a flat face).
+        if (!e.flat()) {
+          Solid::Edge seam;
+          for (int i = 0; i <= pieces; i++) {
+            double r, z;
+            e.at(ts[i], r, z);
+            seam.pts.push_back(at(r, z, 0));
+          }
+          seam.f0 = f;
+          seam.geom.kind = EdgeGeom::Profile, seam.geom.elem = e;
+          out.edges.push_back(seam);
+        }
+      } else {
+        // Where it meets each flat end: the piece itself in the end's plane.
+        for (int end = 0; end < 2; end++) {
+          Solid::Edge side;
+          for (int i = 0; i <= pieces; i++) {
+            double r, z;
+            e.at(ts[i], r, z);
+            side.pts.push_back(at(r, z, end ? count : 0));
+          }
+          sides(side, f, capFace[g][end]);
+          side.geom.kind = EdgeGeom::Profile, side.geom.elem = e;
+          if (end) side.geom.place = far;
+          out.edges.push_back(side);
+        }
+      }
+      if (e.arc && std::fabs(e.a1 - e.a0) >= pi - 1e-6) {
+        out.circles.push_back({{e.cr, 0, e.cz}, {0, -1, 0}, e.rad});
+        if (!whole) out.circles.push_back({at(e.cr, e.cz, count), {-sn[count], cs[count], 0}, e.rad});
+      }
+    }
+    // Where pieces meet: a circle (or an arc of one) off the axis, a point on it (with a corner where the surface comes to
+    // a point).
+    for (size_t k = 0; k < ne; k++) {
+      size_t next = (k + 1) % ne;
+      const Elem &e = loop[k];
+      double r = e.r1, z = e.z1;
+      if (r > 0) {
+        Solid::Edge c;
+        c.pts.reserve(count + 1);
+        for (int j = 0; j <= count; j++) c.pts.push_back(at(r, z, whole ? j % count : j));
+        sides(c, faceOf[k], faceOf[next]);
+        c.geom.kind = EdgeGeom::Circle, c.geom.r = r, c.geom.z = z;
+        out.edges.push_back(c);
+        if (whole || T >= pi - 1e-6) out.circles.push_back({{0, 0, z}, {0, 0, 1}, r});
+        out.corners.push_back(at(r, z, 0));
+        if (!whole) out.corners.push_back(at(r, z, count));
+      } else {
+        for (size_t q : {k, next}) {
+          const Elem &x = loop[q];
+          if (x.onAxis() || x.flat()) continue;
+          Solid::Edge point;
+          point.f0 = faceOf[q];
+          out.edges.push_back(point);
+          out.corners.push_back({0, 0, z});
+          break;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+void buildRevolved(const Model &m, Solid &out, double d) {
+  for (int more = 1; more <= 16; more *= 2) {
+    out = Solid();
+    if (revolveAt(m, out, d, more)) return;
+  }
+  out = Solid();
+}
+
+}  // namespace
+
+double pieceArea(const Elem &e) {
+  double a = (e.r0 * e.z1 - e.r1 * e.z0) / 2;
+  if (e.arc) {
+    double t = e.a1 - e.a0;
+    a += e.rad * e.rad / 2 * (t - trig::sin(t));
+  }
+  return a;
+}
+
+std::shared_ptr<Model> extrudedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double lo, double hi) {
+  auto m = std::make_shared<Model>();
+  m->kind = Model::Extruded;
+  if (region.size() != loops.size()) region.assign(loops.size(), 0);
+  double v = 0;
+  for (auto &loop : loops) {
+    closeUp(loop);
+    for (const Elem &e : loop) v += pieceArea(e);
+  }
+  m->outline = std::move(loops), m->region = std::move(region), m->lo = lo, m->hi = hi;
+  m->volume = std::fabs(v) * (hi - lo);
+  return m;
+}
+
+std::shared_ptr<Model> revolvedModel(std::vector<std::vector<Elem>> loops, std::vector<int> region, double turn) {
+  auto m = std::make_shared<Model>();
+  m->kind = Model::Revolved;
+  if (region.size() != loops.size()) region.assign(loops.size(), 0);
+  double v = 0;
+  for (auto &loop : loops) {
+    closeUp(loop);
+    for (const Elem &e : loop) v += moment(e);
+  }
+  m->outline = std::move(loops), m->region = std::move(region);
+  m->turn = turn >= 2 * pi - 1e-12 ? 2 * pi : turn;
+  m->volume = std::fabs(v) * m->turn;
+  return m;
+}
 
 }  // namespace bce

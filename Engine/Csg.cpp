@@ -954,8 +954,9 @@ bool placedBounds(const Shape &s, V3 &lo, V3 &hi) {
 }
 
 int pieceCount(const Shape &s) {
-  // (A mesh body may be in pieces.)
-  if (s.node->kind == Node::Prim && s.node->model->kind != Model::Mesh) return 1;
+  // (A mesh body may be in pieces, and a sketch's regions stood up or turned.)
+  if (s.node->kind == Node::Prim && s.node->model->kind != Model::Mesh && s.node->model->kind != Model::Extruded && s.node->model->kind != Model::Revolved)
+    return 1;
   double grow = s.place.stretch(), d = grow > 0 ? 0.05 / grow : 0.05;
   {
     std::lock_guard<std::mutex> hold(s.node->lock);

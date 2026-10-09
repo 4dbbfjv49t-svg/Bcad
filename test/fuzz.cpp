@@ -768,12 +768,203 @@ static void scanFiles(int iters) {
   }
 }
 
+// MARK: sketches
+// Random sketches at every scale (points repeated, on a grid so curves overlap and touch, numbers not numbers, indices out
+// of range): their regions found without fault (each one's seed inside it, its triangles covering it, the same each
+// time), chosen regions stood up or turned (refused saying why, or made sound with the volume they should have), and
+// random rules made to hold (or the sketch left as it was).
+static int sketchMade = 0, sketchRefused = 0, solved = 0, unsolved = 0;
+static std::map<std::string, int> sketchWhy;  // what solids were refused for, and how often
+static double wild(double scale) {
+  switch (rnd() % 14) {
+  case 0: return NAN;
+  case 1: return INFINITY;
+  case 2: return 1e300;
+  case 3: return -1e5 - 1;
+  case 4: return 0;
+  case 5: return 1e-12;
+  default: return (uni() - 0.5) * scale;
+  }
+}
+static void sketchRun(int k) {
+  static const double scales[] = {1e-3, 1, 1, 50, 1e4};
+  double scale = pick(scales);
+  bool grid = rnd() % 2, junk = rnd() % 8 == 0;
+  int np = 2 + (int)(rnd() % 30);
+  std::vector<double> pts;
+  for (int i = 0; i < np; i++) {
+    if (i && rnd() % 6 == 0) {
+      int j = (int)(rnd() % i);
+      pts.push_back(pts[2 * j]), pts.push_back(pts[2 * j + 1]);
+      continue;
+    }
+    for (int c = 0; c < 2; c++) {
+      double v = junk && rnd() % 10 == 0 ? wild(scale) : (uni() - 0.5) * scale;
+      if (grid) v = std::round(v / scale * 8) * scale / 8;
+      pts.push_back(v);
+    }
+  }
+  std::vector<BKCurve> curves;
+  int nc = (int)(rnd() % 30);
+  for (int c = 0; c < nc; c++) {
+    BKCurve cv{(int)(rnd() % 3), {(int)(rnd() % np), (int)(rnd() % np), (int)(rnd() % np)}, uni() * scale / 2, rnd() % 10 == 0 ? BK_CURVE_CONSTRUCTION : 0};
+    if (grid && rnd() % 2) cv.radius = std::round(cv.radius / scale * 8) * scale / 8;
+    if (junk && rnd() % 8 == 0) cv.p[rnd() % 3] = (int)(rnd() % 3) - 1 + (int)(rnd() % 2) * np;
+    if (junk && rnd() % 12 == 0) cv.kind = 7;
+    if (junk && rnd() % 12 == 0) cv.radius = wild(scale);
+    curves.push_back(cv);
+  }
+  std::string what = fmt("sketch %.0f: %.0f points, %.0f curves", k, np, nc) + fmt(" at %g", scale);
+  if (getenv("BCAD_FUZZ_DUMP") && atoi(getenv("BCAD_FUZZ_DUMP")) == k) {
+    printf("points");
+    for (double x : pts) printf(" %.17g", x);
+    printf("\ncurves");
+    for (const auto &c : curves) printf(" %d %d %d %d %.17g %d", c.kind, c.p[0], c.p[1], c.p[2], c.radius, c.flags);
+    printf("\n");
+  }
+  BKSketch sk{np, nc, 0, pts.data(), nullptr, curves.data(), nullptr};
+  static const double deflections[] = {0.05, 0.001, 1, 0, NAN};
+  double d = pick(deflections);
+  doing(what + ": regions", 60);
+  BKRegions *r = bk_sketch_regions(&sk, d);
+  if (!r) {
+    if (!*bk_last_error()) fail(what + ": regions refused without saying why");
+    return;
+  }
+  BKRegions *again = bk_sketch_regions(&sk, d);
+  if (!again || again->regionCount != r->regionCount || memcmp(again->area, r->area, sizeof(double) * r->regionCount) ||
+      memcmp(again->seed, r->seed, 2 * sizeof(double) * r->regionCount))
+    fail(what + ": regions not the same twice");
+  bk_sketch_regions_free(again);
+  int n = r->regionCount;
+  for (int g = 0; g < n; g++) {
+    // Its triangles cover its outline's polygon (less its holes') exactly.
+    double covered = 0, polygon = 0;
+    for (int t = r->triangleStart[g]; t < r->triangleStart[g + 1]; t++) {
+      const double *q = r->triangles + 6 * t;
+      covered += ((q[2] - q[0]) * (q[5] - q[1]) - (q[4] - q[0]) * (q[3] - q[1])) / 2;
+    }
+    for (int l = r->loopStart[g]; l < r->loopStart[g + 1]; l++)
+      for (int i = r->pointStart[l], to = r->pointStart[l + 1]; i < to; i++) {
+        int j = i + 1 < to ? i + 1 : r->pointStart[l];
+        polygon += (r->points[2 * i] * r->points[2 * j + 1] - r->points[2 * j] * r->points[2 * i + 1]) / 2;
+      }
+    if (!(r->area[g] > 0) || !std::isfinite(r->seed[2 * g]) || !std::isfinite(r->seed[2 * g + 1]))
+      fail(what + fmt(": region %.0f of area %g", g, r->area[g]));
+    else if (r->triangleStart[g + 1] > r->triangleStart[g] && !(std::fabs(covered - polygon) <= 1e-6 * std::fabs(polygon) + 1e-12 * scale * scale))
+      fail(what + fmt(": region %.0f's polygon of area %g covered by %g", g, polygon, covered));
+  }
+  // Each one found again by its seed alone.
+  std::vector<int> none(n + 1, 0), found(n, -2);
+  if (n && (!bk_sketch_match(&sk, none.data(), nullptr, r->seed, n, found.data()))) fail(what + ": regions not matched");
+  for (int g = 0; g < n; g++)
+    if (found[g] != g) fail(what + fmt(": region %.0f's seed found region %.0f", g, found[g]));
+  // Solids of chosen regions.
+  for (int tries = 0; tries < 3 && n; tries++) {
+    int m = 1 + (int)(rnd() % std::min(n, 3));
+    std::vector<int> start{0}, sides;
+    std::vector<double> seeds;
+    for (int j = 0; j < m; j++) {
+      int g = (int)(rnd() % n);
+      if (rnd() % 2) sides.insert(sides.end(), r->sides + r->sideStart[g], r->sides + r->sideStart[g + 1]);
+      start.push_back((int)sides.size());
+      seeds.push_back(r->seed[2 * g]), seeds.push_back(r->seed[2 * g + 1]);
+    }
+    BKForm f{(int)(rnd() % 2), 0, 0, -1};
+    if (f.kind == BK_FORM_EXTRUDE) {
+      f.low = (uni() - 0.5) * scale, f.high = f.low + uni() * scale;
+      if (junk && rnd() % 4 == 0) f.high = wild(scale);
+    } else {
+      f.low = (uni() - 0.5) * 90, f.high = f.low + (rnd() % 3 ? uni() * 360 : 360);
+      // An axis: one of the sketch's curves, or (half the time) a line of its own to the left of everything.
+      f.axis = nc ? (int)(rnd() % nc) : -1;
+      if (rnd() % 2 && !junk) {
+        double left = INFINITY;
+        for (size_t i = 0; i < pts.size(); i += 2) left = std::min(left, pts[i]);
+        for (const auto &c : curves)
+          if (c.kind == BK_CURVE_CIRCLE && c.p[0] >= 0 && c.p[0] < np) left = std::min(left, pts[2 * c.p[0]] - std::fabs(c.radius));
+        if (std::isfinite(left)) {
+          int a = (int)pts.size() / 2;
+          pts.push_back(left - 0.1 * scale), pts.push_back(0), pts.push_back(left - 0.1 * scale), pts.push_back(scale);
+          // (Arcs reach out past their points: the axis a whole sketch's width further off.)
+          pts[2 * a] = pts[2 * a + 2] = left - 1.1 * scale;
+          curves.push_back({BK_CURVE_LINE, {a, a + 1, -1}, 0, BK_CURVE_CONSTRUCTION});
+          sk = {(int)pts.size() / 2, (int)curves.size(), 0, pts.data(), nullptr, curves.data(), nullptr};
+          f.axis = (int)curves.size() - 1;
+        }
+      }
+      if (junk && rnd() % 4 == 0) f.high = wild(400);
+    }
+    doing(what + fmt(": solid of %.0f regions, form %.0f", m, f.kind) + fmt(" %g to %g", f.low, f.high), 120);
+    if (getenv("BCAD_FUZZ_DUMP") && atoi(getenv("BCAD_FUZZ_DUMP")) == k) {
+      printf("solid %d %.17g %.17g %d seeds", f.kind, f.low, f.high, f.axis);
+      for (double x : seeds) printf(" %.17g", x);
+      printf("\n");
+    }
+    BKShape *s = bk_sketch_solid(&sk, start.data(), sides.data(), seeds.data(), m, &f);
+    if (!s) {
+      sketchRefused++, sketchWhy[bk_last_error()]++;
+      if (!*bk_last_error()) fail(what + ": solid refused without saying why");
+      continue;
+    }
+    std::string why;
+    // Its mesh within its chord error of the exact shape all over: the volumes apart by no more than its area times that.
+    double chord = std::max(1e-4 * scale, 0.001);
+    BKMesh *mesh = bk_mesh(s, chord);
+    double v = 0, area = 0;
+    for (int t = 0; mesh && t < mesh->triangleCount; t++) {
+      const float *a = mesh->positions + 3 * mesh->indices[3 * t], *b = mesh->positions + 3 * mesh->indices[3 * t + 1], *c = mesh->positions + 3 * mesh->indices[3 * t + 2];
+      v += ((double)a[0] * ((double)b[1] * c[2] - (double)b[2] * c[1]) - (double)a[1] * ((double)b[0] * c[2] - (double)b[2] * c[0]) +
+            (double)a[2] * ((double)b[0] * c[1] - (double)b[1] * c[0])) / 6;
+      double u[3] = {(double)b[0] - a[0], (double)b[1] - a[1], (double)b[2] - a[2]}, w[3] = {(double)c[0] - a[0], (double)c[1] - a[1], (double)c[2] - a[2]};
+      area += std::sqrt(std::pow(u[1] * w[2] - u[2] * w[1], 2) + std::pow(u[2] * w[0] - u[0] * w[2], 2) + std::pow(u[0] * w[1] - u[1] * w[0], 2)) / 2;
+    }
+    if (!sound(s, why)) fail(what + ": solid made but not sound: " + why);
+    else if (!(mesh && std::fabs(v - mesh->volume) <= 1.5 * area * chord + 1e-6 * mesh->volume + 1e-9 * scale * scale * scale))
+      fail(what + fmt(": solid of volume %g, its mesh %g", mesh ? mesh->volume : -1, v) + fmt(" (area %g)", area));
+    else sketchMade++;
+    bk_mesh_free(mesh);
+    bk_free(s);
+  }
+  bk_sketch_regions_free(r);
+  // Rules made to hold.
+  std::vector<BKRule> rules;
+  int nr = (int)(rnd() % 12);
+  for (int j = 0; j < nr; j++) {
+    BKRule rl{(int)(rnd() % (BK_DIM_ANGLE + 1)), {(int)(rnd() % np), (int)(rnd() % np), -1}, {nc ? (int)(rnd() % nc) : -1, nc ? (int)(rnd() % nc) : -1}, uni() * scale,
+              rnd() % 2 ? 1 : -1};
+    if (rl.kind == BK_DIM_ANGLE) rl.value = uni() * 180, rl.side = (int)(rnd() % 4);
+    if (junk && rnd() % 6 == 0) rl.value = wild(scale);
+    rules.push_back(rl);
+  }
+  sk.ruleCount = nr, sk.rules = rules.data();
+  std::vector<double> before = pts;
+  std::vector<int> drag;
+  std::vector<double> to;
+  if (rnd() % 3 == 0) drag.push_back((int)(rnd() % np)), to.push_back((uni() - 0.5) * scale), to.push_back((uni() - 0.5) * scale);
+  doing(what + fmt(": %.0f rules, %.0f dragged", nr, drag.size()), 60);
+  BKSolveReport rep{};
+  int st = bk_sketch_solve(&sk, (int)drag.size(), drag.data(), to.data(), &rep);
+  if (st == BK_SOLVE_OK) {
+    solved++;
+    double extent = 1;
+    for (double x : pts) extent = std::max(extent, std::fabs(x));
+    for (double x : pts)
+      if (!std::isfinite(x)) fail(what + ": solved to a point not a number");
+    if (!(rep.residual <= 1e-9 * extent)) fail(what + fmt(": solved, but a rule off by %g", rep.residual));
+  } else {
+    unsolved++;
+    if (!*bk_last_error()) fail(what + ": not solved, without saying why");
+    if (memcmp(before.data(), pts.data(), sizeof(double) * pts.size())) fail(what + ": not solved, yet moved");
+  }
+}
+
 int main() {
   signal(SIGALRM, watchdog);
   int iters = getenv("BCAD_FUZZ_ITERS") ? std::max(1, atoi(getenv("BCAD_FUZZ_ITERS"))) : 1;
   if (getenv("BCAD_FUZZ_SEED")) seed ^= strtoull(getenv("BCAD_FUZZ_SEED"), nullptr, 10) * 0x2545f4914f6cdd1dull;
   printf("fuzz: %d× (seed %llu)\n", iters, (unsigned long long)seed);
-  // BCAD_FUZZ_ONLY: sculpting, figures, extremes, api or scans alone.
+  // BCAD_FUZZ_ONLY: sculpting, figures, extremes, api, scans or sketch alone.
   std::string only = getenv("BCAD_FUZZ_ONLY") ? getenv("BCAD_FUZZ_ONLY") : "";
 
   // Sculpting.
@@ -1061,6 +1252,16 @@ int main() {
     check("meshes with holes, turned round, twice over, folded, with loose bits, as soups, overlapping and with junk: repaired "
           "into sound bodies, or refused saying why; the same every time",
           failures == before, fmt("%.0f repaired, %.0f refused", repaired, repairRefused));
+  }
+  // Sketches.
+  if (only.empty() || only == "sketch") {
+    printf("— sketch\n");
+    int before = failures;
+    for (int k = 0; k < 120 * iters; k++) sketchRun(k);
+    check("random sketches: regions found, each seed inside its region, the same each time; solids of them refused saying why or "
+          "made sound; rules made to hold, or the sketch left as it was",
+          failures == before, fmt("%.0f solids made, %.0f refused", sketchMade, sketchRefused) + fmt(", %.0f solved, %.0f not", solved, unsolved));
+    for (const auto &[why, n] : sketchWhy) printf("    %5d × %s\n", n, why.c_str());
   }
   alarm(0);
   printf(failures ? "%d FAILED\n" : "ALL OK\n", failures);

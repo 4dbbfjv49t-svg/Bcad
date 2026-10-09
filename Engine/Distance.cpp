@@ -325,7 +325,9 @@ bool gather(const End &e, Set &s, std::string &why) {
     if (s.v.empty()) break;
     if (exact) {
       if (s.exact != Set::Mesh) s.toLocal = s.toWorld.inverse();
-      if (placed.node->kind != Node::Prim) s.trim = 2 * d + 1e-9 * (1 + diag);
+      // (A sketch's arcs and part turns are only part of their circles too.)
+      int kind = placed.node->kind == Node::Prim ? placed.node->model->kind : -1;
+      if (kind < 0 || kind == Model::Extruded || kind == Model::Revolved) s.trim = 2 * d + 1e-9 * (1 + diag);
       return true;
     }
     if (pass == 1) return true;

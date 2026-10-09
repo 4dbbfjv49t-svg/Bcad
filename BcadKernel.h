@@ -325,6 +325,103 @@ typedef struct {
 BKSculptMesh *bk_scan_repair(const float *positions, int vertexCount, const uint32_t *indices, int triangleCount, const BKScanOptions *options,
                              BKScanReport *report);
 
+// MARK: sketches
+// A sketch: points in a plane (x y each, mm), curves through them — a line from p[0] to p[1], an arc round centre p[0]
+// counter-clockwise from p[1] to p[2] (its radius |p[1] − p[0]|), a circle round p[0] of `radius` — and rules on them:
+// constraints and dimensions (BK_RULE_*, BK_DIM_*: the points p and curves c each uses, -1 where unused; `value` in mm or
+// degrees; `side` ±1 for which of two ways it holds, as found when it was made). Construction curves bound no region;
+// reference curves (projected from a face) are fixed where they are. Points marked fixed don't move.
+enum { BK_CURVE_LINE = 0, BK_CURVE_ARC = 1, BK_CURVE_CIRCLE = 2 };
+enum { BK_CURVE_CONSTRUCTION = 1, BK_CURVE_REFERENCE = 2 };
+typedef struct {
+  int kind;
+  int p[3];
+  double radius;
+  int flags;
+} BKCurve;
+enum {
+  BK_RULE_COINCIDENT = 0,    // p0 p1
+  BK_RULE_ON = 1,            // p0 on curve c0 (its line, circle)
+  BK_RULE_HORIZONTAL = 2,    // line c0, or p0 p1
+  BK_RULE_VERTICAL = 3,      // line c0, or p0 p1
+  BK_RULE_PARALLEL = 4,      // lines c0 c1
+  BK_RULE_PERPENDICULAR = 5, // lines c0 c1
+  BK_RULE_TANGENT = 6,       // c0 c1 (a line and an arc or circle, or two arcs or circles)
+  BK_RULE_EQUAL = 7,         // c0 c1 (two lines' lengths, or two arcs' or circles' radii)
+  BK_RULE_CONCENTRIC = 8,    // arcs or circles c0 c1
+  BK_RULE_MIDPOINT = 9,      // p0 at the middle of line c0
+  BK_RULE_COLLINEAR = 10,    // lines c0 c1
+  BK_RULE_SYMMETRIC = 11,    // p0 p1 mirrored in line c0
+  BK_RULE_FIX = 12,          // p0 held where it is
+  BK_DIM_DISTANCE = 13,      // p0 p1, straight
+  BK_DIM_HORIZONTAL = 14,    // p0 p1, along x
+  BK_DIM_VERTICAL = 15,      // p0 p1, along y
+  BK_DIM_POINT_LINE = 16,    // p0 to line c0
+  BK_DIM_LINES = 17,         // line c1's middle to line c0 (parallel lines apart)
+  BK_DIM_LENGTH = 18,        // line c0
+  BK_DIM_RADIUS = 19,        // arc or circle c0
+  BK_DIM_DIAMETER = 20,      // arc or circle c0
+  BK_DIM_ANGLE = 21          // lines c0 c1 (degrees)
+};
+typedef struct {
+  int kind;
+  int p[3];
+  int c[2];
+  double value;
+  int side;
+} BKRule;
+typedef struct {
+  int pointCount, curveCount, ruleCount;
+  double *points;               // x y each (the solver moves them)
+  const unsigned char *fixed;   // per point, may be NULL
+  BKCurve *curves;              // (circles' radii solved too)
+  const BKRule *rules;
+} BKSketch;
+
+// The rules made to hold, moving the points (and circles' radii) as little as they can — the points `drag` names towards
+// `targets` (x y each) first, as a hand dragging them. BK_SOLVE_OK with the sketch moved; BK_SOLVE_FAILED with it left as
+// it was when the rules can't all hold (or the sketch isn't one: bk_last_error says why). The report: how many ways the
+// sketch can still move (`freedom`); the first rule that holds nothing the others don't (`dependent`, -1 none) —
+// `conflicting` when it can't hold with them; the largest any rule is off by; and, in arrays of the caller's (may be
+// NULL), whether each point and curve is held where it is.
+enum { BK_SOLVE_OK = 0, BK_SOLVE_FAILED = 1 };
+typedef struct {
+  int status, freedom, dependent, conflicting;
+  double residual;
+  unsigned char *pointFixed, *curveFixed;
+} BKSolveReport;
+int bk_sketch_solve(BKSketch *s, int dragCount, const int *drag, const double *targets, BKSolveReport *report);
+
+// The regions a sketch's curves bound (construction curves left out): each one's area, a point inside it (`seed`), its
+// sides (sorted: curve × 2, + 1 where it lies to the right of the curve's way — a line's p0 → p1, an arc's or circle's
+// counter-clockwise), its outline then holes as closed polylines (first point not repeated) and triangles to show it.
+typedef struct {
+  int regionCount;
+  double *area, *seed;            // per region; x y per region
+  int *sideStart, *sides;         // regionCount + 1 offsets into sides
+  int *loopStart, *pointStart;    // regionCount + 1 offsets into loops; loops + 1 offsets into points
+  double *points;                 // x y each
+  int *triangleStart;             // regionCount + 1 offsets (in triangles)
+  double *triangles;              // x y × 3 each
+} BKRegions;
+BKRegions *bk_sketch_regions(const BKSketch *s, double deflection);
+void bk_sketch_regions_free(BKRegions *r);
+// Regions chosen earlier (each by its sides and seed: sideStart refCount + 1 offsets into sides, seeds x y each) found
+// again in the sketch as it is now: regionOut[k] is its region's number now, or -1 where it's gone. 0 when the sketch
+// isn't one (bk_last_error says why).
+int bk_sketch_match(const BKSketch *s, const int *sideStart, const int *sides, const double *seeds, int refCount, int *regionOut);
+
+// What's made of chosen regions: stood up from `low` to `high` mm along the sketch's +z, or turned about line curve
+// `axis` from `low` to `high` degrees (the right-hand way round the line's p0 → p1).
+enum { BK_FORM_EXTRUDE = 0, BK_FORM_REVOLVE = 1 };
+typedef struct {
+  int kind;
+  double low, high;
+  int axis;
+} BKForm;
+// The solid, in the sketch's own coordinates (not centred). NULL: bk_last_error "sketch: …".
+BKShape *bk_sketch_solid(const BKSketch *s, const int *sideStart, const int *sides, const double *seeds, int refCount, const BKForm *form);
+
 const char *bk_last_error(void);
 
 #ifdef __cplusplus
